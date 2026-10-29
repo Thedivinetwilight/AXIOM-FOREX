@@ -1,0 +1,97 @@
+{
+  "format": "AXIOM_FOREX_STRESS_SCENARIOS",
+  "schema_version": "1.0.0",
+  "label": "SYNTHETIC_TEST_SCENARIOS_NOT_PROVIDER_FACTS",
+  "note": "Every parameter below is an explicit hypothetical assumption for offline tests. None is a documented provider term, a realistic market observation, or a recommendation.",
+  "scenarios": [
+    {
+      "scenario_id": "hypothetical-spread-doubling",
+      "kind": "SPREAD_WIDENING",
+      "label": "Spread doubled",
+      "description": "Hypothetical: quoted bid/ask half-spread doubled at every bar.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {"spread_multiplier": "2"}
+    },
+    {
+      "scenario_id": "hypothetical-slippage-one-pip",
+      "kind": "SLIPPAGE_INCREASE",
+      "label": "Extra slippage per side",
+      "description": "Hypothetical: one additional adverse pip of slippage per side.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {"extra_slippage_pips": "1"}
+    },
+    {
+      "scenario_id": "hypothetical-commission-tripled",
+      "kind": "COMMISSION_INCREASE",
+      "label": "Commission tripled",
+      "description": "Hypothetical: commission rate multiplied by three.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {"commission_multiplier": "3"}
+    },
+    {
+      "scenario_id": "hypothetical-adverse-swap",
+      "kind": "ADVERSE_SWAP",
+      "label": "Adverse swap rates",
+      "description": "Hypothetical: both long and short swap rates scaled by three.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {"swap_rate_multiplier": "3"}
+    },
+    {
+      "scenario_id": "hypothetical-quote-delay",
+      "kind": "QUOTE_DELAY",
+      "label": "Delayed confirming quotes",
+      "description": "Hypothetical: the last usable quote inside each bar is 45s older than recorded; bars whose last quote would then be older than 30s are refused.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {
+        "delay_seconds": 45,
+        "max_staleness_seconds": 30,
+        "pairs": ["AAA/BBB"]
+      }
+    },
+    {
+      "scenario_id": "hypothetical-missing-quotes",
+      "kind": "MISSING_QUOTES",
+      "label": "Periodically missing quotes",
+      "description": "Hypothetical: every fifth bar is absent for one pair; gaps are reported, never filled.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {"drop_every_nth": 5, "pairs": ["AAA/BBB"]}
+    },
+    {
+      "scenario_id": "hypothetical-weekend-gap",
+      "kind": "WEEKEND_GAP",
+      "label": "Unavailable window",
+      "description": "Hypothetical: one declared clock window is unavailable for one pair (a weekend/holiday-shaped gap).",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {
+        "gap_start": "2026-03-09T15:00:00Z",
+        "gap_end": "2026-03-09T15:30:00Z",
+        "pairs": ["AAA/BBB"]
+      }
+    },
+    {
+      "scenario_id": "hypothetical-conversion-shock",
+      "kind": "CONVERSION_SHOCK",
+      "label": "Conversion-rate shock",
+      "description": "Hypothetical: one conversion leg moves by a declared factor.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {"rate_shocks": {"BBB/DDD": "1.10"}}
+    },
+    {
+      "scenario_id": "hypothetical-correlation-stress",
+      "kind": "CORRELATION_STRESS",
+      "label": "Shared-currency correlation stress",
+      "description": "Hypothetical: pairwise correlation for one pair set to a declared high value.",
+      "evidence_class": "HYPOTHETICAL_ASSUMPTION",
+      "evidence_reference": "",
+      "parameters": {"correlation_overrides": {"AAA/BBB": "0.95"}}
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+# Local secrets and environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Python and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Runtime state, exports, and downloaded market data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+logs/
+data/cache/
+data/history/
+data/universe/
+data/datasets/
+results/*
+!results/.gitkeep
+
+# Local lock files
+*.paper.lock
+
+# Local MT5 configuration (never contains the password; the password lives in the OS vault)
+mt5_settings.local.json
+*.local.json

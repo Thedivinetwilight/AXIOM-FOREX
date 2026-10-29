@@ -1,0 +1,890 @@
+{
+  "format": "AXIOM_FOREX_PROVIDER_PROFILE",
+  "profile": {
+    "activation_mode": "LOCAL_PAPER",
+    "effective_from": "2026-03-06T05:00:00+00:00",
+    "environment": "FIXTURE",
+    "evaluated_at": "2026-03-10T14:12:00+00:00",
+    "expires_at": "2026-03-13T21:00:00+00:00",
+    "external_execution_enabled": false,
+    "label": "SYNTHETIC_OFFLINE_FIXTURE",
+    "profile_id": "offline-fixture-v1",
+    "profile_version": "fixture-profile-v1",
+    "review_by": "2026-03-13T21:00:00+00:00",
+    "synthetic": true
+  },
+  "schema_version": "1.0.0",
+  "sections": {
+    "account_risk": [
+      "market.freshness",
+      "market.max_spread_pips",
+      "broker.account_currency",
+      "broker.margin"
+    ],
+    "broker": [
+      "broker.broker_id",
+      "broker.capability_version",
+      "broker.execution_mode",
+      "broker.external_orders_supported",
+      "broker.order_types",
+      "broker.partial_fills",
+      "broker.cancellation",
+      "broker.reconciliation",
+      "broker.idempotency",
+      "broker.rejection_codes",
+      "broker.sizing",
+      "broker.trading_hours",
+      "broker.costs",
+      "broker.account_currency",
+      "broker.margin",
+      "broker.recovery"
+    ],
+    "calendar": [
+      "market.calendar",
+      "market.history_bounds",
+      "market.supported_timeframes",
+      "broker.trading_hours",
+      "broker.costs"
+    ],
+    "cost_financing": [
+      "market.clock_source",
+      "market.quote_timestamp_basis",
+      "market.bar_timestamp_basis",
+      "broker.costs",
+      "broker.trading_hours"
+    ],
+    "instrument": [
+      "market.supported_pairs",
+      "market.provider_symbols",
+      "market.instrument_spec",
+      "market.max_spread_pips",
+      "broker.sizing"
+    ],
+    "market_data": [
+      "market.provider_id",
+      "market.capability_version",
+      "market.source",
+      "market.supported_pairs",
+      "market.provider_symbols",
+      "market.supported_timeframes",
+      "market.quote_timestamp_basis",
+      "market.clock_source",
+      "market.bid_ask_semantics",
+      "market.quote_id_required",
+      "market.received_at_required",
+      "market.quote_correction_policy",
+      "market.bar_timestamp_basis",
+      "market.bar_completion_rule",
+      "market.bar_ohlc_semantics",
+      "market.gap_policy",
+      "market.history_bounds",
+      "market.freshness",
+      "market.calendar",
+      "market.instrument_spec",
+      "market.max_spread_pips"
+    ],
+    "recovery": [
+      "broker.order_types",
+      "broker.partial_fills",
+      "broker.cancellation",
+      "broker.reconciliation",
+      "broker.idempotency",
+      "broker.rejection_codes",
+      "broker.recovery"
+    ]
+  },
+  "terms": {
+    "broker.account_currency": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "account_currency": "CCC",
+        "conversion_max_age_seconds": "5",
+        "conversion_rate_pairs": [
+          [
+            "AAA",
+            "CCC"
+          ],
+          [
+            "BBB",
+            "CCC"
+          ]
+        ],
+        "conversion_rate_source_version": "SYNTHETIC_FX_SOURCE:fixture-profile-v1",
+        "conversion_source": "SYNTHETIC_FX_SOURCE",
+        "rate_freshness_policy": {
+          "max_age_seconds": "5",
+          "max_feed_latency_seconds": "1",
+          "max_future_skew_seconds": "1",
+          "policy_id": "quote-freshness-v1",
+          "version": "freshness-v1"
+        },
+        "rate_sources": {
+          "AAA/CCC": "SYNTHETIC_FX_SOURCE",
+          "BBB/CCC": "SYNTHETIC_FX_SOURCE"
+        },
+        "rate_timestamps": {
+          "AAA/CCC": "2026-03-10T14:11:59+00:00",
+          "BBB/CCC": "2026-03-10T14:11:59+00:00"
+        },
+        "source": "SYNTHETIC_FX_SOURCE"
+      }
+    },
+    "broker.broker_id": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "SYNTHETIC_CONFORMANCE_BROKER"
+    },
+    "broker.cancellation": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "confirmation_required": true,
+        "confirmation_source": "LOCAL_FIXTURE_CANCELLATION",
+        "supported": true
+      }
+    },
+    "broker.capability_version": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "broker-conformance-v1"
+    },
+    "broker.costs": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "commission_rate": "0.0001",
+        "cost_model_id": "cost-model-v1",
+        "cost_model_version": "cost-v1",
+        "financing_rate_daily": "0.00001",
+        "long_swap_rate": "0.00001",
+        "rollover_cutoff_utc": "17:00:00",
+        "rollover_policy": {
+          "calendar_id": "synthetic-24x5-v1",
+          "daily_cutoff_utc": "17:00:00",
+          "schedule_id": "rollover-schedule-v1",
+          "source": "SYNTHETIC_ROLLOVER_SOURCE",
+          "triple_rollover_weekday": null,
+          "version": "rollover-policy-v1"
+        },
+        "short_swap_rate": "-0.00001",
+        "slippage_pips": "0.2",
+        "source": "SYNTHETIC_COST_SOURCE",
+        "spread_limit_pips": "5",
+        "swap_rate_source": "SYNTHETIC_CONFORMANCE_SWAP_SOURCE",
+        "swap_rate_version": "swap-fixture-v1",
+        "triple_rollover_weekday": null
+      }
+    },
+    "broker.execution_mode": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "LOCAL_PAPER"
+    },
+    "broker.external_orders_supported": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": false
+    },
+    "broker.idempotency": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "client_order_id_scope": "LOCAL_PAPER_WORKFLOW",
+        "key": "CLIENT_ORDER_ID",
+        "no_resubmit_policy": "NO_RESUBMIT_UNTIL_RECONCILED",
+        "order_id_source": "LOCAL_DETERMINISTIC_BROKER_ORDER_ID"
+      }
+    },
+    "broker.margin": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "initial_capital": "10000",
+        "leverage": "5",
+        "margin_call_policy": "NO_NEGATIVE_EQUITY_FIXTURE",
+        "margin_multiplier": "1",
+        "margin_policy": "EXPLICIT_ACCOUNT_LEVERAGE_AND_INSTRUMENT_MULTIPLIER",
+        "max_leverage": "10",
+        "negative_equity_policy": "NO_NEGATIVE_EQUITY_FIXTURE"
+      }
+    },
+    "broker.order_types": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": [
+        "LIMIT",
+        "MARKET",
+        "SIMULATED_INTENT"
+      ]
+    },
+    "broker.partial_fills": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "fill_id_source": "LOCAL_DETERMINISTIC_FIXTURE_EVENT_ID",
+        "incremental_quantities": true,
+        "supported": true
+      }
+    },
+    "broker.reconciliation": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "order_history_source": "LOCAL_FIXTURE_ORDER_TRANSITIONS",
+        "retention": "LOCAL_FIXTURE_SNAPSHOT",
+        "source": "SYNTHETIC_CONFORMANCE_STATUS_MAP",
+        "status_mapping_source": "SYNTHETIC_CONFORMANCE_STATUS_MAP",
+        "supported": true,
+        "unknown_outcome_policy": "NO_RESUBMIT_UNTIL_RECONCILED"
+      }
+    },
+    "broker.recovery": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "fill_state_source": "DURABLE_AUDIT_LOG",
+        "no_resubmit_policy": "NO_RESUBMIT_UNTIL_RECONCILED",
+        "order_state_source": "DURABLE_AUDIT_LOG",
+        "persistence": "SQLite snapshots",
+        "restart_fixture": true,
+        "snapshot_source": "LOCAL_FIXTURE_SNAPSHOT",
+        "unresolved_order_policy": "PRESERVE_AND_BLOCK_NEW_ORDERS"
+      }
+    },
+    "broker.rejection_codes": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": [
+        "BROKER_REJECTED",
+        "UNKNOWN_OUTCOME",
+        "IDEMPOTENCY_CONFLICT",
+        "CANCEL_CONFIRMED"
+      ]
+    },
+    "broker.sizing": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "contract_size": "1000",
+        "margin_multiplier": "1",
+        "max_quantity": "5",
+        "min_quantity": "0.01",
+        "pair": "AAA/BBB",
+        "pip_size": "0.0001",
+        "provider_symbols": {
+          "AAA/BBB": "AAA_BBB"
+        },
+        "quantity_step": "0.01",
+        "quantity_unit": "LOTS",
+        "quote_precision": 5,
+        "spec_version": "spec-v1",
+        "status": "ACTIVE",
+        "supported_pairs": [
+          "AAA/BBB"
+        ],
+        "tick_size": "0.00001",
+        "timeframes": [
+          "1m"
+        ]
+      }
+    },
+    "broker.trading_hours": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "calendar_id": "synthetic-24x5-v1",
+        "calendar_signature": "097176c6b781bafd8eadcc734b017efe68349a130a49c5f9fbe9f85f5f144efc",
+        "calendar_version": "calendar-v1",
+        "daily_break_policy": "EXPLICIT_DAILY_BREAK_WINDOWS",
+        "dst_transition_policy": "UTC_WINDOWS_FROM_DST_AWARE_CALENDAR",
+        "dst_transitions": [
+          {
+            "after_local": "2026-03-08T03:00:00-04:00",
+            "after_utc_offset_seconds": -14400,
+            "before_local": "2026-03-08T01:30:00-05:00",
+            "before_utc_offset_seconds": -18000,
+            "offset_changed": true,
+            "timezone": "America/New_York"
+          }
+        ],
+        "holiday_source": "LOCAL_FIXTURE_NOT_A_BROKER_CALENDAR",
+        "holidays": {
+          "AAA/BBB": [
+            "2026-03-09"
+          ]
+        },
+        "instrument_availability": {
+          "AAA/BBB": "ACTIVE"
+        },
+        "signature": "097176c6b781bafd8eadcc734b017efe68349a130a49c5f9fbe9f85f5f144efc",
+        "supported_timeframes": [
+          "1m"
+        ],
+        "timezone": "America/New_York",
+        "valid_from": "2026-03-06T05:00:00+00:00",
+        "valid_until": "2026-03-13T21:00:00+00:00",
+        "version": "calendar-v1",
+        "weekend_gap_policy": "EXPLICIT_WEEKEND_GAP",
+        "windows": {
+          "AAA/BBB": [
+            {
+              "end": "2026-03-06T22:00:00+00:00",
+              "label": "fri_pre_dst_core",
+              "start": "2026-03-06T05:00:00+00:00"
+            },
+            {
+              "end": "2026-03-07T05:00:00+00:00",
+              "label": "fri_pre_dst_evening",
+              "start": "2026-03-06T23:00:00+00:00"
+            },
+            {
+              "end": "2026-03-09T04:00:00+00:00",
+              "label": "sun_open",
+              "start": "2026-03-08T21:00:00+00:00"
+            },
+            {
+              "end": "2026-03-09T21:00:00+00:00",
+              "label": "mar_9_core",
+              "start": "2026-03-09T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-10T04:00:00+00:00",
+              "label": "mar_9_evening",
+              "start": "2026-03-09T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-10T21:00:00+00:00",
+              "label": "mar_10_core",
+              "start": "2026-03-10T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-11T04:00:00+00:00",
+              "label": "mar_10_evening",
+              "start": "2026-03-10T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-11T21:00:00+00:00",
+              "label": "mar_11_core",
+              "start": "2026-03-11T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-12T04:00:00+00:00",
+              "label": "mar_11_evening",
+              "start": "2026-03-11T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-12T21:00:00+00:00",
+              "label": "mar_12_core",
+              "start": "2026-03-12T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-13T04:00:00+00:00",
+              "label": "mar_12_evening",
+              "start": "2026-03-12T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-13T21:00:00+00:00",
+              "label": "fri_close",
+              "start": "2026-03-13T04:00:00+00:00"
+            }
+          ]
+        }
+      }
+    },
+    "market.bar_completion_rule": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "COMPLETE_ONLY"
+    },
+    "market.bar_ohlc_semantics": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "SEPARATE_BID_ASK_OHLC"
+    },
+    "market.bar_timestamp_basis": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "UTC_BAR_START"
+    },
+    "market.bid_ask_semantics": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "SEPARATE_BID_ASK"
+    },
+    "market.calendar": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "calendar_id": "synthetic-24x5-v1",
+        "daily_break_policy": "EXPLICIT_DAILY_BREAK_WINDOWS",
+        "dst_transition_policy": "UTC_WINDOWS_FROM_DST_AWARE_CALENDAR",
+        "dst_transitions": [
+          {
+            "after_local": "2026-03-08T03:00:00-04:00",
+            "after_utc_offset_seconds": -14400,
+            "before_local": "2026-03-08T01:30:00-05:00",
+            "before_utc_offset_seconds": -18000,
+            "offset_changed": true,
+            "timezone": "America/New_York"
+          }
+        ],
+        "holiday_source": "LOCAL_FIXTURE_NOT_A_BROKER_CALENDAR",
+        "holidays": {
+          "AAA/BBB": [
+            "2026-03-09"
+          ]
+        },
+        "instrument_availability": {
+          "AAA/BBB": "ACTIVE"
+        },
+        "signature": "097176c6b781bafd8eadcc734b017efe68349a130a49c5f9fbe9f85f5f144efc",
+        "timezone": "America/New_York",
+        "valid_from": "2026-03-06T05:00:00+00:00",
+        "valid_until": "2026-03-13T21:00:00+00:00",
+        "version": "calendar-v1",
+        "weekend_gap_policy": "EXPLICIT_WEEKEND_GAP",
+        "windows": {
+          "AAA/BBB": [
+            {
+              "end": "2026-03-06T22:00:00+00:00",
+              "label": "fri_pre_dst_core",
+              "start": "2026-03-06T05:00:00+00:00"
+            },
+            {
+              "end": "2026-03-07T05:00:00+00:00",
+              "label": "fri_pre_dst_evening",
+              "start": "2026-03-06T23:00:00+00:00"
+            },
+            {
+              "end": "2026-03-09T04:00:00+00:00",
+              "label": "sun_open",
+              "start": "2026-03-08T21:00:00+00:00"
+            },
+            {
+              "end": "2026-03-09T21:00:00+00:00",
+              "label": "mar_9_core",
+              "start": "2026-03-09T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-10T04:00:00+00:00",
+              "label": "mar_9_evening",
+              "start": "2026-03-09T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-10T21:00:00+00:00",
+              "label": "mar_10_core",
+              "start": "2026-03-10T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-11T04:00:00+00:00",
+              "label": "mar_10_evening",
+              "start": "2026-03-10T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-11T21:00:00+00:00",
+              "label": "mar_11_core",
+              "start": "2026-03-11T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-12T04:00:00+00:00",
+              "label": "mar_11_evening",
+              "start": "2026-03-11T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-12T21:00:00+00:00",
+              "label": "mar_12_core",
+              "start": "2026-03-12T04:00:00+00:00"
+            },
+            {
+              "end": "2026-03-13T04:00:00+00:00",
+              "label": "mar_12_evening",
+              "start": "2026-03-12T22:00:00+00:00"
+            },
+            {
+              "end": "2026-03-13T21:00:00+00:00",
+              "label": "fri_close",
+              "start": "2026-03-13T04:00:00+00:00"
+            }
+          ]
+        }
+      }
+    },
+    "market.capability_version": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "market-conformance-v1"
+    },
+    "market.clock_source": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "SYNTHETIC_UTC_CLOCK"
+    },
+    "market.freshness": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "max_age_seconds": "5",
+        "max_feed_latency_seconds": "1",
+        "max_future_skew_seconds": "1",
+        "policy_id": "quote-freshness-v1",
+        "version": "freshness-v1"
+      }
+    },
+    "market.gap_policy": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "REPORT_NO_INTERPOLATION"
+    },
+    "market.history_bounds": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "end": "2026-03-13T21:00:00+00:00",
+        "start": "2026-03-06T05:00:00+00:00"
+      }
+    },
+    "market.instrument_spec": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "base_currency": "AAA",
+        "contract_size": "1000",
+        "correlation_group": "SYNTHETIC_RISK_GROUP",
+        "margin_multiplier": "1",
+        "max_quantity": "5",
+        "min_quantity": "0.01",
+        "pair": "AAA/BBB",
+        "pip_size": "0.0001",
+        "price_tick_size": "0.00001",
+        "provider_aliases": {
+          "SYNTHETIC_FEED": "AAA_BBB"
+        },
+        "quantity_step": "0.01",
+        "quantity_unit": "LOTS",
+        "quote_currency": "BBB",
+        "quote_precision": 5,
+        "source": "SYNTHETIC_INSTRUMENT_SOURCE",
+        "spec_version": "spec-v1",
+        "status": "ACTIVE",
+        "trading_calendar_id": "synthetic-24x5-v1",
+        "trading_calendar_version": "calendar-v1"
+      }
+    },
+    "market.max_spread_pips": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "5"
+    },
+    "market.provider_id": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "SYNTHETIC_FEED"
+    },
+    "market.provider_symbols": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": {
+        "AAA/BBB": "AAA_BBB"
+      }
+    },
+    "market.quote_correction_policy": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "EXPLICIT_REPLACEMENT_BY_QUOTE_ID"
+    },
+    "market.quote_id_required": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": true
+    },
+    "market.quote_timestamp_basis": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "UTC_SOURCE_TIMESTAMP"
+    },
+    "market.received_at_required": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": true
+    },
+    "market.source": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": "SYNTHETIC_CONFORMANCE_FEED"
+    },
+    "market.supported_pairs": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": [
+        "AAA/BBB"
+      ]
+    },
+    "market.supported_timeframes": {
+      "provenance": {
+        "documented_at": "2026-03-06T05:00:00+00:00",
+        "effective_date": "2026-03-06",
+        "expires_at": "2026-03-13T21:00:00+00:00",
+        "review_by": "2026-03-13T21:00:00+00:00",
+        "source": "LOCAL_SYNTHETIC_WORKFLOW_FIXTURE",
+        "source_version": "fixture-profile-v1",
+        "value_class": "FIXTURE"
+      },
+      "value": [
+        "1m"
+      ]
+    }
+  }
+}

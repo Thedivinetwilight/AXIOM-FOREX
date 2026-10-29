@@ -1,0 +1,225 @@
+# Historical data import (offline, user-supplied)
+
+AXIOM-FOREX can import user-supplied historical forex data through one
+documented, provider-neutral canonical CSV. The importer is offline: it reads a
+local text file, performs no network call, reads no credentials, connects to no
+account, and never enables external execution or a live order path.
+
+Imported data is **research/backtest material**. It is never used for paper
+fills, is never relabelled as a synthetic fixture or a production feed, and no
+historical or simulated result is evidence of profitability or live readiness.
+
+- Format identifier: `AXIOM_FOREX_CANONICAL_CSV`
+- Schema version: `1.0.0` (`SUPPORTED_IMPORT_SCHEMA_VERSIONS = {"1.0.0"}`)
+- Manifest schema: `import-manifest-v1`
+- Data classes accepted by the importer: `USER_SUPPLIED_DEMO`,
+  `USER_SUPPLIED_HISTORICAL`, `USER_SUPPLIED_PRODUCTION`
+- `SYNTHETIC_FIXTURE` is rejected as an import data class: a file cannot claim to
+  be a locally generated fixture.
+
+An imported dataset can be passed to the
+[multi-pair research evaluation](RESEARCH_EVALUATION.md), which simulates a
+shared multi-currency portfolio across pairs, aligns each pair's calendar and
+missing intervals explicitly, and never creates an order.
+
+## Why a canonical format instead of a vendor format
+
+No broker, vendor, or data provider has been selected, and different vendors
+export different column names, timestamps, timezones, and quote semantics. The
+canonical format fixes the *meaning* of each field (separate executable bid/ask,
+explicit timezone, completed bars only, explicit receive times and quote ids) so
+that normalization, calendar checks, quality checks, conformance, backtests, and
+reports all consume the same shape. A vendor-specific export adapter would be a
+separate, reviewed addition and is not included.
+
+## File layout
+
+UTF-8 text. Lines beginning with `#` and blank lines are ignored. The first
+remaining line is the header; the column *set* must match exactly (any order):
+
+```
+record_type,pair,timestamp,timezone,bid,ask,quote_id,received_at,correction_of,
+timeframe,duration_seconds,bid_open,bid_high,bid_low,bid_close,
+ask_open,ask_high,ask_low,ask_close,quote_count,last_quote_at,complete
+```
+
+Each remaining line is one record:
+
+- `QUOTE` — a timestamped executable bid/ask quote. Requires `pair`,
+  `timestamp`, `timezone`, `bid`, `ask`, `quote_id`, `received_at`.
+  `correction_of` is optional. Bar columns must be empty.
+- `BAR` — a completed bid/ask bar. Requires `pair`, `timestamp`, `timezone`,
+  `timeframe`, `duration_seconds`, `bid_open/high/low/close`,
+  `ask_open/high/low/close`, `quote_count`, `last_quote_at`, `complete`.
+  Quote columns must be empty.
+
+Row order is not significant; records are validated independently and then
+sorted chronologically. See `imports/SAMPLE_canonical_quote_bars.csv` for a
+format example (illustrative values only, imported as `USER_SUPPLIED_DEMO`).
+
+## Timestamp and timezone semantics
+
+- `timestamp` is ISO 8601 and is either naive wall time in the row's `timezone`
+  or offset-aware.
+- `timezone` must be `UTC` or a known IANA zone name. There is no fallback zone.
+- A naive wall time that is **ambiguous** (DST fall-back) or **nonexistent**
+  (DST spring-forward) is rejected. Supply an explicit UTC offset instead; it is
+  never guessed.
+- An offset-aware timestamp must agree with the declared zone at that instant
+  (`timestamp_offset_mismatch` otherwise). `2026-03-10T09:50:00` in
+  `America/New_York` resolves to `2026-03-10T13:50:00Z`; the same wall time on
+  `2026-03-06` resolves to `14:50Z`.
+- `received_at` must not precede the quote timestamp; `last_quote_at` must fall
+  inside the bar interval.
+- The dataset's declared timezone basis is `UTC`; all stored bars and quotes are
+  UTC.
+
+## Required import declarations
+
+An import is rejected unless every declaration is explicit (`ImportRequest`):
+
+| Declaration | Meaning |
+| --- | --- |
+| `pair` | Canonical `BASE/QUOTE`; must exist in the versioned catalog and the profile's supported pairs |
+| `timeframe` | Must be listed in the profile's supported timeframes |
+| `data_class` | One of the three `USER_SUPPLIED_*` classes |
+| `source` | Documentation-style provenance label (no paths, no URLs) |
+| `source_version` | Source/export version identifier |
+| `documented_at` | Optional documentation date |
+| `valid_from`, `valid_until` | Data validity bounds, half-open `[valid_from, valid_until)` |
+
+Nothing is defaulted. A source label that looks like a local path or URL is
+rejected (`unsafe_source_label`) so reports and manifests cannot leak local
+paths.
+
+## Compatibility gates (before any record is trusted)
+
+`check_import_compatibility` compares the request against the active provider
+profile, the versioned pair spec, and the trading calendar:
+
+`profile_validated`, `profile_identity`, `pair_supported`, `pair_alias`,
+`provider_id`, `timeframe_supported`, `instrument_spec`, `calendar_identity`,
+`calendar_validity`, `history_bounds`, `timestamp_basis`, `quote_semantics`
+(separate bid/ask, quote ids, receive times, explicit corrections),
+`bar_semantics` (completed bid/ask bars, no interpolation), `data_class`
+(production data cannot be validated against a synthetic/demo profile), and
+`spread_limit`.
+
+Any failure rejects the whole import with reason
+`profile_incompatible:<check>`. A missing or unrecognized term fails closed.
+
+## Record validation and quarantine
+
+Rejected (whole import fails, no dataset is produced):
+
+- malformed rows, unknown/duplicate/missing header columns, unknown record types;
+- unknown pair or a pair that differs from the declaration (`unexpected_pair`);
+- invalid, ambiguous, nonexistent, mismatched-offset, or out-of-bounds
+  timestamps;
+- non-numeric, non-positive, or crossed bid/ask (`non_positive_bid`,
+  `crossed_quote`);
+- quotes whose receive time violates the freshness policy (`stale_quote`);
+- bars that are incomplete (`incomplete_bar`), have stale `last_quote_at`
+  (`STALE_OR_INVALID_LAST_QUOTE`), or exceed the profile spread limit
+  (`spread_limit_exceeded`);
+- duplicate quote ids or timestamps with different values (`conflicting_quote`,
+  `conflicting_quote_timestamp`), or two different bars at one opening timestamp
+  (`conflicting_bar`);
+- corrections referencing an unknown quote id (`unknown_correction_target`);
+- bars outside the calendar sessions.
+
+Preserved as explicit quality events (never silently repaired):
+
+- identical duplicates (`DUPLICATE_QUOTE`, `DUPLICATE_QUOTE_TIMESTAMP`,
+  `DUPLICATE_BAR`) — kept once, counted in the manifest;
+- explicit corrections (`QUOTE_CORRECTION`) — accepted and counted;
+- missing bars in an open session (`MISSING_BAR`) and expected session/weekend
+  gaps (`EXPECTED_SESSION_GAP`). A dataset with missing bars is `QUARANTINED`:
+  it is returned for inspection with `usable = False`, so the backtest engine
+  rejects it. No price, bar, quote, or fill is ever interpolated or inferred
+  from a mid price.
+
+Every rejected row is returned in `quarantine` with its source line, record
+type, and finding codes (no values are echoed). Result statuses are `PASS`,
+`QUARANTINED`, or `FAIL`.
+
+## Dataset manifest
+
+Every accepted import produces an `ImportManifest` plus a `DatasetManifest`
+with:
+
+- format and schema version, import id, pair, timeframe, data class;
+- source label, source version, documentation date, timezone basis;
+- declared validity bounds;
+- `source_sha256` (raw file) and `source_byte_count`;
+- `normalized_sha256` (bars), `quotes_sha256` (quotes), `bar_count`,
+  `quote_count`, `row_count`;
+- pair spec version and signature, catalog version and signature;
+- calendar id, version, and signature;
+- time coverage (`first_timestamp`, `last_timestamp`, quote coverage);
+- validation classification, pass flag, error/warning codes, correction and
+  duplicate counts;
+- profile id and version.
+
+`ImportManifest.verify(...)` recomputes the digests and re-checks counts,
+coverage, source, pair, timeframe, and data class. A tampered, relabelled, or
+truncated manifest does not verify, and the dataset becomes unusable.
+
+The dataset manifest is persisted in the existing `datasets` table and the
+import report in a `snapshots` row of kind `import`. The data class and
+provenance therefore survive restart and appear in `status`, `/dataset`,
+`/status`, the dashboard, the Markdown report, and desktop view models.
+
+## Using an imported dataset
+
+```bash
+python -m axiom_forex import \
+  --import-path imports/SAMPLE_canonical_quote_bars.csv \
+  --import-data-class USER_SUPPLIED_DEMO \
+  --import-source SAMPLE_CANONICAL_CSV \
+  --import-source-version sample-v1 \
+  --import-valid-from 2026-03-10T13:00:00Z \
+  --import-valid-until 2026-03-10T14:00:00Z
+```
+
+Add `--import-backtest` to run one deterministic backtest on the imported
+dataset. Programmatically:
+
+```python
+result = platform.import_dataset(request, path=".../quotes.csv")
+if result.passed:
+    platform.use_imported_dataset()          # research/backtest adoption
+    backtest = platform.run_imported_backtest(strategy)
+```
+
+Adoption requires the same pair spec and a timeframe supported by the platform.
+While imported data is adopted:
+
+- `platform.data_class` is the imported class and `execution_eligible` is `False`;
+- `execute_paper_workflow` blocks with `data_class_not_execution_eligible`
+  before qualification, routing, or execution;
+- backtests and reports run normally and carry the imported dataset id, hashes,
+  and provenance.
+
+## Provider-specific gaps
+
+The importer does not assume any vendor. Still required once a provider is
+selected:
+
+1. A reviewed export adapter from that vendor's format into this canonical CSV
+   (column mapping, timestamp semantics, correction/restatement handling).
+2. The provider's official documentation source and effective dates for each
+   profile term used by the compatibility gates.
+3. Whether the provider supplies receive times and quote ids; if not, how
+   restatements are identified and how the receive-time freshness policy maps to
+   historical exports.
+4. Historical depth, bar completion, gap, and correction policies per timeframe.
+5. Tick/pip precision, price alignment, and maximum spread terms that the import
+   gate should enforce for that instrument.
+6. Provider holiday/DST calendars and any per-instrument availability windows
+   used by the calendar gate.
+7. Sampling/quoting conventions for user-generated data (aggregated liquidity,
+   mid-only feeds are not acceptable: separate executable bid/ask is required).
+
+Until those are supplied, imports remain offline research artifacts and no
+imported data can reach the local paper execution path.

@@ -1,0 +1,21 @@
+[project]
+name = "axiom-forex"
+version = "0.2.0"
+description = "Provider-neutral forex research and paper-trading architecture adaptation"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+  "tzdata>=2024.1; platform_system == 'Windows'",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+include = ["app*", "fixtures*", "axiom_forex*", "desktop*", "scripts*"]
+exclude = ["tests*"]

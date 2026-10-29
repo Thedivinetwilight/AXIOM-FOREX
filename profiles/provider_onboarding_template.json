@@ -1,0 +1,542 @@
+{
+  "format": "AXIOM_FOREX_PROVIDER_PROFILE",
+  "profile": {
+    "activation_mode": "LOCAL_PAPER",
+    "effective_from": "",
+    "environment": "UNSPECIFIED",
+    "evaluated_at": "",
+    "expires_at": "",
+    "external_execution_enabled": false,
+    "label": "EMPTY_PROVIDER_ONBOARDING_TEMPLATE",
+    "profile_id": "provider-onboarding-template",
+    "profile_version": "template-v1",
+    "review_by": "",
+    "synthetic": false
+  },
+  "schema_version": "1.0.0",
+  "sections": {
+    "account_risk": [
+      "market.freshness",
+      "market.max_spread_pips",
+      "broker.account_currency",
+      "broker.margin"
+    ],
+    "broker": [
+      "broker.broker_id",
+      "broker.capability_version",
+      "broker.execution_mode",
+      "broker.external_orders_supported",
+      "broker.order_types",
+      "broker.partial_fills",
+      "broker.cancellation",
+      "broker.reconciliation",
+      "broker.idempotency",
+      "broker.rejection_codes",
+      "broker.sizing",
+      "broker.trading_hours",
+      "broker.costs",
+      "broker.account_currency",
+      "broker.margin",
+      "broker.recovery"
+    ],
+    "calendar": [
+      "market.calendar",
+      "market.history_bounds",
+      "market.supported_timeframes",
+      "broker.trading_hours",
+      "broker.costs"
+    ],
+    "cost_financing": [
+      "market.clock_source",
+      "market.quote_timestamp_basis",
+      "market.bar_timestamp_basis",
+      "broker.costs",
+      "broker.trading_hours"
+    ],
+    "instrument": [
+      "market.supported_pairs",
+      "market.provider_symbols",
+      "market.instrument_spec",
+      "market.max_spread_pips",
+      "broker.sizing"
+    ],
+    "market_data": [
+      "market.provider_id",
+      "market.capability_version",
+      "market.source",
+      "market.supported_pairs",
+      "market.provider_symbols",
+      "market.supported_timeframes",
+      "market.quote_timestamp_basis",
+      "market.clock_source",
+      "market.bid_ask_semantics",
+      "market.quote_id_required",
+      "market.received_at_required",
+      "market.quote_correction_policy",
+      "market.bar_timestamp_basis",
+      "market.bar_completion_rule",
+      "market.bar_ohlc_semantics",
+      "market.gap_policy",
+      "market.history_bounds",
+      "market.freshness",
+      "market.calendar",
+      "market.instrument_spec",
+      "market.max_spread_pips"
+    ],
+    "recovery": [
+      "broker.order_types",
+      "broker.partial_fills",
+      "broker.cancellation",
+      "broker.reconciliation",
+      "broker.idempotency",
+      "broker.rejection_codes",
+      "broker.recovery"
+    ]
+  },
+  "terms": {
+    "broker.account_currency": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.broker_id": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.cancellation": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.capability_version": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.costs": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.execution_mode": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.external_orders_supported": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.idempotency": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.margin": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.order_types": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.partial_fills": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.reconciliation": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.recovery": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.rejection_codes": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.sizing": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "broker.trading_hours": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.bar_completion_rule": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.bar_ohlc_semantics": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.bar_timestamp_basis": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.bid_ask_semantics": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.calendar": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.capability_version": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.clock_source": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.freshness": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.gap_policy": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.history_bounds": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.instrument_spec": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.max_spread_pips": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.provider_id": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.provider_symbols": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.quote_correction_policy": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.quote_id_required": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.quote_timestamp_basis": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.received_at_required": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.source": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.supported_pairs": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    },
+    "market.supported_timeframes": {
+      "provenance": {
+        "documented_at": "",
+        "effective_date": "",
+        "expires_at": "",
+        "review_by": "",
+        "source": "",
+        "source_version": "",
+        "value_class": ""
+      },
+      "value": null
+    }
+  }
+}
