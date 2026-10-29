@@ -391,24 +391,39 @@ def session_from_settings(
     return ObservationSession(source=source, clock=clock)
 
 
-def locked_session(reason: str = "no_settings_document", clock=None) -> ObservationSession:
+def locked_session(
+    reason: str = "no_settings_document",
+    clock=None,
+    *,
+    detail: str = "",
+    hint: str = "",
+    label: str = "No usable local MT5 settings",
+) -> ObservationSession:
     """A session that cannot connect because configuration is missing.
 
     Keeping this as a normal session -- rather than a special case in the view --
     means the Connect button is disabled for an explainable reason everywhere.
+    ``detail`` and ``hint`` say why this particular document was refused; both
+    are operator text and never contain a value from the document.
     """
+
+    resolved_detail = detail or (
+        "No mt5_settings.local.json was found next to the launcher."
+    )
+    resolved_hint = hint or (
+        "Create the settings document from the template on the setup screen."
+    )
 
     class _Unavailable:
         source_id = "unconfigured"
         kind = "UNCONFIGURED"
-        label = "No local MT5 settings"
+
+        @property
+        def label(self) -> str:
+            return label
 
         def connect(self) -> None:
-            raise ConnectionRefused(
-                reason,
-                "No mt5_settings.local.json was found next to the launcher.",
-                "Create the settings document from the template on the setup screen.",
-            )
+            raise ConnectionRefused(reason, resolved_detail, resolved_hint)
 
         def disconnect(self) -> None:
             return None
