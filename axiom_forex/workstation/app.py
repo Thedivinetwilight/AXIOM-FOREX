@@ -1,0 +1,394 @@
+"""The workstation web app: stdlib ``http.server``, loopback only, read-only.
+
+The surface is deliberately tiny:
+
+``GET``
+    Six pages. Rendering never changes state.
+``POST /actions/{connect,disconnect,acknowledge-sign-in,confirm,unconfirm,symbols}``
+    The only state changes, and none of them touch trading. Each requires the
+    per-process nonce embedded in the page that offered the button, so an
+    unrelated page cannot drive a connection, and each one is logged as a line on
+    stderr with no secrets in it. Anything not in that set -- orders, arming,
+    account switching, broker settings -- has no handler to reach.
+
+Anything else is a 405/404. There is no JSON API, no order endpoint, no arming
+endpoint, no account switch, and no background timer: a request renders the
+current state and then the process waits. Nothing polls, nothing reconnects.
+
+Credentials never enter this process: the server has no field for a password,
+refuses form posts that carry one, and the terminal session it observes was
+authenticated by the user inside MetaTrader 5.
+"""
+
+from __future__ import annotations
+
+import secrets
+import sys
+import threading
+from dataclasses import dataclass, field
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Callable, Mapping
+from urllib.parse import parse_qs, urlparse
+
+from .context import PaperSnapshot, PageContext, build_context, read_paper_snapshot
+from .setup import SetupWizard
+from .views import render_message, render_page
+
+#: Paths that render a page. Everything else is refused.
+GET_ROUTES: dict[str, tuple[str, str]] = {
+    "/": ("overview", "Overview"),
+    "/overview": ("overview", "Overview"),
+    "/setup": ("setup", "Setup"),
+    "/account": ("account", "Account & symbols"),
+    "/positions": ("positions", "Positions"),
+    "/activity": ("activity", "Activity"),
+    "/health": ("health", "System health"),
+}
+
+#: The complete set of state-changing actions, and the whole of it.
+#:
+#: Grouped by what they touch:
+#:   * ``connect`` / ``disconnect`` -- the session, on an explicit click only;
+#:   * ``acknowledge-sign-in``     -- a local note that the operator signed in
+#:     inside MetaTrader 5; it contacts nothing;
+#:   * ``confirm`` / ``unconfirm`` -- the local record that a real account and
+#:     symbol set were reviewed;
+#:   * ``symbols``                -- which symbols to observe.
+#:
+#: Anything that could trade, arm, switch accounts, or change broker settings is
+#: absent by construction, not by a permission check: there is no handler for it,
+#: and ``test_workstation_ui`` pins this set exactly.
+POST_ACTIONS: frozenset[str] = frozenset(
+    {
+        "connect",
+        "disconnect",
+        "acknowledge-sign-in",
+        "confirm",
+        "unconfirm",
+        "symbols",
+    }
+)
+
+#: Field names that would mean a credential is being handed to us. Their mere
+#: presence rejects the request; nothing is read, echoed, or logged.
+CREDENTIAL_FIELDS: frozenset[str] = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "pass",
+        "login",
+        "account_login",
+        "investor_password",
+        "token",
+        "access_token",
+        "market_access_token",
+        "api_key",
+        "secret",
+    }
+)
+
+MAX_BODY_BYTES = 64 * 1024
+
+#: Operator-readable reasons a confirmation can be refused.
+CONFIRM_REFUSALS = {
+    "confirm_requires_live_terminal": (
+        "Not confirmed: only a real terminal account can be confirmed. "
+        "A simulator preview never can."
+    ),
+    "confirm_requires_observed_account": "Not confirmed: no account has been observed yet.",
+    "confirm_requires_selected_symbols": "Not confirmed: choose at least one symbol first.",
+}
+
+CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; "
+    "script-src 'none'; connect-src 'none'; form-action 'self'; "
+    "base-uri 'none'; frame-ancestors 'self'"
+)
+
+
+def csp_header(allow_framing: bool = False) -> str:
+    """The policy for a response.
+
+    ``allow_framing`` exists only for a simulated session shown inside a preview
+    pane; a session attached to a real terminal is never framable.
+    """
+
+    if not allow_framing:
+        return CSP
+    return CSP.replace("frame-ancestors 'self'", "frame-ancestors *")
+
+
+@dataclass
+class WorkstationApp:
+    """Wires a wizard and a paper platform to the pages and actions."""
+
+    wizard: SetupWizard
+    platform: Any = None
+    version: str = "0.1.0"
+    nonce: str = field(default_factory=lambda: secrets.token_urlsafe(18))
+    on_event: Callable[[str], None] | None = None
+    #: One request at a time: the session object is not thread-safe, and a
+    #: serialized UI also means two tabs cannot race on a connect.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    #: Only a simulated session may be embedded in a preview pane.
+    allow_framing: bool = False
+    #: Paper snapshot read once on this thread.  The paper platform's SQLite
+    #: handles are thread-affine, and this interface never writes to it, so one
+    #: read at construction is both correct and enough.
+    paper: PaperSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if self.paper is None and self.platform is not None:
+            self.paper = read_paper_snapshot(self.platform)
+
+    # -- rendering ---------------------------------------------------------
+    def page(self, path: str) -> tuple[int, str]:
+        route = GET_ROUTES.get(path)
+        if route is None:
+            ctx = self._context("overview", "Not found")
+            return HTTPStatus.NOT_FOUND, render_page(ctx)
+        page, title = route
+        with self.lock:
+            ctx = self._context(page, title)
+            html = render_page(ctx)
+        return HTTPStatus.OK, html
+
+    def _context(self, page: str, title: str, notice: str = "") -> PageContext:
+        return build_context(
+            platform=self.platform,
+            paper=self.paper,
+            wizard=self.wizard,
+            page=page,
+            title=title,
+            action_nonce=self.nonce,
+            notice=notice,
+        )
+
+    # -- actions -----------------------------------------------------------
+    def act(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        """Run one action. Returns ``(status, redirect_path, message)``."""
+
+        if action not in POST_ACTIONS:
+            return HTTPStatus.NOT_FOUND, "/", "unknown action"
+        if str((form.get("nonce") or [""])[0]) != self.nonce:
+            return HTTPStatus.FORBIDDEN, "/", "this form is stale; reload the page and try again"
+        if any(name in form for name in CREDENTIAL_FIELDS):
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "/setup",
+                "this form must not carry credentials; AXIOM never accepts an MT5 password",
+            )
+
+        with self.lock:
+            try:
+                return self._dispatch(action, form)
+            except Exception as exc:  # never leak a stack trace into the page
+                self._log(f"action {action} failed: {type(exc).__name__}")
+                return HTTPStatus.INTERNAL_SERVER_ERROR, "/", f"{action} failed ({type(exc).__name__})"
+
+    def _dispatch(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        wizard = self.wizard
+        if action == "connect":
+            session = wizard.session
+            simulated = wizard.simulated
+            self._log(
+                "simulator preview requested" if simulated else "connect requested (observe only)"
+            )
+            session.connect()
+            if session.connected:
+                self._log(f"session active: source={session.view().get('source_kind')}")
+                if simulated:
+                    return (
+                        HTTPStatus.SEE_OTHER,
+                        "/setup",
+                        "Simulator preview started. No terminal is attached and this "
+                        "preview can never reach observation mode.",
+                    )
+                return HTTPStatus.SEE_OTHER, "/", "Connected to the terminal in observe-only mode."
+            error = (session.view().get("error") or {})
+            reason = str(error.get("reason", "unknown"))
+            self._log(f"connect failed: {reason}")
+            return HTTPStatus.SEE_OTHER, "/setup", f"Could not connect: {reason}"
+        if action == "disconnect":
+            self._log("disconnect requested")
+            simulate = wizard.simulated
+            wizard.session.disconnect()
+            if simulate:
+                return HTTPStatus.SEE_OTHER, "/setup", "Simulator preview stopped."
+            return HTTPStatus.SEE_OTHER, "/", "Disconnected. Nothing reconnects automatically."
+        if action == "acknowledge-sign-in":
+            wizard.acknowledge_sign_in()
+            return HTTPStatus.SEE_OTHER, "/setup", "Noted: you signed in inside MetaTrader 5."
+        if action == "confirm":
+            try:
+                wizard.confirm()
+            except Exception as exc:
+                reason = str(exc) or type(exc).__name__
+                self._log(f"confirm refused: {type(exc).__name__}")
+                return HTTPStatus.SEE_OTHER, "/account", CONFIRM_REFUSALS.get(
+                    reason, f"Not confirmed: {reason}"
+                )
+            self._log("configuration confirmed")
+            return HTTPStatus.SEE_OTHER, "/", "Account and symbols confirmed."
+        if action == "unconfirm":
+            wizard.reset_confirmation()
+            return HTTPStatus.SEE_OTHER, "/account", "Confirmation withdrawn."
+        if action == "symbols":
+            chosen = [value for value in form.get("symbol", []) if value]
+            wizard.choose_symbols(chosen)
+            self._log(f"symbols selected: {len(chosen)}")
+            return HTTPStatus.SEE_OTHER, "/account", f"{len(chosen)} symbol(s) selected."
+        return HTTPStatus.NOT_FOUND, "/", "unknown action"
+
+    def _log(self, message: str) -> None:
+        line = f"[axiom-workstation] {message}"
+        print(line, file=sys.stderr, flush=True)
+        if self.on_event is not None:
+            try:
+                self.on_event(message)
+            except Exception:
+                pass
+
+
+class _Handler(BaseHTTPRequestHandler):
+    server_version = "AxiomWorkstation"
+    sys_version = ""
+    protocol_version = "HTTP/1.1"
+    app: WorkstationApp  # set on the subclass created by make_server
+
+    # -- helpers -----------------------------------------------------------
+    def _send(
+        self,
+        status: int,
+        body: bytes,
+        content_type: str,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", csp_header(self.app.allow_framing))
+        if not self.app.allow_framing:
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _html(self, status: int, html: str, headers: Mapping[str, str] | None = None) -> None:
+        self._send(status, html.encode("utf-8"), "text/html; charset=utf-8", headers)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        print(f"[axiom-workstation] {self.address_string()} {format % args}", file=sys.stderr, flush=True)
+
+    # -- verbs -------------------------------------------------------------
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        status, html = self.app.page(parsed.path)
+        self._html(int(status), html)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        status, html = self.app.page(parsed.path)
+        self._html(int(status), html)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        prefix = "/actions/"
+        if not parsed.path.startswith(prefix):
+            self._html(
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                "<!doctype html><title>405</title><p>This workstation has no writable endpoints.</p>",
+                {"Allow": "GET, HEAD"},
+            )
+            return
+        action = parsed.path[len(prefix):].strip("/")
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        if length > MAX_BODY_BYTES:
+            self._html(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "<!doctype html><title>413</title>")
+            return
+        raw = self.rfile.read(length) if length else b""
+        # Declared as form fields only; parse_qs keeps every value as a list and
+        # never coerces types.
+        form = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True, strict_parsing=False)
+        status, redirect_path, message = self.app.act(action, form)
+        if status in (HTTPStatus.SEE_OTHER, HTTPStatus.FOUND):
+            # Message travels in a header-free way: we redirect to a page that
+            # re-reads state, and the "what just happened" line is shown by the
+            # destination page's own state. Keeps the URL free of query strings.
+            self._send(int(status), b"", "text/plain; charset=utf-8", {"Location": redirect_path})
+            return
+        ctx = self.app._context("overview", "Workstation", notice="")
+        self._html(
+            int(status),
+            render_message(ctx, tone="error", title="Request refused", message=message),
+        )
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def _method_not_allowed(self) -> None:
+        self._html(
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            "<!doctype html><title>405</title><p>This workstation has no writable endpoints.</p>",
+            {"Allow": "GET, HEAD"},
+        )
+
+
+class WorkstationServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address: tuple[str, int], app: WorkstationApp) -> None:
+        handler = type("BoundHandler", (_Handler,), {"app": app})
+        super().__init__(address, handler)
+        self.app = app
+
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def make_server(
+    app: WorkstationApp,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    allow_remote: bool = False,
+) -> WorkstationServer:
+    """Bind a loopback server.
+
+    ``allow_remote`` exists only so a simulated session can be previewed from
+    another machine in a development sandbox.  The launcher refuses to set it for
+    a real terminal session, so a live session is never reachable off-host.
+    """
+
+    if host not in LOOPBACK_HOSTS and not allow_remote:
+        raise ValueError("the workstation only binds to a loopback address")
+    return WorkstationServer((host, port), app)
+
+
+__all__ = [
+    "CONFIRM_REFUSALS",
+    "CREDENTIAL_FIELDS",
+    "csp_header",
+    "GET_ROUTES",
+    "LOOPBACK_HOSTS",
+    "POST_ACTIONS",
+    "WorkstationApp",
+    "WorkstationServer",
+    "make_server",
+]

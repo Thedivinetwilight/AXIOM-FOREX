@@ -59,6 +59,106 @@ The `app/` package remains the strict M1 fail-closed safety/domain kernel. `axio
 
 [MetaTrader 5 integration](docs/MT5_INTEGRATION.md) replaces the generic external-broker placeholder with an adapter over the official `MetaTrader5` Python package and an installed terminal: terminal/account status, symbol discovery and broker-term cross-checks, bid/ask ticks and tick-built two-sided bars, account currency/leverage/margin reads, positions, order checks, market-deal submission, order/deal history, reconciliation, and restart recovery. The only secret is the terminal password, stored in the operating-system credential vault and entered/replaced/cleared locally with `python -m axiom_forex.cli mt5 --mt5-action set-password`; no token field exists because MT5 has no separate API token. Live submission is off by default, requires an explicit local `TRADING_ENABLED` mode plus an in-process `arm_trading()` call naming the account, an allowed pre-trade decision, and an approved active strategy; nothing is sent on connect or at start, the durable order record is written before `order_send`, and an unknown outcome disarms trading and blocks further orders until reconciliation resolves it. A bounded session cycle (`python -m axiom_forex.cli mt5-session`) connects to the already-running terminal, detects and audits the account mode, and runs at most one gate-approved order. You choose the account in MT5: the default `SELECTED_ACCOUNT` policy routes to whichever account the terminal has selected, demo or real, with the same adapter and workflow (`--mt5-account-mode-policy DEMO_ONLY` is an explicit opt-in for a demo-only run). Account mode is reported and audited but never substitutes for the separate trading-enabled setting; a terminal account switch keeps that setting, drops the previous account's cached state, and revalidates the new account's currency, leverage, margin mode, symbols, and execution terms before routing. Order records and reconciliation are account-scoped, so no account's positions, reservations, risk state, or unresolved orders are reused by another. Reports redact the account identifier and never show balances, equity, or credentials. All tests use a fake `MetaTrader5` module: no real terminal, account, or credential is touched.
 
+## Windows workstation (observe-only UI)
+
+`axiom_forex/workstation/` is a local, read-only interface over the paper platform and an
+already-signed-in MetaTrader 5 terminal. It exists so you can see what AXIOM reads without any
+way to trade from the interface: no order entry, no arming, no cancel/modify, no account
+switching, no broker-settings changes, no automatic reconnection, and no background polling.
+
+### One-time setup on Windows
+
+1. Install **Python 3.11 or newer** (tick *Add python.exe to PATH* in the installer), then in a
+   new terminal:
+
+   ```bat
+   py -m pip install -e .
+   py -m pip install MetaTrader5
+   ```
+
+2. Install MetaTrader 5 **from your broker**, open it once, and sign in to the account you want
+   to observe — demo or real, your choice. Leave the terminal running and signed in. AXIOM
+   reuses that session: it never asks for, stores, or displays your MT5 password, and it never
+   logs in for you.
+
+3. Create `mt5_settings.local.json` in the repository root (already git-ignored). It holds no
+   credential — only which terminal to attach to:
+
+   ```json
+   {
+     "terminal_path": "C:/Program Files/MetaTrader 5/terminal64.exe",
+     "server": "<your broker server, e.g. Broker-Demo>",
+     "account_login": <your account number>,
+     "mode": "OBSERVE_ONLY",
+     "use_existing_session": true
+   }
+   ```
+
+   The setup screen shows this template, and reports the terminal paths and packages it
+   actually found on your machine. The path lives in this file, not in the interface.
+
+### Launch
+
+Double-click **`scripts\start-workstation.cmd`**, or run one of:
+
+```bat
+py -m axiom_forex.workstation.launch                    :: connect to your local terminal
+py -m axiom_forex.workstation.launch --simulate         :: offline preview, sample data only
+py -m axiom_forex.workstation.launch --print-prerequisites
+py -m axiom_forex.workstation.launch --port 8766        :: if 8765 is taken
+```
+
+The UI opens at `http://127.0.0.1:8765/` and binds to loopback only. The launcher refuses to
+expose a real terminal session on any other interface, and on a machine without Windows or
+MetaTrader 5 it stops and prints exactly what is missing instead of pretending to connect.
+
+### What the two modes mean
+
+| Launch | Session panel says | Can reach "ready for observation"? |
+| --- | --- | --- |
+| default | `Connected · <mode>` after **Connect** | Yes, after you review and confirm |
+| `--simulate` | `Simulator · not MT5`, banner **SIMULATED / SAMPLE DATA** | Never |
+
+The simulator starts **disconnected and unconfirmed**. Pressing its button starts a preview of
+the interface with sample values; it contacts nothing, every value it shows is labelled `Sample`
+or `SAMPLE DATA`, and the wizard's ready step stays blocked. Only a successful, explicit
+**Connect** to your real local terminal — the one you signed in to — can produce *ready for
+observation*, because only then has AXIOM actually read an account.
+
+### First run with a real terminal
+
+1. **Check this machine** — Windows, Python ≥ 3.11, the `MetaTrader5` package, the terminal, and
+   your settings file are detected; anything missing is listed with the exact command to fix it.
+2. **Sign in inside MetaTrader 5** — you do this in the terminal, then tick the confirmation.
+   AXIOM never asks for the password.
+3. **Connect (observe only)** — an explicit click. It attaches to the running terminal, reads
+   status, account terms, and Market Watch symbols, and gets no order capability of any kind.
+4. **Review the detected account** — broker/server, currency, leverage, margin accounting,
+   account mode (demo or real, as *the terminal* reports it), terminal trading permission, and
+   how many symbols are available. The login appears only as a short fingerprint; balances and
+   equity are never read into the interface.
+5. **Confirm account and symbols** — choose the symbols to observe, then confirm. Nothing is
+   inferred: what you confirm is what the terminal reported.
+6. **Ready for observation** — shown only for a real terminal, with what was *not* enabled
+   listed explicitly (no trading, no order entry, no arming, no auto-reconnect).
+
+If MetaTrader 5 is closed, not signed in, or the `MetaTrader5` package is missing, **Connect**
+fails and says why; nothing retries on its own, and pressing Disconnect stops the session until
+you press Connect again.
+
+### What you are looking at
+
+The persistent status bar shows connection state and the account mode together, so demo and
+real are never confused. Every figure carries its data class — `REAL BROKER`, `PAPER`,
+`SAMPLE FIXTURE`, or `SIMULATED` — and the paper portfolio, positions, and audit activity come
+from the offline paper platform, not from your broker. Session-time values come from the
+declared calendar and are marked indicative until your broker's sessions, holidays, and DST
+rules are confirmed.
+
+The interface contains exactly six actions, all read-only setup: `connect`, `disconnect`,
+`acknowledge-sign-in`, `confirm`, `unconfirm`, and `symbols`. There is no endpoint that can
+trade, arm trading, switch accounts, or change broker settings.
+
 ## Safety
 
 This repository must not contain credentials, secrets, or a live order-routing path. Unknown instruments, stale or incomplete quotes, missing specifications, closed markets, invalid risk calculations, unresolved orders, failed provider/broker conformance, failed provider profile onboarding, rejected or quarantined imported data, or live-mode requests fail closed and block new orders. Generic 24/5 availability is never a production default; explicit broker calendars, daily breaks, holidays, DST, weekend gaps, instrument availability, costs, financing, leverage, and account terms must be supplied and conformance-tested before any external integration is considered.

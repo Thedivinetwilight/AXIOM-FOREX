@@ -26,7 +26,6 @@ Connecting, loading data, and starting the application never send an order:
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -46,6 +45,7 @@ from ...config.mt5 import (
 )
 from .conformance import conformance_requirements
 from .account import AccountTerms, account_terms, margin_for_order
+from .identity import account_fingerprint as fingerprint_for_login
 from .orders import (
     MT5OrderCheck,
     MT5OrderOutcome,
@@ -319,13 +319,7 @@ class MT5TradingAdapter:
                 login = self._account_identity[0]
             else:
                 return ""
-        try:
-            value = int(login)
-        except (TypeError, ValueError):
-            return ""
-        if value <= 0:
-            return ""
-        return hashlib.sha256(f"axiom-mt5-account|{value}".encode("utf-8")).hexdigest()[:12]
+        return fingerprint_for_login(login)
 
     def redacted_account(self) -> dict[str, Any]:
         """The account facts an operator or report may see.  No identifiers."""

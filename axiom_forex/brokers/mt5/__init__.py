@@ -45,6 +45,7 @@ from .conformance import (
     broker_dependent_requirements,
     conformance_requirements,
 )
+from .identity import account_fingerprint
 from .orders import (
     MT5OrderCheck,
     MT5OrderOutcome,
