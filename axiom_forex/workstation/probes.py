@@ -386,8 +386,8 @@ def prerequisite_help(report: EnvironmentReport) -> list[dict[str, str]]:
                 "title": "Install (or locate) the MetaTrader 5 terminal",
                 "detail": (
                     "Install the terminal from your broker, then open it once and "
-                    "sign in. If it lives somewhere unusual, type its full path on "
-                    "the Account & symbols screen -- nothing is written to disk."
+                    "sign in. If it lives somewhere unusual, put its full path in "
+                    "the terminal_path field of mt5_settings.local.json and restart."
                 ),
             }
         )

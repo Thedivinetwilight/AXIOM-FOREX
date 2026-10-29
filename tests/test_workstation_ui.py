@@ -316,6 +316,23 @@ def test_launch_builds_a_disconnected_simulator(monkeypatch=None):
 # ---------------------------------------------------------------------------
 
 
+def test_prerequisite_help_never_points_at_a_removed_control():
+    """Guidance must match the controls that exist.
+
+    The terminal-path form was removed from the interface; help must send
+    operators to the settings file instead of a screen that no longer offers it.
+    """
+
+    from axiom_forex.workstation.probes import prerequisite_help
+
+    help_items = prerequisite_help(offline_environment())
+    combined = " ".join(item["detail"] for item in help_items)
+    assert "Account & symbols screen" not in combined
+    assert "type its full path" not in combined
+    terminal_item = next(item for item in help_items if item["code"] == "mt5_terminal_not_found")
+    assert "mt5_settings.local.json" in terminal_item["detail"]
+
+
 @pytest.mark.parametrize("path", sorted(GET_ROUTES))
 def test_every_page_marks_a_simulator_as_simulated_sample_data(path):
     app = app_for(simulated_wizard())
