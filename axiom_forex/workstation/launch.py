@@ -277,6 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     host, port = server.server_address[:2]
+    # A wildcard bind is a preview-only convenience; the address to click is still
+    # this machine's loopback, and the console says which one it is.
+    display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     mode = "simulated preview -- NOT MetaTrader 5" if args.simulate else "terminal attached"
     print("")
     print("  AXIOM-FOREX workstation")
@@ -285,11 +288,14 @@ def main(argv: list[str] | None = None) -> int:
         print("             nothing connects to a terminal; sample data only,")
         print("             and observation mode cannot be reached from here")
     print(f"  settings   {settings_path if settings_path.exists() else '(not found)'}")
-    print(f"  bind       {host}:{port}")
+    print(
+        f"  bind       {host}:{port}"
+        + ("  (all interfaces: preview only)" if display_host != host else "")
+    )
     # Assembled from parts: the static safety check forbids network-looking
     # literals in first-party code, and this process only ever *serves* a page.
     scheme = "ht" + "tp"
-    url = f"{scheme}://{host}:{port}/"
+    url = f"{scheme}://{display_host}:{port}/"
     print(f"  open       {url}")
     print("  stop       Ctrl+C")
     print("")
