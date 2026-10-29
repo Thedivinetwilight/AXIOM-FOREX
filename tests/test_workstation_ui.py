@@ -31,6 +31,7 @@ import threading
 from contextlib import redirect_stderr
 from dataclasses import dataclass, replace
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pytest
 
@@ -298,6 +299,26 @@ def test_startup_pages_say_disconnected_before_any_click():
     assert "Preview stopped" in page.text_content
     # And nothing was started by looking at it.
     assert app.wizard.session.view()["connect_count"] == 0
+
+
+def test_the_launcher_opens_the_browser_only_after_the_socket_listens():
+    """A first page load must not race the server.
+
+    The launcher (not the .cmd wrapper) opens the browser, and only once the
+    socket is bound; --no-browser suppresses it.
+    """
+
+    from axiom_forex.workstation import launch
+
+    parser = launch.build_parser()
+    assert parser.parse_args([]).no_browser is False
+    assert parser.parse_args(["--no-browser"]).no_browser is True
+
+    source = Path(launch.__file__).read_text(encoding="utf-8")
+    listen = source.index("make_server(")
+    open_browser = source.index("webbrowser.open(")
+    assert listen < open_browser, "the browser must be opened after the server is created"
+    assert "serve_forever" in source
 
 
 def test_launch_builds_a_disconnected_simulator(monkeypatch=None):

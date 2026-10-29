@@ -106,9 +106,11 @@ py -m axiom_forex.workstation.launch                    :: connect to your local
 py -m axiom_forex.workstation.launch --simulate         :: offline preview, sample data only
 py -m axiom_forex.workstation.launch --print-prerequisites
 py -m axiom_forex.workstation.launch --port 8766        :: if 8765 is taken
+py -m axiom_forex.workstation.launch --no-browser       :: do not open a browser
 ```
 
-The UI opens at `http://127.0.0.1:8765/` and binds to loopback only. The launcher refuses to
+The launcher opens `http://127.0.0.1:8765/` in your browser once the server is listening
+(`--no-browser` suppresses that). It binds to loopback only. The launcher refuses to
 expose a real terminal session on any other interface, and on a machine without Windows or
 MetaTrader 5 it stops and prints exactly what is missing instead of pretending to connect.
 

@@ -51,7 +51,8 @@ if errorlevel 1 (
 )
 
 echo   Starting the workstation...
-start "" http://127.0.0.1:8765/
+echo   ^(your browser opens once the server is listening^)
+echo.
 %PYTHON% -m axiom_forex.workstation.launch
 
 if errorlevel 1 (

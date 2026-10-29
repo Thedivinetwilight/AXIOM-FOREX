@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import webbrowser
 from pathlib import Path
 
 from .app import WorkstationApp, make_server
@@ -103,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="start anyway on a non-Windows machine (only useful with --simulate)",
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="do not open the dashboard in your default browser",
+    )
     parser.add_argument("--print-prerequisites", action="store_true", help="check the machine and exit")
     return parser
 
@@ -170,12 +176,21 @@ def main(argv: list[str] | None = None) -> int:
     # Assembled from parts: the static safety check forbids network-looking
     # literals in first-party code, and this process only ever *serves* a page.
     scheme = "ht" + "tp"
-    print(f"  open       {scheme}://{host}:{port}/")
+    url = f"{scheme}://{host}:{port}/"
+    print(f"  open       {url}")
     print("  stop       Ctrl+C")
     print("")
     print("  It never trades, never reconnects, and never accepts an MT5 password.")
     print("  Connecting happens only when you press Connect in the browser.")
     print("")
+    if not args.no_browser:
+        # Opened only after the socket is listening, so the first page load
+        # cannot fail with "connection refused".
+        try:
+            webbrowser.open(url)
+        except Exception:
+            print(f"Could not open a browser; visit {url} yourself.", file=sys.stderr)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
