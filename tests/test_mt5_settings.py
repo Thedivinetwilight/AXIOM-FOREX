@@ -115,7 +115,7 @@ def test_settings_are_valid_and_carry_no_secret():
         ({"terminal_path": ""}, "invalid_terminal_path"),
         ({"terminal_path": "notes.txt"}, "invalid_terminal_path"),
         ({"server": ""}, "missing_server"),
-        ({"server": "Broker Demo"}, "invalid_server"),
+        ({"server": "   "}, "missing_server"),
         ({"account_login": 0}, "invalid_account_login"),
         ({"account_login": "55500123"}, "invalid_account_login"),
         ({"mode": "SOMETIMES"}, "invalid_execution_mode"),
@@ -130,6 +130,134 @@ def test_settings_validation_is_explicit(overrides, reason):
     result = settings(**overrides).validate()
     assert not result.valid
     assert reason in result.errors
+
+
+# -- broker server identifiers ----------------------------------------------
+#
+# Real broker servers contain internal spaces ("Broker Name - Live").  The
+# validator accepts those while still refusing values that could never match
+# what a terminal reports: blanks, surrounding whitespace, and control or
+# invisible characters.
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Broker Demo",
+        "Broker Name - Live",
+        "Broker  Demo",  # two spaces is a different identifier; kept as written
+        "A B C",
+        "Broker-Demo",
+        "Broker_Demo.1",
+    ],
+)
+def test_server_with_internal_spaces_is_valid(value):
+    candidate = settings(server=value)
+    result = candidate.validate()
+    assert result.valid, result.errors
+    # The accepted string is preserved exactly: no trimming, collapsing, or
+    # case folding, so it still describes the account the operator chose.
+    assert candidate.server == value
+
+
+@pytest.mark.parametrize(
+    "value, reason",
+    [
+        ("", "missing_server"),
+        (" ", "missing_server"),
+        ("\t", "missing_server"),
+        ("  Broker Demo", "server_padded"),
+        ("Broker Demo  ", "server_padded"),
+        ("\tBroker Demo", "server_padded"),
+        ("Broker Demo\n", "server_padded"),
+        ("Broker\tDemo", "server_control_character"),
+        ("Broker\nDemo", "server_control_character"),
+        ("Broker\rDemo", "server_control_character"),
+        ("Broker\x00Demo", "server_control_character"),
+        ("Broker\x1bDemo", "server_control_character"),
+        ("Broker\u200bDemo", "server_control_character"),  # zero-width space
+        ("Broker\u00a0Demo", "server_invalid_whitespace"),  # non-breaking space
+        ("Broker\u2003Demo", "server_invalid_whitespace"),  # em space
+    ],
+)
+def test_invalid_server_identifiers_are_refused(value, reason):
+    result = settings(server=value).validate()
+    assert not result.valid
+    assert reason in result.errors
+
+
+def test_server_must_be_a_string():
+    for value in (None, 123, 55500123, ["Broker Demo"]):
+        result = settings(server=value).validate()
+        assert not result.valid
+        assert "missing_server" in result.errors
+
+
+def test_a_spaced_server_loads_from_the_local_document_exactly(tmp_path):
+    document = {
+        "terminal_path": "C:/Program Files/MetaTrader 5/terminal64.exe",
+        "server": "Broker Name - Live",
+        "account_login": 55500123,
+        "mode": "OBSERVE_ONLY",
+    }
+    path = tmp_path / "mt5_settings.local.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    loaded = load_settings_file(path)
+    assert loaded is not None
+    assert loaded.server == "Broker Name - Live"
+    assert loaded.validate().valid
+    # The boundary spaces of a two-space identifier survive the round trip.
+    document["server"] = "Broker  Demo"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert load_settings_file(path).server == "Broker  Demo"
+
+
+def test_a_padded_server_in_the_document_fails_to_load(tmp_path):
+    path = tmp_path / "mt5_settings.local.json"
+    path.write_text(
+        json.dumps(
+            {
+                "terminal_path": "C:/Program Files/MetaTrader 5/terminal64.exe",
+                "server": " Broker Demo",
+                "account_login": 55500123,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(MT5SettingsFileError) as caught:
+        load_settings_file(path)
+    assert "server_padded" in str(caught.value)
+
+
+def test_spaced_server_matches_only_the_same_server_at_the_terminal():
+    """Account matching compares the declared value; it never rewrites it."""
+
+    from axiom_forex.brokers.mt5.terminal import MT5Terminal, MT5TerminalUnavailable
+    from tests.fake_mt5 import FakeMT5
+
+    declared = settings(server="Broker Name - Live")
+    matching = MT5Terminal(declared, module=FakeMT5(account_server="Broker Name - Live"))
+    status = matching.connect()
+    assert status.account_server == "Broker Name - Live"
+    assert declared.server == "Broker Name - Live"
+
+    for reported in ("Broker-Name-Live", "Broker Name Live", "Broker Name - Live 2"):
+        mismatched = MT5Terminal(
+            declared, module=FakeMT5(account_server=reported)
+        )
+        with pytest.raises(MT5TerminalUnavailable) as caught:
+            mismatched.connect()
+        assert caught.value.reason == "mt5_server_mismatch"
+        # A refused connection leaves nothing open.
+        assert mismatched.connected is False
+
+
+def test_credential_entry_is_still_keyed_by_server_and_login_for_spaced_names():
+    first = settings(server="Broker Name - Live").credential_entry()
+    assert first == "terminal_login:broker name - live:55500123"
+    assert settings(server="Broker Name Live").credential_entry() != first
+    assert settings(server="Broker Name - Live", account_login=55500999).credential_entry() != first
 
 
 def test_local_terminal_path_is_redacted_in_reports(tmp_path):

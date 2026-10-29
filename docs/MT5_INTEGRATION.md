@@ -92,6 +92,14 @@ It is not:
    `secret`, …) is **refused**, not read, and `market_access_token_required` may
    not be set — MT5 has no separate API token.
 
+   `server` is copied exactly as MetaTrader 5 shows it. Real broker server names
+   contain internal spaces (`"Broker Name - Live"`), and those are **accepted**;
+   the value is never trimmed, case-folded, or otherwise rewritten, because it has
+   to match the server the terminal reports for your account. Surrounding
+   whitespace (`" Broker Name - Live"`), tabs, newlines, and invisible characters
+   are refused rather than silently normalized, so a typo cannot quietly become a
+   different identifier.
+
 4. **Store the password in the OS credential vault.** It is prompted, never
    echoed, never an argument, never an environment variable:
 

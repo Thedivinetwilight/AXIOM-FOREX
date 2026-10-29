@@ -15,6 +15,7 @@ saved for one account can never be silently reused for another.
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -35,6 +36,17 @@ MASKED_DISPLAY = "********"
 
 MIN_PASSWORD_LENGTH = 1
 MAX_PASSWORD_LENGTH = 1024
+
+
+def _is_control_character(character: str) -> bool:
+    """True for C0/C1 control codes and Unicode format characters.
+
+    Format characters include the zero-width space, which is invisible and would
+    otherwise let two different-looking identifiers compare unequal in a way no
+    operator could see.
+    """
+
+    return unicodedata.category(character) in {"Cc", "Cf"}
 
 
 class MT5ExecutionMode(str, Enum):
@@ -122,8 +134,18 @@ class MT5Settings:
             errors.append("invalid_terminal_path")
         if not isinstance(self.server, str) or not self.server.strip():
             errors.append("missing_server")
-        elif any(character.isspace() for character in self.server.strip()):
-            errors.append("invalid_server")
+        elif self.server != self.server.strip():
+            # Leading or trailing whitespace would make the declared identity
+            # differ from what the terminal reports.  Reject it instead of
+            # trimming it into a different identifier behind the operator's back.
+            errors.append("server_padded")
+        elif any(_is_control_character(character) for character in self.server):
+            errors.append("server_control_character")
+        elif any(character.isspace() and character != " " for character in self.server):
+            # A plain internal space is legitimate ("Broker Demo"); tabs, newlines,
+            # non-breaking spaces and other exotic separators are not part of a
+            # broker server identifier and must never be silently normalized.
+            errors.append("server_invalid_whitespace")
         if not isinstance(self.account_login, int) or isinstance(
             self.account_login, bool
         ):
@@ -181,7 +203,14 @@ class MT5Settings:
     # -- reporting ------------------------------------------------------
 
     def credential_entry(self) -> str:
-        """Vault entry name bound to *this* terminal, server, and login."""
+        """Vault entry name bound to *this* terminal, server, and login.
+
+        This is a *key*, not the account identifier: it is case-folded so that a
+        password saved before a server name was re-cased is still found. The
+        identifier used to match the account (`MT5Settings.server`) is never
+        case-folded or otherwise rewritten -- validation rejects surrounding
+        whitespace rather than trimming it.
+        """
 
         return (
             f"terminal_login:{self.server.strip().lower()}:"

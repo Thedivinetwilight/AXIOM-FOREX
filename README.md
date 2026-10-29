@@ -114,6 +114,30 @@ The launcher opens `http://127.0.0.1:8765/` in your browser once the server is l
 expose a real terminal session on any other interface, and on a machine without Windows or
 MetaTrader 5 it stops and prints exactly what is missing instead of pretending to connect.
 
+### Updating an existing clone
+
+Close the running workstation first (Ctrl+C in its console), then double-click
+**`scripts\update-workstation.cmd`** — or run it from a terminal in your clone:
+
+```bat
+scripts\update-workstation.cmd
+```
+
+It updates the branch you already have, in place:
+
+```bat
+git fetch origin arena/f67c2859-axiom-forex
+git merge --ff-only origin/arena/f67c2859-axiom-forex
+.venv\Scripts\python.exe -m pip install -e . --no-deps
+```
+
+It never reclones, resets, cleans, stashes, or overwrites anything, and it leaves
+`mt5_settings.local.json`, `.venv`, and every other untracked or ignored file exactly as
+it is. It stops **before changing anything** — and says why — when Git is missing, the folder
+is not a Git working tree, the checkout is on another branch (or detached), a *tracked* file
+has local changes, or the branch cannot fast-forward. Your local edits are never discarded for
+you: commit or revert them yourself, then re-run the updater.
+
 ### What the two modes mean
 
 | Launch | Session panel says | Can reach "ready for observation"? |
