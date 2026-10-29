@@ -4,8 +4,10 @@ rem  AXIOM-FOREX workstation launcher (Windows)
 rem
 rem  Double-click this file, or run it from cmd.
 rem
-rem  It starts the local, observe-only workstation on http://127.0.0.1:8765
-rem  and opens your browser. It installs nothing, changes no settings, and
+rem  It starts the local workstation on http://127.0.0.1:8765 and opens your
+rem  browser. Paper trading (simulated fills on live prices) is the default;
+rem  live execution is off until you pass the Trading mode checks and confirm
+rem  once, in the browser. It installs nothing, changes no settings, and
 rem  never asks for a password.
 rem
 rem  Prerequisites (once, in the same Python):

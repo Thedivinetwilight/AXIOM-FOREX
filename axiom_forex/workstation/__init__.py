@@ -1,15 +1,22 @@
-"""Local, observe-only workstation for AXIOM-FOREX.
+"""Local workstation for AXIOM-FOREX: paper and live, chosen explicitly.
 
-The workstation is a *reader*. It renders what the paper platform and an
-already-signed-in MetaTrader 5 terminal report, and it has no order entry, no
-arming, no account switching, and no automatic reconnection anywhere in it.
+The workstation reads what the paper platform and an already-signed-in
+MetaTrader 5 terminal report, and it owns exactly one trading-shaped control: the
+execution mode.  Paper simulates every fill locally; live routes an approved
+order through the MetaTrader 5 execution path.  There is still no order entry, no
+arming, no account switching, and no automatic reconnection anywhere in it, and
+the mode switch itself never places an order.
 
 Modules
 -------
 ``probes``
     Offline checks of the machine (OS, Python, packages, terminal, settings file).
 ``session``
-    The observe-only terminal session. Connects on request, never on its own.
+    The data-only terminal session. Connects on request, never on its own.
+``mode``
+    Paper/live execution mode: persisted, audited, one confirmation for live.
+``preflight``
+    Every genuine blocker to live execution, each with the step that clears it.
 ``setup``
     The first-run wizard state machine and its read-only guarantees.
 ``context``

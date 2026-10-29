@@ -16,6 +16,12 @@ enforced structurally rather than by convention:
 ``SimulatedObservationSource`` exists so the interface can be explored on a
 machine without MT5.  It is always labelled ``SIMULATED`` in every surface, it
 never contacts anything, and it is only ever selected by an explicit flag.
+
+The object *here* is still data-only.  Paper trading reads prices from the same
+terminal session through :meth:`MT5ObservationSource.market_data`, which wraps
+the terminal's quote/ticks surface -- never an order surface -- so paper mode
+can be priced from real broker data without any execution capability existing in
+this module.
 """
 
 from __future__ import annotations
@@ -59,6 +65,34 @@ class ConnectionRefused(Exception):
 
     def audit_view(self) -> dict[str, Any]:
         return {"reason": self.reason, "detail": self.detail, "hint": self.hint}
+
+
+#: Reasons a Connect attempt can fail where the fix is in the terminal, not in
+#: this app.  Each hint names the exact next step; none of them suggests
+#: relaxing a check, and none echoes a value from the settings document.
+CONNECT_HINTS: dict[str, str] = {
+    "mt5_account_mismatch": (
+        "MetaTrader 5 is signed in to a different account than the one "
+        "mt5_settings.local.json names. Sign in to the configured account inside "
+        "MetaTrader 5, then press Connect again. AXIOM will not accept a different "
+        "account, and it never switches accounts for you."
+    ),
+    "mt5_server_mismatch": (
+        "The terminal is connected to a different broker server than the one "
+        "mt5_settings.local.json names. Switch to an account on the configured "
+        "server inside MetaTrader 5, then press Connect again -- or correct the "
+        "settings document if that server is the one you meant."
+    ),
+    "mt5_terminal_not_connected": (
+        "The terminal answered but is not connected to a broker. Reconnect inside "
+        "MetaTrader 5, then press Connect here again."
+    ),
+}
+
+DEFAULT_CONNECT_HINT = (
+    "Open MetaTrader 5, sign in to the account you want, and leave it running; "
+    "then press Connect again."
+)
 
 
 @runtime_checkable
@@ -122,12 +156,35 @@ class MT5ObservationSource:
             raise ConnectionRefused(
                 exc.reason,
                 exc.detail,
-                "Open MetaTrader 5, sign in to the account you want, and leave it "
-                "running; then press Connect again.",
+                CONNECT_HINTS.get(exc.reason, DEFAULT_CONNECT_HINT),
             ) from exc
         except MT5Error as exc:
-            raise ConnectionRefused(exc.reason, exc.detail) from exc
+            raise ConnectionRefused(
+                exc.reason, exc.detail, CONNECT_HINTS.get(exc.reason, DEFAULT_CONNECT_HINT)
+            ) from exc
         self._terminal = terminal
+
+    def market_data(self, freshness: Any) -> Any:
+        """The terminal's quote surface, wrapped for paper execution.
+
+        This is the *data* half of the terminal: ``quote``, ``ticks``, and
+        ``resolve_symbol``.  There is no order surface in the object returned, so
+        a paper decision can be priced from real broker ticks without gaining any
+        ability to send anything.
+        """
+
+        if self._terminal is None or not self._terminal.connected:
+            raise ConnectionRefused(
+                "not_connected",
+                "no terminal session is open",
+                "Press Connect first. Paper trading reads prices from the terminal "
+                "you connected; without it there is no price to use.",
+            )
+        from ..execution.live_data_paper import TerminalMarketData
+
+        return TerminalMarketData(
+            terminal=self._terminal, freshness=freshness, clock=self.clock
+        )
 
     def disconnect(self) -> None:
         if self._terminal is not None:
@@ -151,6 +208,8 @@ class MT5ObservationSource:
         return {
             "connected": True,
             "source_kind": self.kind,
+            #: Where a paper fill would be priced from.  Real ticks, or none.
+            "market_data": "TERMINAL_TICKS",
             "terminal": {
                 "name": status.terminal_name,
                 "build": status.build,
@@ -238,6 +297,7 @@ class SimulatedObservationSource:
         return {
             "connected": True,
             "source_kind": self.kind,
+            "market_data": "SAMPLE",
             "simulated": True,
             "terminal": {
                 "name": "AXIOM offline simulator",
@@ -343,6 +403,18 @@ class ObservationSession:
     def should_poll(self) -> bool:
         return False
 
+    def market_data_class(self) -> str:
+        """Where prices would come from right now: terminal ticks, or nothing."""
+
+        if not self.connected:
+            return "NONE"
+        kind = getattr(self.source, "kind", "")
+        if kind == "SIMULATED":
+            return "SAMPLE"
+        if kind == "LIVE_TERMINAL":
+            return "TERMINAL_TICKS"
+        return "NONE"
+
     @property
     def connected(self) -> bool:
         return self.state == CONNECTED
@@ -368,6 +440,9 @@ class ObservationSession:
             "auto_reconnect": False,
             "auto_disconnect": False,
             "polling": False,
+            "market_data": self.market_data_class(),
+            #: This object holds a data terminal only; execution mode decides
+            #: whether a strategy's order is simulated or routed elsewhere.
             "trading_capability": "none",
         }
 

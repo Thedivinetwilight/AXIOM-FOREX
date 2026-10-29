@@ -240,6 +240,37 @@ mode, currency, leverage and margin mode. Balances, equity, margin, free margin,
 and profit are never reported (`"withheld"`), and no password or token appears in
 any surface.
 
+## Execution mode: paper or live
+
+The workstation (`axiom_forex/workstation/`) owns one trading-shaped control and
+nothing else: which execution path an approved order would take.
+
+| Mode | Data | Execution |
+| --- | --- | --- |
+| `PAPER` (default) | bid/ask ticks from the connected terminal, through `MT5ObservationSource.market_data()` and `TerminalMarketData` | `PaperTradingOnLiveData` → `PaperExecutionEngine`, which re-runs the pre-trade gate and writes a simulated receipt with `live: false`. The paper object graph holds no order-submitting surface. |
+| `LIVE` | the same terminal | `MT5TradingAdapter.submit()`, with every check this document describes still in force. |
+
+`ExecutionRouter` (`axiom_forex/execution/mode_router.py`) is the only dispatcher:
+`route_paper` refuses unless the mode is `PAPER` and only touches the paper
+engine; `route_live` refuses unless the mode is `LIVE`, confirmed in this
+process, and the submitter reports itself armed. There is no fallback in either
+direction, so a refused live order is an error rather than a quiet paper fill.
+
+Enabling live needs, in this order: every preflight blocker cleared (settings
+valid *and* `TRADING_ENABLED`, package + terminal present, a session opened by an
+explicit Connect, the exact configured account and server, a confirmed
+demo/real account type, terminal trading permission, selected symbols, and the
+operator's configuration confirmation), then exactly one typed confirmation
+(`ENABLE LIVE TRADING`). The switch itself sends no order, connects nothing, and
+arms nothing. Each change and each refusal is appended to
+`execution_mode_audit.local.json` beside the settings document, and to a durable
+audit log when one is open. A saved `LIVE` is never effective in a new process
+until it is confirmed again.
+
+`mt5_account_mismatch` / `mt5_server_mismatch` are surfaced as preflight blockers
+with the sign-in-and-reconnect step. The identity check is never relaxed: the
+terminal must be signed in to the account the settings document names.
+
 ## Broker-specific information still required
 
 The terminal supplies these, but AXIOM needs them captured and reviewed before

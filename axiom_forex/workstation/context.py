@@ -8,6 +8,10 @@ are never blended:
 * **paper facts** -- the fixture/paper platform's own status, always labelled
   with its data class (``SYNTHETIC_FIXTURE``, ``PAPER``, imported research, …).
 
+The execution mode (paper vs live) and the live preflight travel alongside, as
+separate layers: neither is derived from the other, and neither changes what the
+terminal facts are.
+
 If a read fails, the page renders an error/empty state instead of inventing a
 value.  Nothing here mutates anything.
 """
@@ -20,6 +24,7 @@ from typing import Any, Mapping
 
 from app.audit.log import sanitize_audit_value
 
+from .mode import default_mode_view
 from .setup import SetupWizard, safety_statement
 
 #: Data-class labels shown next to every figure, so real/paper/fixture can never
@@ -185,6 +190,9 @@ class TerminalView:
     symbols: tuple[Mapping[str, Any], ...]
     error: Mapping[str, Any] | None
     connected_at: Any
+    #: ``TERMINAL_TICKS`` when a live terminal is connected (paper mode would be
+    #: priced from real ticks), ``SAMPLE`` for the simulator, ``NONE`` otherwise.
+    market_data: str = "NONE"
 
     @property
     def data_class(self) -> str:
@@ -214,6 +222,7 @@ def read_terminal_view(session: Any) -> TerminalView:
         symbols=tuple(snapshot.get("symbols", ()) or ()),
         error=view.get("error"),
         connected_at=view.get("connected_at"),
+        market_data=str(view.get("market_data", "NONE") or "NONE"),
     )
 
 
@@ -232,6 +241,10 @@ class PageContext:
     notice: str = ""
     readonly: bool = True
     extra: Mapping[str, Any] = field(default_factory=dict)
+    #: Paper vs live execution mode, as rendered by the persistent indicator.
+    execution_mode: Mapping[str, Any] = field(default_factory=dict)
+    #: The live preflight, recomputed for each page load.  Never cached.
+    preflight: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def safety(self) -> dict[str, Any]:
@@ -251,6 +264,18 @@ class PageContext:
     def account_mode(self) -> dict[str, Any]:
         return self.wizard.account_mode()
 
+    @property
+    def live_mode(self) -> bool:
+        return str(self.execution_mode.get("mode", "PAPER")).upper() == "LIVE"
+
+    @property
+    def live_effective(self) -> bool:
+        return bool(self.execution_mode.get("live_effective", False))
+
+    @property
+    def preflight_ready(self) -> bool:
+        return bool(self.preflight.get("ready", False))
+
     def nav_badge(self, page: str) -> str:
         if page == "positions" and self.paper.open_positions:
             return str(len(self.paper.open_positions))
@@ -267,6 +292,8 @@ def build_context(
     notice: str = "",
     extra: Mapping[str, Any] | None = None,
     paper: PaperSnapshot | None = None,
+    execution_mode: Mapping[str, Any] | None = None,
+    preflight: Mapping[str, Any] | None = None,
 ) -> PageContext:
     """Assemble a page.
 
@@ -292,4 +319,6 @@ def build_context(
         generated_at=_utc_now(),
         notice=notice,
         extra=dict(extra or {}),
+        execution_mode=dict(execution_mode or default_mode_view()),
+        preflight=dict(preflight or {}),
     )

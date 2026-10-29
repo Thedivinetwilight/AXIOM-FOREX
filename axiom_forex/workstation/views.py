@@ -31,6 +31,7 @@ APP_SUBTITLE = "FOREX"
 #: Navigation, in order.  ``icon`` is an inline SVG path (no icon font).
 NAV: tuple[tuple[str, str, str], ...] = (
     ("overview", "/", "Overview"),
+    ("mode", "/mode", "Trading mode"),
     ("setup", "/setup", "Setup"),
     ("account", "/account", "Account & symbols"),
     ("positions", "/positions", "Positions"),
@@ -40,6 +41,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
 
 ICONS: dict[str, str] = {
     "overview": "M3 12h4l3 7 4-14 3 7h4",
+    "mode": "M4 7h10l-3-3M20 17H10l3 3M14 7h6v6M10 17H4v-6",
     "setup": "M4 6h10M4 12h16M4 18h7M18 4v4M16 18h4M20 16v4",
     "account": "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
     "positions": "M4 18V9M10 18V5M16 18v-6M22 18h-20",
@@ -231,6 +233,31 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .step-body p{margin:6px 0 0;color:var(--text-2);font-size:13px}
 .step-body .detail{margin-top:8px;font-size:12.5px;color:var(--text-3)}
 .step-actions{margin-top:var(--s3);display:flex;gap:var(--s2);flex-wrap:wrap}
+
+/* ---------- execution mode ---------- */
+.mode-grid{display:grid;gap:var(--s3);grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.mode-option{
+  display:flex;flex-direction:column;gap:8px;padding:var(--s4);border-radius:var(--radius);
+  border:1px solid var(--line);background:var(--panel-2);
+}
+.mode-option--active{border-color:rgba(94,200,255,.55);box-shadow:0 0 0 1px rgba(94,200,255,.25) inset}
+.mode-option--live.mode-option--active{border-color:rgba(255,138,138,.6);box-shadow:0 0 0 1px rgba(255,138,138,.28) inset}
+.mode-option h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}
+.mode-option p{margin:0;font-size:12.5px;color:var(--text-2);line-height:1.5}
+.mode-option .mode-actions{margin-top:auto;padding-top:10px;display:flex;gap:8px;flex-wrap:wrap}
+.mode-banner{
+  display:flex;align-items:center;gap:var(--s3);padding:14px var(--s4);border-radius:var(--radius);
+  border:1px solid var(--line);background:var(--panel-2);flex-wrap:wrap;
+}
+.mode-banner--live{border-color:rgba(255,138,138,.5);background:linear-gradient(120deg,rgba(255,138,138,.14),rgba(17,24,35,.9))}
+.mode-banner--paper{border-color:rgba(201,167,255,.36);background:linear-gradient(120deg,rgba(201,167,255,.12),rgba(17,24,35,.9))}
+.mode-banner strong{font-size:14px}
+.mode-banner .spacer{margin-left:auto}
+.blocker-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.blocker{border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;background:rgba(0,0,0,.18)}
+.blocker .why{font-size:13px;margin:4px 0 0;color:var(--text-2)}
+.blocker .fix{font-size:12.5px;margin:6px 0 0;color:var(--text);border-left:2px solid var(--accent);padding-left:9px}
+.blocker .why strong,.blocker .fix strong{color:var(--text)}
 
 /* ---------- misc ---------- */
 .muted{color:var(--text-3)}
@@ -439,6 +466,23 @@ def mode_chip(ctx: PageContext) -> str:
     return chip(f"Account mode: {terminal.mode}", tone)
 
 
+def execution_mode_chip(ctx: PageContext) -> str:
+    """The persistent PAPER / LIVE indicator.
+
+    It is on every page, in the top bar and the sidebar, and it says which of the
+    two it is *and* what that means right now: paper fills are simulated, and a
+    live mode that this process has not confirmed routes nothing.
+    """
+
+    view = ctx.execution_mode or {}
+    mode = str(view.get("mode", "PAPER")).upper()
+    if mode == "LIVE":
+        if ctx.live_effective:
+            return chip("LIVE · MT5 execution", "danger", dot=True)
+        return chip("LIVE · not confirmed", "warn", dot=True)
+    return chip("PAPER · simulated fills", "paper", dot=True)
+
+
 def connect_label(ctx: PageContext, *, long: bool = True) -> str:
     """Button text for the connect action, matched to what it actually does."""
 
@@ -478,15 +522,16 @@ def _sidebar(ctx: PageContext) -> str:
         f"{_nav(ctx)}"
         "<div class='sidebar-foot'>"
         f"<div class='row'>{connection_chip(ctx)}</div>"
-        "<p class='side-note'>Observe-only workstation. No order entry, no arming, "
-        "no account switching, no automatic reconnection.</p>"
+        f"<div class='row'>{execution_mode_chip(ctx)}</div>"
+        "<p class='side-note'>Paper or live execution, chosen by you. No order entry "
+        "here, no arming here, no account switching, no automatic reconnection.</p>"
         f"<p class='side-note muted'>v{escape(ctx.platform_version or 'dev')}</p>"
         "</div></aside>"
     )
 
 
 def _topbar(ctx: PageContext) -> str:
-    actions = [connection_chip(ctx), mode_chip(ctx)]
+    actions = [execution_mode_chip(ctx), connection_chip(ctx), mode_chip(ctx)]
     if ctx.terminal.simulated and ctx.terminal.connected:
         actions.append(
             action_form("disconnect", ctx.action_nonce, "Stop simulator preview", tone="danger")
@@ -499,7 +544,7 @@ def _topbar(ctx: PageContext) -> str:
             action_form("disconnect", ctx.action_nonce, "Disconnect", tone="danger")
         )
     else:
-        actions.append(chip("Observe-only", "muted"))
+        actions.append("<a class='btn btn-sm' href='/mode'>Trading mode</a>")
         actions.append("<a class='btn btn-sm' href='/setup'>Open setup</a>")
     return (
         "<header class='topbar'>"
@@ -848,12 +893,268 @@ def _safety_card() -> str:
     )
 
 
+def _mode_view(ctx: PageContext) -> Mapping[str, Any]:
+    return ctx.execution_mode or {}
+
+
+def mode_banner(ctx: PageContext) -> str:
+    """One loud line saying which execution mode is in force, and what it does."""
+
+    view = _mode_view(ctx)
+    live = str(view.get("mode", "PAPER")).upper() == "LIVE"
+    effective = ctx.live_effective
+    klass = "mode-banner mode-banner--live" if live else "mode-banner mode-banner--paper"
+    title = "Live trading — MetaTrader 5 execution" if live else "Paper trading — live market data"
+    effect = escape(str(view.get("trading_effect", "")))
+    right = (
+        chip("Confirmed this session", "danger", dot=True)
+        if effective
+        else (
+            chip("Awaiting confirmation", "warn", dot=True)
+            if live
+            else chip("Simulated fills only", "paper", dot=True)
+        )
+    )
+    market = str(getattr(ctx.terminal, "market_data", "NONE") or "NONE")
+    market_note = (
+        "Prices: MetaTrader 5 terminal ticks."
+        if market == "TERMINAL_TICKS"
+        else ("Prices: sample data from the offline simulator." if market == "SAMPLE" else "Prices: none — no terminal connected.")
+    )
+    return (
+        f"<div class='{klass}' role='status'>"
+        f"<div><strong>{escape(title)}</strong><p class='small muted' style='margin:4px 0 0'>"
+        f"{effect} {escape(market_note)}</p></div>"
+        f"<div class='spacer'></div>{right}"
+        "<a class='btn btn-sm' href='/mode'>Change trading mode</a>"
+        "</div>"
+    )
+
+
+def _mode_card(ctx: PageContext) -> str:
+    view = _mode_view(ctx)
+    live = str(view.get("mode", "PAPER")).upper() == "LIVE"
+    preflight = ctx.preflight or {}
+    count = int(preflight.get("count", 0) or 0)
+    if live and ctx.live_effective:
+        detail = (
+            "Live execution is enabled for this session. An order still needs an "
+            "approved active strategy, the pre-trade gate, and an armed session; "
+            "nothing is sent because of this switch."
+        )
+        tone = "danger"
+    elif live:
+        detail = (
+            "Live was requested but this process has not confirmed it, so nothing is "
+            "routed. A restart never resumes live execution on its own."
+        )
+        tone = "warn"
+    elif count:
+        detail = f"Paper is active. {count} check(s) stand between you and live execution."
+        tone = "paper"
+    else:
+        detail = "Paper is active and live execution is ready to be enabled with one confirmation."
+        tone = "paper"
+    actions = (
+        action_form("mode-paper", ctx.action_nonce, "Switch to paper now", tone="")
+        + "<a class='btn btn-sm' href='/mode'>Trading mode</a>"
+        if live
+        else "<a class='btn btn-sm btn--primary' href='/mode'>Review live checks</a>"
+    )
+    return card(
+        "Execution mode",
+        f"<div class='stack'><div class='row'>{execution_mode_chip(ctx)}"
+        f"{chip(f'{count} live check(s) outstanding', 'warn') if count else chip('live checks clear', 'ok')}"
+        f"</div><p class='small' style='margin:0;color:var(--text-2)'>{escape(detail)}</p>"
+        f"<div class='row'>{actions}</div></div>",
+        hint="Decides how an approved order would be executed. It never places one.",
+        right=chip("Paper always available", "muted"),
+    )
+
+
+def _blocker_items(blockers: Sequence[Mapping[str, Any]]) -> str:
+    items = []
+    for blocker in blockers:
+        items.append(
+            "<li class='blocker'>"
+            f"<div class='row'>{chip(str(blocker.get('category', 'session')).title(), 'warn')}"
+            f"<strong>{escape(str(blocker.get('title', '')))}</strong>"
+            f"{chip(str(blocker.get('reason', '')), 'muted')}</div>"
+            f"<p class='why'>{escape(str(blocker.get('message', '')))}</p>"
+            f"<p class='fix'><strong>Fix it:</strong> {escape(str(blocker.get('resolution', '')))}"
+            f" <span class='muted'>({escape(str(blocker.get('where', '')))})</span></p>"
+            "</li>"
+        )
+    return "<ul class='blocker-list'>" + "".join(items) + "</ul>"
+
+
+def render_mode(ctx: PageContext) -> str:
+    view = _mode_view(ctx)
+    preflight = ctx.preflight or {}
+    live = str(view.get("mode", "PAPER")).upper() == "LIVE"
+    effective = ctx.live_effective
+    blockers: Sequence[Mapping[str, Any]] = tuple(preflight.get("blockers", ()) or ())
+    ready = bool(preflight.get("ready", False))
+
+    paper_option = (
+        "<div class='mode-option" + (" mode-option--active" if not live else "") + "'>"
+        "<h3>" + escape(str(view.get("paper_label", "Paper trading")))
+        + (chip("ACTIVE", "paper") if not live else "") + "</h3>"
+        "<p>Reads live prices from the selected terminal and simulates every fill "
+        "locally. No order is ever sent; the paper ledger keeps the result.</p>"
+        "<p class='small muted'>Switching to paper is immediate: no preflight and no "
+        "confirmation, because it can only remove execution capability.</p>"
+        "<div class='mode-actions'>"
+        + (
+            chip("Paper is active", "paper", dot=True)
+            if not live
+            else action_form("mode-paper", ctx.action_nonce, "Switch to paper now", tone="primary")
+        )
+        + "</div></div>"
+    )
+
+    if effective:
+        live_actions = (
+            chip("Live is enabled for this session", "danger", dot=True)
+            + action_form("mode-paper", ctx.action_nonce, "End live mode", tone="danger")
+        )
+        live_note = (
+            "<p class='small muted'>Every order still passes the pre-trade gate and the "
+            "session must be armed separately. This switch sends nothing.</p>"
+        )
+    elif ready:
+        live_actions = (
+            "<form method='post' action='/actions/mode-live' class='stack' style='gap:10px'>"
+            f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+            "<div class='field'><label for='confirmation'>Type "
+            f"<span class='mono'>{escape(str(view.get('confirmation_phrase', '')))}</span> "
+            "to confirm</label>"
+            "<input type='text' id='confirmation' name='confirmation' value='' "
+            "autocomplete='off' spellcheck='false' required></div>"
+            "<div><button class='btn btn--danger' type='submit'>Enable live execution</button></div>"
+            "</form>"
+        )
+        live_note = (
+            "<p class='small muted'>One confirmation, and it is recorded. Enabling live "
+            "does not place an order, connect anything, or arm anything.</p>"
+        )
+    else:
+        live_actions = (
+            "<span class='btn btn--danger' aria-disabled='true' role='link' tabindex='-1'>"
+            "Enable live execution</span>"
+            + chip(f"{len(blockers)} check(s) blocking", "warn")
+        )
+        live_note = (
+            "<p class='small muted'>Resolve every check below, then this button turns "
+            "into a confirmation. Nothing here can be skipped or waived.</p>"
+        )
+
+    live_option = (
+        "<div class='mode-option mode-option--live" + (" mode-option--active" if live else "") + "'>"
+        "<h3>" + escape(str(view.get("live_label", "Live trading")))
+        + (chip("ACTIVE", "danger") if effective else (chip("REQUESTED", "warn") if live else ""))
+        + "</h3>"
+        "<p>Routes an approved, gated order through the MetaTrader 5 execution path to the "
+        "account you signed in to inside the terminal.</p>"
+        + live_note
+        + "<div class='mode-actions'>" + live_actions + "</div></div>"
+    )
+
+    if blockers:
+        checks_body = (
+            "<p class='small muted' style='margin:0 0 10px'>"
+            + escape(str(preflight.get("summary", "")))
+            + "</p>"
+            + _blocker_items(blockers)
+        )
+    else:
+        checks_body = notice(
+            "ok",
+            "Every live check passed",
+            "The account identity, session, settings, and confirmations all line up. "
+            "Enabling live still sends nothing.",
+        )
+
+    requirements = tuple(preflight.get("order_requirements", ()) or ())
+    requirement_rows = [
+        (
+            escape(str(item.get("title", ""))),
+            escape(str(item.get("detail", ""))),
+            chip(str(item.get("enforced_at", "order time")), "muted"),
+        )
+        for item in requirements
+    ]
+    requirements_body = table(
+        "Checks re-run for every live order",
+        (("Check", ""), ("What stops an order", ""), ("When", "")),
+        requirement_rows,
+    )
+
+    recent = tuple(view.get("recent", ()) or ())
+    recent_rows = [
+        (
+            escape(str(item.get("event_type", ""))),
+            escape(str(item.get("reason", ""))),
+            escape(str(item.get("to_mode", item.get("mode", "")) or "")),
+            escape(str(item.get("at", ""))),
+        )
+        for item in reversed(recent)
+    ]
+    audit_body = table(
+        "Execution-mode changes recorded on this machine",
+        (("Event", ""), ("Reason", ""), ("Mode", ""), ("When", "")),
+        recent_rows,
+        empty=empty_state(
+            "No mode changes recorded yet",
+            "Every switch and every refused switch is written here and to the local "
+            "audit document.",
+        ),
+    )
+
+    account = preflight.get("account", {}) if isinstance(preflight, Mapping) else {}
+    account_line = (
+        dl(
+            [
+                ("Selected account (server)", escape(str(account.get("server", "")) or "not read")),
+                ("Detected account type", escape(str(account.get("mode", "UNKNOWN")))),
+                ("Account fingerprint", "…" + escape(str(account.get("fingerprint", "")) or "—")),
+                ("Broker connection", chip("connected", "live") if preflight.get("session_connected") else chip("not connected", "muted")),
+            ],
+            wide=True,
+        )
+        if account
+        else empty_state("No account read yet", "Connect to the terminal to read the account you signed in to.")
+    )
+
+    body = (
+        mode_banner(ctx)
+        + "<div class='mode-grid'>" + paper_option + live_option + "</div>"
+        + "<div class='grid grid--two'>"
+        + card(
+            "What must pass before live execution",
+            checks_body,
+            hint="Every genuine blocker, all at once, each with the step that clears it.",
+            right=chip("Clear" if ready else f"{len(blockers)} outstanding", "ok" if ready else "warn"),
+        )
+        + "<div class='grid'>" + card("Selected account", account_line) + "</div></div>"
+        + card(
+            "Still enforced on every order, whichever mode is on",
+            requirements_body,
+            hint="The mode switch never replaces, relaxes, or skips any of these.",
+        )
+        + audit_body
+    )
+    return render_shell(ctx, body)
+
+
 def render_overview(ctx: PageContext) -> str:
     body = (
-        _session_kpis(ctx)
+        mode_banner(ctx)
+        + _session_kpis(ctx)
         + "<div class='grid grid--two'>"
         + _terminal_card(ctx)
         + "<div class='grid'>"
+        + _mode_card(ctx)
         + _market_card(ctx)
         + _paper_card(ctx)
         + "</div></div>"
@@ -1271,6 +1572,7 @@ def render_connecting(ctx: PageContext) -> str:
 
 PAGES = {
     "overview": render_overview,
+    "mode": render_mode,
     "setup": render_setup,
     "account": render_account,
     "positions": render_positions,
@@ -1294,6 +1596,7 @@ __all__ = [
     "render_connecting",
     "render_health",
     "render_message",
+    "render_mode",
     "render_overview",
     "render_page",
     "render_positions",

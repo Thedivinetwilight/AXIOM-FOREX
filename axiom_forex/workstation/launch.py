@@ -1,4 +1,4 @@
-"""Launch the local observe-only workstation.
+"""Launch the local workstation.
 
 Run it on the Windows machine that has MetaTrader 5 installed::
 
@@ -9,9 +9,16 @@ Run it on the Windows machine that has MetaTrader 5 installed::
 labelled as simulated on every screen and is the only mode that works on a
 machine without MetaTrader 5.
 
+Paper and live are chosen in the browser, on the Trading mode screen: paper
+simulates every fill locally, live needs a clean preflight and one typed
+confirmation. The chosen mode is remembered in ``execution_mode.local.json``
+beside the settings document (ignored by Git); a saved LIVE is never effective in
+a new process until it is confirmed again.
+
 What this script does not do: install packages, edit the registry, open a
 firewall port, write settings files, read credentials, or talk to a broker. If a
-prerequisite is missing it prints what to do and exits non-zero.
+prerequisite is missing it prints what to do and exits non-zero. It never places
+an order and never arms a session.
 """
 
 from __future__ import annotations
@@ -126,8 +133,8 @@ def _build_session(
 
     With ``simulate`` this is the labelled offline preview and no settings are
     read at all. Otherwise the document must have loaded: the session is then the
-    real observe-only terminal source, constructed but **not** connected -- only
-    an explicit Connect in the UI opens the terminal.
+    real terminal source, constructed but **not** connected -- only an explicit
+    Connect in the UI opens the terminal.
     """
 
     if simulate:
@@ -156,7 +163,7 @@ def _print_prerequisites(report) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m axiom_forex.workstation.launch",
-        description="Start the local AXIOM-FOREX observe-only workstation.",
+        description="Start the local AXIOM-FOREX workstation.",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="loopback port (default 8765)")
     parser.add_argument(
@@ -238,10 +245,19 @@ def main(argv: list[str] | None = None) -> int:
         failure=settings_failure,
     )
     wizard = SetupWizard(environment=report, session=session)
+    platform = _fixture_platform()
     app = WorkstationApp(
         wizard=wizard,
-        platform=_fixture_platform(),
+        platform=platform,
         version="0.1.0",
+        settings=None if args.simulate else settings,
+        settings_reason=settings_failure,
+        # Mode state and its audit document live beside the operator's own
+        # settings file, so they are ignored by Git and never travel with the repo.
+        mode_path=settings_path,
+        # The paper platform's durable log receives mode changes as well, when a
+        # database-backed platform is available.
+        audit_sink=getattr(platform, "audit_log", None),
         # A simulated session is a preview and may be embedded in a preview
         # pane; a session attached to a real terminal never is.
         allow_framing=args.simulate,
@@ -261,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     host, port = server.server_address[:2]
-    mode = "simulated preview -- NOT MetaTrader 5" if args.simulate else "observe-only"
+    mode = "simulated preview -- NOT MetaTrader 5" if args.simulate else "terminal attached"
     print("")
     print("  AXIOM-FOREX workstation")
     print(f"  mode       {mode}")
@@ -277,8 +293,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  open       {url}")
     print("  stop       Ctrl+C")
     print("")
-    print("  It never trades, never reconnects, and never accepts an MT5 password.")
-    print("  Connecting happens only when you press Connect in the browser.")
+    print(f"  execution  {app.mode_view().get('short', 'PAPER')} (chosen in the browser)")
+    print("  It never reconnects and never accepts an MT5 password.")
+    print("  Connecting happens only when you press Connect in the browser;")
+    print("  switching execution mode never places an order.")
     print("")
     if not args.no_browser:
         # Opened only after the socket is listening, so the first page load

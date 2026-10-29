@@ -59,12 +59,65 @@ The `app/` package remains the strict M1 fail-closed safety/domain kernel. `axio
 
 [MetaTrader 5 integration](docs/MT5_INTEGRATION.md) replaces the generic external-broker placeholder with an adapter over the official `MetaTrader5` Python package and an installed terminal: terminal/account status, symbol discovery and broker-term cross-checks, bid/ask ticks and tick-built two-sided bars, account currency/leverage/margin reads, positions, order checks, market-deal submission, order/deal history, reconciliation, and restart recovery. The only secret is the terminal password, stored in the operating-system credential vault and entered/replaced/cleared locally with `python -m axiom_forex.cli mt5 --mt5-action set-password`; no token field exists because MT5 has no separate API token. Live submission is off by default, requires an explicit local `TRADING_ENABLED` mode plus an in-process `arm_trading()` call naming the account, an allowed pre-trade decision, and an approved active strategy; nothing is sent on connect or at start, the durable order record is written before `order_send`, and an unknown outcome disarms trading and blocks further orders until reconciliation resolves it. A bounded session cycle (`python -m axiom_forex.cli mt5-session`) connects to the already-running terminal, detects and audits the account mode, and runs at most one gate-approved order. You choose the account in MT5: the default `SELECTED_ACCOUNT` policy routes to whichever account the terminal has selected, demo or real, with the same adapter and workflow (`--mt5-account-mode-policy DEMO_ONLY` is an explicit opt-in for a demo-only run). Account mode is reported and audited but never substitutes for the separate trading-enabled setting; a terminal account switch keeps that setting, drops the previous account's cached state, and revalidates the new account's currency, leverage, margin mode, symbols, and execution terms before routing. Order records and reconciliation are account-scoped, so no account's positions, reservations, risk state, or unresolved orders are reused by another. Reports redact the account identifier and never show balances, equity, or credentials. All tests use a fake `MetaTrader5` module: no real terminal, account, or credential is touched.
 
-## Windows workstation (observe-only UI)
+## Windows workstation (paper and live execution)
 
-`axiom_forex/workstation/` is a local, read-only interface over the paper platform and an
-already-signed-in MetaTrader 5 terminal. It exists so you can see what AXIOM reads without any
-way to trade from the interface: no order entry, no arming, no cancel/modify, no account
-switching, no broker-settings changes, no automatic reconnection, and no background polling.
+`axiom_forex/workstation/` is a local interface over the paper platform and an
+already-signed-in MetaTrader 5 terminal. It owns exactly one trading-shaped control — the
+**execution mode** — and nothing else: no order entry form, no arming control, no
+cancel/modify, no account switching, no broker-settings changes, no automatic reconnection,
+and no background polling.
+
+| Mode | What it does |
+| --- | --- |
+| **Paper trading — live market data** | Reads bid/ask ticks from the terminal you connected and simulates every fill locally through the paper engine. No order is ever sent. Active by default. |
+| **Live trading — MetaTrader 5 execution** | Routes an approved, gate-passed order through the existing MT5 adapter to the account you signed in to. Off until you pass the preflight and confirm once. |
+
+Execution mode and account type are different things, and the interface never conflates
+them. The **mode** (paper/live) is your decision and is remembered in
+`execution_mode.local.json` beside your settings file. The **account type** (demo/real) and the
+**server** are read from the terminal and shown prominently — AXIOM never switches MT5
+accounts, never logs in for you, and never picks a broker. If you want a different account,
+sign in to it inside MetaTrader 5 and press Disconnect, then Connect.
+
+### Switching mode — the exact flow
+
+1. Open **Trading mode** in the left navigation (or press *Review live checks* on the
+   dashboard). The PAPER/LIVE indicator is in the top bar and the sidebar on **every** page.
+2. **To paper:** press *Switch to paper now*. It is immediate — no preflight, no confirmation,
+   because it can only remove execution capability.
+3. **To live:** the page runs the preflight and lists **every** genuine blocker at once, each
+   with the step that clears it — environment, settings, session, account identity, account
+   type, terminal trading permission, symbol selection, and your own confirmation. A second
+   list shows what is re-checked for *every* order in either mode (account identity, gate,
+   approved active strategy, quote freshness, drift/volume/margin, unresolved orders, arming);
+   those cannot be waived from any screen.
+4. When the blocker list is empty the page offers **one** confirmation: type
+   `ENABLE LIVE TRADING` and press *Enable live execution*. That is the only confirmation, it
+   is recorded, and it sends nothing — no order, no connection, no arming.
+5. Switching back to paper is always one click. Disconnecting, or restarting the workstation,
+   also returns to paper: a saved `LIVE` is remembered but is **never** effective in a new
+   process until you pass the preflight and confirm again.
+
+Every switch and every refused switch is appended to `execution_mode_audit.local.json`
+(also beside your settings file) and to the platform's durable audit log when one is open. The
+records contain mode names, reason codes, and timestamps — never a credential, an account
+number, a balance, or an equity figure.
+
+Both files are `*.local.json`, so they are git-ignored and travel only with your machine.
+
+### Why live may still say "blocked"
+
+The preflight never hides a check. Two of them commonly need real work:
+
+* `mt5_account_mismatch` / `mt5_server_mismatch` — MetaTrader 5 is signed in to a different
+  account or server than `mt5_settings.local.json` names. Sign in to the configured account
+  inside the terminal, then press Disconnect and Connect again. The identity check is **not**
+  relaxed: a different account is never treated as a match.
+* `strategy_not_approved` — if a deployment attaches a strategy that is not approved and
+  active, live stays blocked until it is. This repository ships **no** approved live strategy
+  and AXIOM never invents one, so live execution here can be enabled but cannot produce an
+  order until a deployment attaches its own approved strategy through
+  `MT5SessionCycle`/`MT5TradingAdapter`.
 
 ### One-time setup on Windows
 
@@ -76,8 +129,8 @@ switching, no broker-settings changes, no automatic reconnection, and no backgro
    py -m pip install MetaTrader5
    ```
 
-2. Install MetaTrader 5 **from your broker**, open it once, and sign in to the account you want
-   to observe — demo or real, your choice. Leave the terminal running and signed in. AXIOM
+2. Install MetaTrader 5 **from your broker**, open it once, and sign in to the account you
+   want to use — demo or real, your choice. Leave the terminal running and signed in. AXIOM
    reuses that session: it never asks for, stores, or displays your MT5 password, and it never
    logs in for you.
 
@@ -96,6 +149,10 @@ switching, no broker-settings changes, no automatic reconnection, and no backgro
 
    The setup screen shows this template, and reports the terminal paths and packages it
    actually found on your machine. The path lives in this file, not in the interface.
+
+   Live execution also needs `"mode": "TRADING_ENABLED"` in this same file — an explicit local
+   opt-in, separate from the paper/live switch in the browser. Leaving it `OBSERVE_ONLY` keeps
+   live mode blocked, with that reason listed on the Trading mode page.
 
 ### Launch
 
@@ -138,7 +195,7 @@ is not a Git working tree, the checkout is on another branch (or detached), a *t
 has local changes, or the branch cannot fast-forward. Your local edits are never discarded for
 you: commit or revert them yourself, then re-run the updater.
 
-### What the two modes mean
+### What the two launches mean
 
 | Launch | Session panel says | Can reach "ready for observation"? |
 | --- | --- | --- |
@@ -157,8 +214,9 @@ observation*, because only then has AXIOM actually read an account.
    your settings file are detected; anything missing is listed with the exact command to fix it.
 2. **Sign in inside MetaTrader 5** — you do this in the terminal, then tick the confirmation.
    AXIOM never asks for the password.
-3. **Connect (observe only)** — an explicit click. It attaches to the running terminal, reads
-   status, account terms, and Market Watch symbols, and gets no order capability of any kind.
+3. **Connect to the terminal** — an explicit click. It attaches to the running terminal and
+   reads status, account terms, Market Watch symbols, and the live ticks paper mode is priced
+   from. Connecting never enables trading; the execution mode is a separate decision.
 4. **Review the detected account** — broker/server, currency, leverage, margin accounting,
    account mode (demo or real, as *the terminal* reports it), terminal trading permission, and
    how many symbols are available. The login appears only as a short fingerprint; balances and
@@ -166,7 +224,8 @@ observation*, because only then has AXIOM actually read an account.
 5. **Confirm account and symbols** — choose the symbols to observe, then confirm. Nothing is
    inferred: what you confirm is what the terminal reported.
 6. **Ready for observation** — shown only for a real terminal, with what was *not* enabled
-   listed explicitly (no trading, no order entry, no arming, no auto-reconnect).
+   listed explicitly (no order entry, no arming, no auto-reconnect) and a pointer to the
+   Trading mode page where paper or live is chosen.
 
 If MetaTrader 5 is closed, not signed in, or the `MetaTrader5` package is missing, **Connect**
 fails and says why; nothing retries on its own, and pressing Disconnect stops the session until
@@ -174,17 +233,24 @@ you press Connect again.
 
 ### What you are looking at
 
-The persistent status bar shows connection state and the account mode together, so demo and
-real are never confused. Every figure carries its data class — `REAL BROKER`, `PAPER`,
+The persistent status bar shows the execution mode (`PAPER · simulated fills`,
+`LIVE · MT5 execution`, or `LIVE · not confirmed`), the connection state, and the account mode
+together, so paper/live and demo/real are never confused. The mode banner also states where
+prices come from: terminal ticks, or none. Every figure carries its data class — `REAL BROKER`, `PAPER`,
 `SAMPLE FIXTURE`, or `SIMULATED` — and the paper portfolio, positions, and audit activity come
 from the offline paper platform, not from your broker. Session-time values come from the
 declared calendar and are marked indicative until your broker's sessions, holidays, and DST
 rules are confirmed.
 
-The interface contains exactly six actions, all read-only setup: `connect`, `disconnect`,
-`acknowledge-sign-in`, `confirm`, `unconfirm`, and `symbols`. There is no endpoint that can
-trade, arm trading, switch accounts, or change broker settings.
+The interface contains exactly eight form actions: `connect`, `disconnect`,
+`acknowledge-sign-in`, `confirm`, `unconfirm`, `symbols`, and the two execution-mode actions
+`mode-paper` and `mode-live`. There is no endpoint that can place an order, arm trading, switch
+accounts, or change broker settings; the mode actions never connect, submit, or arm anything,
+and they are refused without the page's per-process nonce. There is no JSON API, no polling,
+and no timer.
 
 ## Safety
 
-This repository must not contain credentials, secrets, or a live order-routing path. Unknown instruments, stale or incomplete quotes, missing specifications, closed markets, invalid risk calculations, unresolved orders, failed provider/broker conformance, failed provider profile onboarding, rejected or quarantined imported data, or live-mode requests fail closed and block new orders. Generic 24/5 availability is never a production default; explicit broker calendars, daily breaks, holidays, DST, weekend gaps, instrument availability, costs, financing, leverage, and account terms must be supplied and conformance-tested before any external integration is considered.
+This repository must not contain credentials or secrets, and it ships no approved live strategy:
+live order routing exists only behind the execution-mode preflight, an explicit confirmation, an
+approved active strategy, arming, and the pre-trade gate. Unknown instruments, stale or incomplete quotes, missing specifications, closed markets, invalid risk calculations, unresolved orders, failed provider/broker conformance, failed provider profile onboarding, rejected or quarantined imported data, or live-mode requests fail closed and block new orders. Generic 24/5 availability is never a production default; explicit broker calendars, daily breaks, holidays, DST, weekend gaps, instrument availability, costs, financing, leverage, and account terms must be supplied and conformance-tested before any external integration is considered.

@@ -315,12 +315,13 @@ class SetupWizard:
             )
         )
 
-        # 3. connect (observe-only)
+        # 3. connect
         if self.live_terminal:
             connect_status = COMPLETE
             connect_detail = (
-                "Connected to the local terminal in observe-only mode. "
-                "No trading capability is attached."
+                "Connected to the local terminal. Whether an approved order would be "
+                "simulated or routed to MetaTrader 5 is your choice on the Trading mode "
+                "screen; connecting on its own never enables trading."
             )
             connect_action, connect_label = "disconnect", "Disconnect"
         elif self.simulated:
@@ -356,11 +357,11 @@ class SetupWizard:
             SetupStep(
                 id="connect",
                 number=3,
-                title="Connect in observe-only mode",
+                title="Connect to the terminal",
                 summary=(
                     "AXIOM attaches to the terminal that is already running. It reads "
-                    "status, account terms, and symbols. It cannot place, change, or "
-                    "cancel an order."
+                    "status, account terms, symbols, and the live ticks paper mode is "
+                    "priced from. Pressing Connect never places an order."
                 ),
                 status=connect_status,
                 detail=connect_detail,
@@ -483,9 +484,10 @@ class SetupWizard:
                 ),
                 status=COMPLETE,
                 items=(
-                    ("Trading", "not enabled", "ok"),
-                    ("Order entry", "not available in this UI", "ok"),
-                    ("Arming controls", "not available in this UI", "ok"),
+                    ("Terminal session", "connected after your click", "ok"),
+                    ("Order entry in this interface", "not available", "ok"),
+                    ("Arming controls in this interface", "not available", "ok"),
+                    ("Execution mode", "chosen on the Trading mode screen", "muted"),
                     ("Auto-reconnect", "off", "ok"),
                     ("Symbols observed", ", ".join(self.choices.selected_symbols) or "none", "muted"),
                 ),
@@ -562,7 +564,10 @@ def safety_statement() -> dict[str, Any]:
     """The one place the UI's guarantees are written down for display."""
 
     return {
-        "trading_controls": [],
+        #: The one trading-shaped control the interface owns. It changes how an
+        #: approved order *would* be executed; it cannot create one.
+        "trading_controls": ["execution_mode"],
+        "execution_modes": ["PAPER", "LIVE"],
         "order_entry": False,
         "arming": False,
         "account_switching": False,
@@ -571,11 +576,15 @@ def safety_statement() -> dict[str, Any]:
         "asks_for_mt5_password": False,
         "market_access_token": False,
         "lines": (
-            "Read-only workstation: it observes a terminal and never trades.",
+            "Paper mode simulates every fill locally and never sends an order.",
+            "Live mode stays off until every live check passes and you type the "
+            "confirmation phrase once; the switch itself places no order.",
+            "In either mode an order must still pass the pre-trade gate, come from an "
+            "approved active strategy, and match the account exactly.",
             "Connects only when you press Connect; disconnects only when you press Disconnect.",
             "Never switches accounts and never logs in to MetaTrader 5 for you.",
             "Never asks for, stores, or displays your MT5 password.",
-            "No order entry, no arming, no cancel/modify controls exist in this interface.",
+            "There is no order-entry form, arming control, or cancel/modify control here.",
         ),
     }
 

@@ -277,11 +277,19 @@ def test_the_guidance_it_prints_is_itself_non_destructive():
             assert guidance not in line.lower(), line
 
 
-def test_the_companion_start_script_is_still_observe_only():
+def test_the_companion_start_script_starts_the_workstation_and_asks_for_nothing():
+    """It launches the UI only: no mode flag, no install, no prompt for a secret.
+
+    The execution mode is chosen in the browser, so the script must not preselect
+    one -- and it must never collect a credential.
+    """
+
     start = START_SCRIPT.read_text(encoding="utf-8").lower()
     assert "workstation.launch" in start
     assert "--simulate" in start
     assert "never asks for a password" in start
+    for forbidden in ("--mode", "trading_enabled", "password=", "login=", "arm"):
+        assert forbidden not in start, forbidden
 
 
 # ---------------------------------------------------------------------------

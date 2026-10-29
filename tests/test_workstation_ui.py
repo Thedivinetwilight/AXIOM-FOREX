@@ -1,4 +1,4 @@
-"""Focused tests for the observe-only workstation.
+"""Focused tests for the workstation shell (setup, session, labelling).
 
 The rules these tests exist to protect:
 
@@ -11,8 +11,9 @@ The rules these tests exist to protect:
   there and cannot be confirmed;
 * **explicit connect / disconnect** -- no rendering, polling, or timer opens a
   session, and nothing reconnects after a disconnect;
-* **POST allowlist** -- exactly the six read-only setup actions exist; there is
-  no order, arming, account-switch, or broker-settings handler anywhere;
+* **POST allowlist** -- the setup actions plus the two execution-mode actions
+  exist; there is no order, arming, account-switch, or broker-settings handler
+  anywhere, and switching mode never places an order;
 * **secret redaction** -- no password, token, or account number reaches a page,
   a log line, or a response body.
 
@@ -588,7 +589,7 @@ def test_a_settings_less_launch_cannot_connect_at_all():
 # ---------------------------------------------------------------------------
 
 
-def test_the_post_allowlist_is_exactly_the_six_setup_actions():
+def test_the_post_allowlist_is_exactly_the_setup_and_mode_actions():
     assert POST_ACTIONS == {
         "connect",
         "disconnect",
@@ -596,6 +597,10 @@ def test_the_post_allowlist_is_exactly_the_six_setup_actions():
         "confirm",
         "unconfirm",
         "symbols",
+        # The execution-mode switch, and nothing else: it changes how an
+        # approved order *would* be executed and cannot create one.
+        "mode-paper",
+        "mode-live",
     }
 
 

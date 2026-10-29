@@ -1,19 +1,25 @@
-"""The workstation web app: stdlib ``http.server``, loopback only, read-only.
+"""The workstation web app: stdlib ``http.server``, loopback only.
 
 The surface is deliberately tiny:
 
 ``GET``
-    Six pages. Rendering never changes state.
+    Seven pages. Rendering never changes state and never runs a preflight that
+    could change anything.
 ``POST /actions/{connect,disconnect,acknowledge-sign-in,confirm,unconfirm,symbols}``
-    The only state changes, and none of them touch trading. Each requires the
-    per-process nonce embedded in the page that offered the button, so an
-    unrelated page cannot drive a connection, and each one is logged as a line on
-    stderr with no secrets in it. Anything not in that set -- orders, arming,
-    account switching, broker settings -- has no handler to reach.
+    Session and setup actions. Each requires the per-process nonce embedded in
+    the page that offered the button, so an unrelated page cannot drive a
+    connection.
+``POST /actions/{mode-paper,mode-live}``
+    The execution-mode switch, and the whole of it. ``mode-paper`` is immediate
+    and unconditional. ``mode-live`` recomputes the preflight, refuses while any
+    blocker stands, and requires the typed confirmation phrase -- and it sends
+    no order, connects nothing, and arms nothing. Changing modes is not a trade.
 
 Anything else is a 405/404. There is no JSON API, no order endpoint, no arming
 endpoint, no account switch, and no background timer: a request renders the
-current state and then the process waits. Nothing polls, nothing reconnects.
+current state and then the process waits. Nothing polls, nothing reconnects, and
+nothing changes the mode or the account except an explicit click on the page
+that offers it.
 
 Credentials never enter this process: the server has no field for a password,
 refuses form posts that carry one, and the terminal session it observes was
@@ -32,6 +38,13 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlparse
 
 from .context import PaperSnapshot, PageContext, build_context, read_paper_snapshot
+from .mode import (
+    REASON_SESSION_ENDED,
+    ExecutionModeController,
+    build_controller,
+    default_mode_view,
+)
+from .preflight import LivePreflight, StrategyBinding, facts_from
 from .setup import SetupWizard
 from .views import render_message, render_page
 
@@ -44,6 +57,7 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/positions": ("positions", "Positions"),
     "/activity": ("activity", "Activity"),
     "/health": ("health", "System health"),
+    "/mode": ("mode", "Trading mode"),
 }
 
 #: The complete set of state-changing actions, and the whole of it.
@@ -54,11 +68,15 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
 #:     inside MetaTrader 5; it contacts nothing;
 #:   * ``confirm`` / ``unconfirm`` -- the local record that a real account and
 #:     symbol set were reviewed;
-#:   * ``symbols``                -- which symbols to observe.
+#:   * ``symbols``                -- which symbols to observe;
+#:   * ``mode-paper`` / ``mode-live`` -- the execution mode: simulate fills
+#:     locally, or route an approved order to the live execution path.
 #:
 #: Anything that could trade, arm, switch accounts, or change broker settings is
 #: absent by construction, not by a permission check: there is no handler for it,
-#: and ``test_workstation_ui`` pins this set exactly.
+#: and ``test_workstation_ui`` pins this set exactly.  Note what the mode actions
+#: do *not* do: they never connect, never arm, never submit, and never touch the
+#: account.  Switching modes cannot place an order.
 POST_ACTIONS: frozenset[str] = frozenset(
     {
         "connect",
@@ -67,6 +85,8 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "confirm",
         "unconfirm",
         "symbols",
+        "mode-paper",
+        "mode-live",
     }
 )
 
@@ -138,10 +158,35 @@ class WorkstationApp:
     #: handles are thread-affine, and this interface never writes to it, so one
     #: read at construction is both correct and enough.
     paper: PaperSnapshot | None = None
+    #: The execution mode.  Created with no local documents when the caller did
+    #: not supply one, so a bare app still shows an honest PAPER state.
+    mode: ExecutionModeController | None = None
+    #: The live preflight.  Recomputed on every page load from facts that are
+    #: already on this thread; it contacts nothing.
+    preflight: LivePreflight | None = None
+    #: The settings document's own facts (terminal path, server, mode).  When the
+    #: caller passes none, the session's source is asked -- the same object the
+    #: Connect button would use.
+    settings: Any = None
+    settings_reason: str = ""
+    #: Where execution_mode.local.json lives.  ``None`` keeps the choice in
+    #: memory only; the launcher always passes its settings directory.
+    mode_path: Any = None
+    #: A strategy this deployment attaches to the live path, if any.  AXIOM never
+    #: invents one, so the default is ``None``.
+    strategy: StrategyBinding | None = None
+    #: An audit sink for mode changes (a durable log, when one is available).
+    audit_sink: Any = None
 
     def __post_init__(self) -> None:
         if self.paper is None and self.platform is not None:
             self.paper = read_paper_snapshot(self.platform)
+        if self.settings is None:
+            self.settings = getattr(getattr(self.wizard.session, "source", None), "settings", None)
+        if self.mode is None:
+            self.mode = build_controller(settings_path=self.mode_path, sink=self.audit_sink)
+        if self.preflight is None:
+            self.preflight = LivePreflight(provider=self.preflight_facts)
 
     # -- rendering ---------------------------------------------------------
     def page(self, path: str) -> tuple[int, str]:
@@ -155,7 +200,35 @@ class WorkstationApp:
             html = render_page(ctx)
         return HTTPStatus.OK, html
 
+    def preflight_facts(self):
+        """The facts the live preflight is allowed to see, gathered read-only."""
+
+        return facts_from(
+            settings=self.settings,
+            settings_reason=self.settings_reason,
+            environment=getattr(self.wizard, "environment", None),
+            session=self.wizard.session.view(),
+            confirmed=bool(self.wizard.choices.confirmed),
+            selected_symbols=self.wizard.choices.selected_symbols,
+            strategy=self.strategy,
+        )
+
+    def preflight_view(self) -> dict[str, Any]:
+        if self.preflight is None:
+            return {"ready": False, "blockers": [], "order_requirements": []}
+        return self.preflight.view()
+
+    def mode_view(self, blockers: Any = None) -> dict[str, Any]:
+        if self.mode is None:
+            return default_mode_view()
+        if blockers is None:
+            blockers = self.preflight_view().get("blockers", ())
+        return self.mode.view(blockers=blockers)
+
     def _context(self, page: str, title: str, notice: str = "") -> PageContext:
+        # One preflight per page render: it is read-only, and running it twice
+        # would let two panels disagree about the same facts.
+        preflight = self.preflight_view()
         return build_context(
             platform=self.platform,
             paper=self.paper,
@@ -164,6 +237,8 @@ class WorkstationApp:
             title=title,
             action_nonce=self.nonce,
             notice=notice,
+            execution_mode=self.mode_view(blockers=preflight.get("blockers", ())),
+            preflight=preflight,
         )
 
     # -- actions -----------------------------------------------------------
@@ -194,7 +269,7 @@ class WorkstationApp:
             session = wizard.session
             simulated = wizard.simulated
             self._log(
-                "simulator preview requested" if simulated else "connect requested (observe only)"
+                "simulator preview requested" if simulated else "connect requested (data only)"
             )
             session.connect()
             if session.connected:
@@ -206,7 +281,12 @@ class WorkstationApp:
                         "Simulator preview started. No terminal is attached and this "
                         "preview can never reach observation mode.",
                     )
-                return HTTPStatus.SEE_OTHER, "/", "Connected to the terminal in observe-only mode."
+                return (
+                    HTTPStatus.SEE_OTHER,
+                    "/",
+                    "Connected to the terminal. Choose how orders would be executed on "
+                    "the Trading mode screen.",
+                )
             error = (session.view().get("error") or {})
             reason = str(error.get("reason", "unknown"))
             self._log(f"connect failed: {reason}")
@@ -215,9 +295,43 @@ class WorkstationApp:
             self._log("disconnect requested")
             simulate = wizard.simulated
             wizard.session.disconnect()
+            # Live execution depends on the session that was just closed, so the
+            # mode returns to paper -- because the operator clicked Disconnect,
+            # not because anything ran in the background.
+            ended = self.mode.end_live(reason=REASON_SESSION_ENDED, detail="disconnect action") if self.mode else None
+            mode_note = (
+                " Live mode ended with the session; paper mode is active."
+                if ended is not None and ended.changed
+                else ""
+            )
             if simulate:
-                return HTTPStatus.SEE_OTHER, "/setup", "Simulator preview stopped."
-            return HTTPStatus.SEE_OTHER, "/", "Disconnected. Nothing reconnects automatically."
+                return HTTPStatus.SEE_OTHER, "/setup", "Simulator preview stopped." + mode_note
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/",
+                "Disconnected. Nothing reconnects automatically." + mode_note,
+            )
+        if action == "mode-paper":
+            if self.mode is None:
+                return HTTPStatus.INTERNAL_SERVER_ERROR, "/mode", "mode controller unavailable"
+            change = self.mode.set_paper(detail="workstation mode selector")
+            self._log(f"execution mode: {change.to_mode} ({change.reason})")
+            return HTTPStatus.SEE_OTHER, "/", change.message
+        if action == "mode-live":
+            if self.mode is None:
+                return HTTPStatus.INTERNAL_SERVER_ERROR, "/mode", "mode controller unavailable"
+            preflight = self.preflight_view()
+            confirmation = str((form.get("confirmation") or [""])[0])
+            change = self.mode.enable_live(
+                blockers=preflight.get("blockers", ()),
+                confirmation=confirmation,
+                detail="workstation mode selector",
+            )
+            if change.changed:
+                self._log(f"execution mode: {change.to_mode} ({change.reason})")
+                return HTTPStatus.SEE_OTHER, "/", change.message
+            self._log(f"live mode refused: {change.reason}")
+            return HTTPStatus.SEE_OTHER, "/mode", change.message
         if action == "acknowledge-sign-in":
             wizard.acknowledge_sign_in()
             return HTTPStatus.SEE_OTHER, "/setup", "Noted: you signed in inside MetaTrader 5."
