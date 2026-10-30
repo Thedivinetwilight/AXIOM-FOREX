@@ -214,6 +214,12 @@ class WorkstationApp:
     #: The last data action's own result, shown on the next render.  Kept in
     #: memory only; a restart forgets it, and the files are the record.
     data_result: dict[str, Any] = field(default_factory=dict)
+    #: The provider setup document the runner was pointed at, if any.  Empty
+    #: means "not configured", which is a blocker the page states plainly.
+    provider_setup_path: str = ""
+    #: Where the runner's prices come from: "terminal" or "replay".  A replay
+    #: build is a labelled offline walk, not a live lane, and says so.
+    runner_source: str = ""
 
     def __post_init__(self) -> None:
         if self.paper is None and self.platform is not None:
@@ -262,7 +268,7 @@ class WorkstationApp:
             blockers = self.preflight_view().get("blockers", ())
         return self.mode.view(blockers=blockers)
 
-    def runner_view(self) -> dict[str, Any]:
+    def runner_view(self, data: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Read the runner's state.  Never raises, never touches its objects."""
 
         if self.runner is None:
@@ -274,12 +280,130 @@ class WorkstationApp:
         if not isinstance(view, dict):
             return {"available": False, "error": "runner_view_not_a_mapping"}
         view.setdefault("available", True)
+        # What the runner still needs before it can start, in the operator's
+        # words.  Merged here so every page that shows the runner card shows the
+        # same list, and so a blocked build never degrades into an exception.
+        try:
+            view["setup_blockers"] = self.runner_setup_blockers(view, data)
+        except Exception as exc:  # a read model never raises
+            view["setup_blockers"] = [
+                {
+                    "reason": "runner_status_unreadable",
+                    "message": "The runner's setup state could not be read "
+                    f"({type(exc).__name__}).",
+                    "hint": "Reload the page. Nothing was started or changed.",
+                }
+            ]
         return sanitize_audit_value(view)
+
+    def runner_setup_blockers(
+        self,
+        view: Mapping[str, Any],
+        data: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, str]]:
+        """Everything standing between this runner and its first simulated fill.
+
+        Ordered by what the operator must do first.  Each entry is a stable code
+        plus human wording; none of them is exception text, and none of them
+        changes any state.
+        """
+
+        blockers: list[dict[str, str]] = []
+        session = getattr(self.wizard, "session", None)
+        connected = bool(getattr(session, "connected", False))
+        if not connected:
+            blockers.append(
+                {
+                    "reason": "terminal_not_connected",
+                    "message": (
+                        "No terminal session is open, so there are no symbols, no "
+                        "specs, and no ticks to run the strategy on."
+                    ),
+                    "hint": "Press Connect on the Setup page, then start the runner.",
+                }
+            )
+        if self.runner_source == "terminal" and not self.provider_setup_path:
+            blockers.append(
+                {
+                    "reason": "provider_setup_missing",
+                    "message": (
+                        "The runner was started without a provider setup document, so "
+                        "it has no broker symbol, costs, swap, or risk limits to use."
+                    ),
+                    "hint": (
+                        "Start the workstation with "
+                        "--paper-runner --paper-runner-provider-setup <file>."
+                    ),
+                }
+            )
+        if data is None:
+            try:
+                data = self.data_view()
+            except Exception:
+                data = {}
+        dataset_files = list(data.get("dataset_files") or ())
+        if not dataset_files:
+            blockers.append(
+                {
+                    "reason": "no_imported_history",
+                    "message": (
+                        "No evaluable dataset is in the import folder, so no candidate "
+                        "could have been evaluated on your own broker history."
+                    ),
+                    "hint": (
+                        "Export ticks from MetaTrader 5, then use Data & evaluation to "
+                        "convert and evaluate them."
+                    ),
+                }
+            )
+        evidence = dict(data.get("evidence") or {})
+        rows = list(evidence.get("rows") or ())
+        selected = [row for row in rows if row.get("selected")]
+        if rows and not selected:
+            blockers.append(
+                {
+                    "reason": "strategy_not_evaluated",
+                    "message": (
+                        "No candidate has passed the predeclared criteria on your own "
+                        "data, so there is no approved strategy to run."
+                    ),
+                    "hint": (
+                        "Read the blocking criterion on Data & evaluation. The runner "
+                        "will not be retuned onto a candidate that failed."
+                    ),
+                }
+            )
+        elif not rows:
+            blockers.append(
+                {
+                    "reason": "strategy_not_evaluated",
+                    "message": (
+                        "No evaluation evidence is recorded yet, so no candidate has "
+                        "been approved for paper trading."
+                    ),
+                    "hint": "Evaluate a candidate on Data & evaluation first.",
+                }
+            )
+        # Whatever the host itself refused, first: it is the most specific.
+        for item in view.get("blockers") or ():
+            if isinstance(item, Mapping):
+                blockers.insert(
+                    0,
+                    {
+                        "reason": str(item.get("reason", "")),
+                        "message": str(item.get("message", "")),
+                        "hint": str(item.get("hint", "")),
+                    },
+                )
+        return blockers
 
     def _context(self, page: str, title: str, notice: str = "") -> PageContext:
         # One preflight per page render: it is read-only, and running it twice
         # would let two panels disagree about the same facts.
         preflight = self.preflight_view()
+        # One read of the import folder per render: the runner card and the data
+        # page must never disagree about which files exist.
+        data = self.data_view()
         return build_context(
             platform=self.platform,
             paper=self.paper,
@@ -290,8 +414,8 @@ class WorkstationApp:
             notice=notice,
             execution_mode=self.mode_view(blockers=preflight.get("blockers", ())),
             preflight=preflight,
-            runner=self.runner_view(),
-            extra={"data": self.data_view()},
+            runner=self.runner_view(data=data),
+            extra={"data": data},
         )
 
     # -- actions -----------------------------------------------------------
@@ -412,12 +536,18 @@ class WorkstationApp:
                         "Paper runner started. Every fill it produces is simulated locally.",
                     )
                 blockers = view.get("blockers") or []
-                reason = blockers[0].get("reason") if blockers else view.get("reason", "refused")
+                first = blockers[0] if blockers else {}
+                reason = str(first.get("reason") or view.get("reason") or "refused")
+                message = str(first.get("message") or "").strip()
                 self._log(f"paper runner refused to start: {reason}")
                 return (
                     HTTPStatus.SEE_OTHER,
                     "/positions",
-                    f"The paper runner did not start: {reason}. Nothing was traded.",
+                    (
+                        f"The paper runner did not start: {reason}."
+                        + (f" {message}" if message else "")
+                        + " Nothing was traded and the mode was not changed."
+                    ),
                 )
             try:
                 view = runner.stop_runner()

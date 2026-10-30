@@ -105,7 +105,7 @@ if errorlevel 1 goto :pip_failed
 
 rem -- 7. Post-update check: the updated packages must import ---------
 echo   Checking that the updated code imports ...
-"%VENV_PY%" -c "import axiom_forex, axiom_forex.workstation.app, axiom_forex.workstation.dataflow, axiom_forex.paper_runner.runner, axiom_forex.paper_runner.live, axiom_forex.ingest.mt5_ticks" >nul 2>nul
+"%VENV_PY%" -c "import axiom_forex, axiom_forex.workstation.app, axiom_forex.workstation.session, axiom_forex.workstation.dataflow, axiom_forex.paper_runner.runner, axiom_forex.paper_runner.host, axiom_forex.paper_runner.provider, axiom_forex.paper_runner.live, axiom_forex.brokers.mt5.catalogue, axiom_forex.ingest.mt5_ticks" >nul 2>nul
 if errorlevel 1 goto :verify_failed
 
 rem -- 8. MetaTrader 5 package: report it, never install it ------------

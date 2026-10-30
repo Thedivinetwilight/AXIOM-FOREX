@@ -833,6 +833,26 @@ def _runner_state_chip(ctx: PageContext) -> str:
     return chip(state or "UNKNOWN", "muted")
 
 
+def _blocker_list(blockers: Sequence[Mapping[str, Any]]) -> str:
+    """Blocker entries as a list: a code, what it means, and what to do."""
+
+    items = list(blockers or ())
+    if not items:
+        return ""
+    rows = "".join(
+        f"<li><strong>{escape(str(item.get('reason', '')))}</strong> "
+        f"<span class='muted small'>{escape(str(item.get('message', '')))}</span>"
+        + (
+            f"<br><span class='small'>{escape(str(item.get('hint', '')))}</span>"
+            if item.get("hint")
+            else ""
+        )
+        + "</li>"
+        for item in items
+    )
+    return f"<ul class='list-reset small' style='margin:12px 0 0'>{rows}</ul>"
+
+
 def _runner_card(ctx: PageContext) -> str:
     """Everything the operator needs to see why the runner is or is not trading."""
 
@@ -848,18 +868,22 @@ def _runner_card(ctx: PageContext) -> str:
             hint="A runner needs imported history, a passed evaluation, and paper mode.",
         )
     if not runner.get("available", True):
+        first = next(iter(runner.get("blockers") or ()), None)
+        message = (
+            str(first.get("message"))
+            if isinstance(first, Mapping) and first.get("message")
+            else "The runner could not be reached. Nothing is trading."
+        )
         return card(
             "Paper strategy runner",
-            empty_state(
-                "Runner unavailable",
-                escape(str(runner.get("error") or runner.get("reason") or "the runner could not be reached")),
-            ),
+            empty_state("Runner unavailable", escape(message)),
             right=_runner_state_chip(ctx),
         )
 
     if runner.get("pending"):
         # Alive, but nothing is built yet: a provider platform waits for the
         # operator to connect a terminal.  Offering Start is the point.
+        pending_blockers = list(runner.get("setup_blockers") or ())
         return card(
             "Paper strategy runner",
             empty_state(
@@ -871,6 +895,7 @@ def _runner_card(ctx: PageContext) -> str:
                     )
                 ),
             )
+            + _blocker_list(pending_blockers)
             + "<div style='margin-top:12px'>"
             + action_form("runner-start", ctx.action_nonce, "Start runner", tone="paper")
             + "</div>",
@@ -916,20 +941,17 @@ def _runner_card(ctx: PageContext) -> str:
     else:
         actions = action_form("runner-start", ctx.action_nonce, "Start runner", tone="paper")
 
-    blocker_html = ""
-    if blockers:
-        items = "".join(
-            f"<li><strong>{escape(str(item.get('reason', '')))}</strong> "
-            f"<span class='muted small'>{escape(str(item.get('message', '')))}</span>"
-            + (
-                f"<br><span class='small'>{escape(str(item.get('hint', '')))}</span>"
-                if item.get("hint")
-                else ""
-            )
-            + "</li>"
-            for item in blockers
-        )
-        blocker_html = f"<ul class='list-reset small' style='margin:12px 0 0'>{items}</ul>"
+    if not runner.get("running"):
+        seen = {str(item.get("reason", "")) for item in blockers if isinstance(item, Mapping)}
+        for item in runner.get("setup_blockers") or ():
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("reason", "")) in seen:
+                continue
+            seen.add(str(item.get("reason", "")))
+            blockers.append(dict(item))
+
+    blocker_html = _blocker_list(blockers)
 
     recent = list(runner.get("recent") or ())[:5]
     recent_rows = [

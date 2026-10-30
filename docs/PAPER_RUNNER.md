@@ -234,6 +234,11 @@ Every reason code is also persisted, so an empty screen is never the answer to
 | The calendar says closed | `market_closed`, no order |
 | The gate refuses | `gate_refused`, recorded with the gate's own reason |
 | The process dies mid-cycle | the durable order row and reservation settle or the next start blocks |
+| No terminal session is open when Start is pressed | start refused (`terminal_not_connected`) with the hint to press Connect; nothing is built and nothing runs |
+| The session has no read-only market data (simulator preview) | start refused (`market_data_unavailable`); a preview has no ticks to price |
+| The provider setup document is missing or incomplete | start refused with the loader's own reason code (`provider_setup_unreadable`, `missing_swap_terms`, …) |
+| The watched symbol is not in the terminal's catalogue | start refused (`symbol_unresolved`) — never substituted |
+| Any other build failure | start refused (`runner_build_failed`); the page shows a plain sentence and the console shows the exception type, never the traceback |
 
 The runner writes its **intent** before the paper engine executes anything. If a
 process stops between the two, the next start finds an intent with no order and
@@ -388,6 +393,31 @@ then reconciles positions and reports what was sent and booked.
    the audit trail and in the live panel.
 
 If any of that is not true, the leg reports the blocker and sends nothing.
+
+---
+
+## 6c. What the runner is allowed to read from the session
+
+The runner never touches an order surface, and it does not reach into the
+workstation's session for one. `ObservationSession` exposes exactly two
+read-only accessors:
+
+| Accessor | Returns | Used for |
+| --- | --- | --- |
+| `session.market_data_source()` | the connected source's `MT5Terminal`, or `None` | the instrument catalogue (`symbol_names`, `symbol_info`) and the tick feed |
+| `session.market_data(freshness)` | the quote/ticks surface, or a `ConnectionRefused` | pricing a paper fill from real broker ticks |
+
+Ask for anything else — `session.terminal`, which does not exist — and the runner
+now fails as a *blocker* (`terminal_not_connected` / `runner_build_failed`) rather
+than a worker-thread `AttributeError`. The returned terminal has `quote`, `tick`,
+`symbol_names`, and `symbol_info`; it has no `order_send`, no arming, and no
+account switch, so a runner priced from it cannot send anything even by mistake.
+
+While the runner is not running, the panel lists every remaining blocker with a
+stable code, a plain sentence, and where to fix it: `terminal_not_connected`,
+`provider_setup_missing`, `no_imported_history`, `strategy_not_evaluated`, and
+whatever the runner or the live leg itself reports. **Start runner** stays
+available, so connecting and pressing it again is the whole recovery path.
 
 ---
 

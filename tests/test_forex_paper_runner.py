@@ -752,8 +752,16 @@ def test_a_host_whose_platform_cannot_be_built_reports_instead_of_raising():
     )
     try:
         view = host.start()
-        assert view["available"] is False
-        assert "no database" in view["error"]
+        # A failed build is a *blocker* the page can render, not exception text.
+        # The reason code is stable and operator-facing; the exception message can
+        # name internal objects, so it never reaches the UI.
+        assert view["available"] is True
+        assert view["blocked"] is True
+        assert view["running"] is False
+        assert view["reason"] == "runner_build_failed"
+        assert view["error"] == ""
+        assert "no database" not in repr(view)
+        assert view["blockers"][0]["reason"] == "runner_build_failed"
     finally:
         host.close()
 

@@ -281,6 +281,28 @@ Three preconditions, in order, because a strategy is a hypothesis until the data
    **Start runner** begins cycles; **Stop runner** (or Ctrl+C) ends them. Restarting with the same
    `--paper-runner-database` restores the ledger and counters and then waits for an explicit Start.
 
+### If the runner says it is blocked
+
+The runner card never shows an exception. Pressing **Start** either starts the
+lane or reports the exact blocker, in the operator's words:
+
+| Blocker | What it means | What to do |
+| --- | --- | --- |
+| `terminal_not_connected` | No terminal session is open, so there are no symbols or ticks | Press **Connect** on Setup, then **Start** again |
+| `market_data_unavailable` | This session has no read-only market data (a `--simulate` preview) | Start against your terminal |
+| `provider_setup_missing` | Started without `--paper-runner-provider-setup`, so there are no broker terms | Add the flag and the document |
+| `no_imported_history` | No evaluable dataset in the import folder | Export MT5 ticks, convert and evaluate them |
+| `strategy_not_evaluated` | No candidate has passed the predeclared criteria on your data | Read the blocking criterion on Data & evaluation |
+| `symbol_unresolved` | Your terminal does not quote the configured symbol | Fix the pair/suffix in the setup document; nothing is substituted |
+| `runner_build_failed` | Something else went wrong while building the lane | The page says so plainly; the console has the exception type |
+
+A fix for an earlier build: the runner used to ask the observation session for a
+`terminal` attribute it does not have, which surfaced as
+`AttributeError: 'ObservationSession' object has no attribute 'terminal'` on the
+Positions page. The session now exposes two read-only accessors
+(`market_data_source()` and `market_data(freshness)`), the runner uses those, and
+a failed build is reported as a blocker.
+
 ### Importing and evaluating from the workstation itself
 
 The same three steps are on the **Data & evaluation** page (`/data`), so you do not need a

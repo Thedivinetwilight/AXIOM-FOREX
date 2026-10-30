@@ -415,6 +415,45 @@ class ObservationSession:
     def should_poll(self) -> bool:
         return False
 
+    def market_data_source(self) -> Any | None:
+        """The connected source's read-only terminal surface, or ``None``.
+
+        This is the *data* half of whatever is connected: symbol names, symbol
+        specs, and ticks.  The object has no order surface at all, so a runner
+        priced from it can read the broker's market without gaining any ability
+        to trade.  ``None`` means "not connected" or "this source has no
+        terminal" -- both are reported as blockers, never worked around.
+        """
+
+        if not self.connected:
+            return None
+        candidate = getattr(self.source, "terminal", None)
+        # A property that refuses when disconnected is a refusal, not a crash.
+        return candidate if candidate is not None else None
+
+    def market_data(self, freshness: Any = None) -> Any:
+        """The connected source's read-only quote surface.
+
+        Raises :class:`ConnectionRefused` with an operator-facing reason instead
+        of failing deep inside the runner, so the page can say what to do.
+        """
+
+        if not self.connected:
+            raise ConnectionRefused(
+                "terminal_not_connected",
+                "no terminal session is open",
+                "Press Connect on the Setup page, then start the runner again.",
+            )
+        provider = getattr(self.source, "market_data", None)
+        if provider is None:
+            raise ConnectionRefused(
+                "market_data_unavailable",
+                "this session exposes no live market data",
+                "A simulator preview has no terminal to price from. Start the "
+                "workstation against your terminal to run the live-tick lane.",
+            )
+        return provider(freshness)
+
     def market_data_class(self) -> str:
         """Where prices would come from right now: terminal ticks, or nothing."""
 
@@ -456,6 +495,7 @@ class ObservationSession:
             #: This object holds a data terminal only; execution mode decides
             #: whether a strategy's order is simulated or routed elsewhere.
             "trading_capability": "none",
+            "market_data_available": self.market_data_source() is not None,
         }
 
 

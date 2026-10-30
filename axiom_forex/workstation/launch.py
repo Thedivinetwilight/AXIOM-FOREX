@@ -290,26 +290,65 @@ def _evaluation_platform_builder(args, app, settings_path: Path):
 
         if not provider_setup:
             return build_fixture_platform(database_path=db_path), None
+        from axiom_forex.paper_runner.host import RunnerSetupRefused
+
         try:
-            return _provider_platform(app, provider_setup, db_path, pair), None
-        except RuntimeError as exc:
-            reason, _, detail = str(exc).partition(": ")
-            raise DataflowRefused(reason or "platform_unavailable", detail)
+            return (
+                _provider_platform(app.wizard.session, provider_setup, db_path, pair),
+                None,
+            )
+        except RunnerSetupRefused as exc:
+            # The data page speaks DataflowRefused; the runner speaks its own.
+            # Both are typed, so neither can leak exception text into a page.
+            raise DataflowRefused(exc.reason, exc.detail) from exc
 
     return build
 
 
-def _provider_platform(app, provider_setup, db_path, pair=None):
+def read_only_terminal(session):
+    """The session's read-only terminal surface, or a typed refusal.
+
+    ``ObservationSession`` deliberately has no ``terminal`` attribute: the
+    terminal lives behind the *source*, and only a connected one is exposed at
+    all.  Asking the session for it here keeps that boundary in one place, and
+    turns "not connected" and "no live data" into blockers the page can show
+    instead of an ``AttributeError`` in a worker thread.
+    """
+
+    from axiom_forex.paper_runner.host import RunnerSetupRefused
+
+    if not getattr(session, "connected", False):
+        raise RunnerSetupRefused(
+            "terminal_not_connected",
+            (
+                "The runner reads symbols, specs, and ticks from your terminal, and "
+                "no terminal session is open."
+            ),
+            "Press Connect on the Setup page, then press Start again.",
+        )
+    terminal = session.market_data_source()
+    if terminal is None:
+        raise RunnerSetupRefused(
+            "market_data_unavailable",
+            (
+                "This session exposes no read-only terminal, so the runner has no "
+                "symbol catalogue and no ticks to price."
+            ),
+            (
+                "A simulator preview has no terminal. Start the workstation against "
+                "your MetaTrader 5 terminal to run the live-tick lane."
+            ),
+        )
+    return terminal
+
+
+def _provider_platform(session, provider_setup, db_path, pair=None):
     from axiom_forex.brokers.mt5.catalogue import SymbolRequest, build_catalogue
     from axiom_forex.config.provider_setup import load_provider_setup
     from axiom_forex.database.repository import ForexRepository
     from axiom_forex.paper_runner.provider import build_provider_platform as _build
 
-    terminal = app.wizard.session.terminal
-    if terminal is None:
-        raise RuntimeError(
-            "terminal_not_connected: press Connect in the browser, then Start"
-        )
+    terminal = read_only_terminal(session)
     setup = load_provider_setup(provider_setup)
     pair = pair or setup.pairs()[0]
     catalogue_inputs = []
@@ -339,7 +378,17 @@ def _provider_platform(app, provider_setup, db_path, pair=None):
             if refusal is not None
             else "pair_not_in_setup"
         )
-        raise RuntimeError(f"symbol_unresolved: {detail}")
+        from axiom_forex.paper_runner.host import RunnerSetupRefused
+
+        raise RunnerSetupRefused(
+            "symbol_unresolved",
+            f"The catalogue could not resolve {pair} to a symbol your terminal quotes.",
+            (
+                "Check the pair and suffix in your provider setup document, and that "
+                "the symbol is visible in Market Watch. Nothing is substituted. "
+                f"Detail: {detail}"
+            ),
+        )
     symbols = tuple(terminal.symbol_names())
     symbol_of_pair = {
         (item.spec.base_currency, item.spec.quote_currency): item.broker_symbol
@@ -401,7 +450,7 @@ def _build_runner_host(args, app, settings_path: Path):
     def build_platform():
         if provider_setup:
             return _provider_platform(
-                app,
+                app.wizard.session,
                 provider_setup,
                 db_path,
                 getattr(args, "paper_runner_pair", None),
@@ -414,7 +463,7 @@ def _build_runner_host(args, app, settings_path: Path):
 
             return build_provider_feed(
                 platform=platform,
-                terminal=app.wizard.session.terminal,
+                terminal=read_only_terminal(app.wizard.session),
                 interval_seconds=max(int(args.paper_runner_interval), 1),
                 max_quote_age_seconds=Decimal(str(args.paper_runner_quote_age)),
             )
@@ -484,12 +533,20 @@ def _build_runner_host(args, app, settings_path: Path):
     )
     view = host.start()
     if not view.get("available", True):
+        print("[axiom-workstation] paper runner unavailable for this build", file=sys.stderr)
+        return None
+    if view.get("blocked"):
+        first = (view.get("blockers") or [{}])[0]
         print(
-            f"[axiom-workstation] paper runner could not start: {view.get('error', '')}",
+            "[axiom-workstation] paper runner blocked: "
+            f"{first.get('reason', 'unknown')} -- {first.get('message', '')}",
             file=sys.stderr,
         )
-        return None
-    if provider_setup:
+        print(
+            "  The Positions page shows the same blocker. Fix it, then press Start.",
+            file=sys.stderr,
+        )
+    elif provider_setup:
         print(
             "[axiom-workstation] paper runner ready (broker symbols from the "
             "connected terminal; press Connect, then Start)"
@@ -578,6 +635,10 @@ def main(argv: list[str] | None = None) -> int:
     # read-only, and only an explicit action writes.
     app.import_dir = Path(args.imports_dir) if args.imports_dir else _repo_root() / "imports"
     app.research_db_path = _runner_db_path(args, settings_path)
+    # What the runner card needs in order to state the remaining blockers in the
+    # operator's own terms rather than as an exception.
+    app.provider_setup_path = str(args.paper_runner_provider_setup or "")
+    app.runner_source = str(args.paper_runner_source or "") if args.paper_runner else ""
     if args.paper_runner:
         app.runner = _build_runner_host(args, app, settings_path)
         app.evaluation_platform_builder = _evaluation_platform_builder(

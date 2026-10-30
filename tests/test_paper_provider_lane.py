@@ -687,8 +687,15 @@ def test_a_deferred_host_builds_only_on_start(terminal, setup_doc):
 def test_a_deferred_build_that_cannot_see_a_terminal_reports_it(terminal, setup_doc):
     from axiom_forex.paper_runner.host import PaperRunnerHost
 
+    from axiom_forex.paper_runner.host import RunnerSetupRefused
+
     def broken():
-        raise RuntimeError("terminal_not_connected: press Connect")
+        # The shape launch.py now uses: a typed refusal, not a bare exception.
+        raise RunnerSetupRefused(
+            "terminal_not_connected",
+            "No terminal session is open.",
+            "Press Connect, then Start.",
+        )
 
     host = PaperRunnerHost(
         build_platform=broken,
@@ -700,7 +707,12 @@ def test_a_deferred_build_that_cannot_see_a_terminal_reports_it(terminal, setup_
     try:
         host.start()
         started = host.start_runner()
-        assert started["available"] is False
-        assert "terminal_not_connected" in str(started.get("error", ""))
+        # Blocked, not "unavailable", and the page gets wording it can show.
+        assert started["available"] is True
+        assert started["blocked"] is True
+        assert started["running"] is False
+        assert started["reason"] == "terminal_not_connected"
+        assert started["blockers"][0]["hint"] == "Press Connect, then Start."
+        assert started["error"] == ""
     finally:
         host.close()
