@@ -69,6 +69,7 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/positions": ("positions", "Positions"),
     "/data": ("data", "Data & evaluation"),
     "/provider-setup": ("provider-setup", "Provider setup"),
+    "/live": ("live", "Live execution"),
     "/activity": ("activity", "Activity"),
     "/health": ("health", "System health"),
     "/mode": ("mode", "Trading mode"),
@@ -91,6 +92,11 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
 #:   * ``imports-refresh`` / ``ticks-convert`` / ``dataset-evaluate`` -- the
 #:     data workflow.  They touch local files and the research database, and
 #:     nothing else: no connection, no order, no arming, no mode change.
+#:   * ``live-arm`` / ``live-disarm`` / ``live-start`` / ``live-stop`` -- the
+#:     live execution workflow.  Arming writes the operator's plan and arms the
+#:     broker adapter (it sends nothing); starting begins the strategy loop;
+#:     stopping ends it and disarms.  None of them connects, signs in, changes
+#:     the mode, or picks a strategy, symbol, size, or limit.
 #:
 #: Anything that could trade, arm, switch accounts, or change broker settings is
 #: absent by construction, not by a permission check: there is no handler for it,
@@ -115,6 +121,11 @@ POST_ACTIONS: frozenset[str] = frozenset(
         # The guided provider setup. It writes one local, Git-ignored document
         # (provider_setup.local.json) and never reads or touches the MT5 settings.
         "provider-setup-save",
+        # The live workflow: plan, review, arm, start, stop.
+        "live-arm",
+        "live-disarm",
+        "live-start",
+        "live-stop",
     }
 )
 
@@ -205,6 +216,14 @@ class WorkstationApp:
     strategy: StrategyBinding | None = None
     #: An audit sink for mode changes (a durable log, when one is available).
     audit_sink: Any = None
+    #: The last live-arm result, for the page's notice block.
+    live_result: dict[str, Any] = field(default_factory=dict)
+
+    #: The live execution workflow (plan, review, arming, session), if this
+    #: deployment was started with the trading adapter.  ``None`` means this
+    #: workstation can never send a real order.
+    live: Any = None
+
     #: The paper strategy runner's host, if this deployment has one.  It owns its
     #: own thread and its own paper stack; the UI only sends it start/stop and
     #: reads its state.  ``None`` means no runner is configured -- which is the
@@ -432,6 +451,68 @@ class WorkstationApp:
                 )
         return blockers
 
+    def live_view(self) -> dict[str, Any]:
+        """The live page's whole model.  Reads only, never sends."""
+
+        if self.live is None:
+            return {
+                "configured": False,
+                "armed": False,
+                "next_signal_sends_real_order": False,
+                "blockers": [],
+                "candidates": [],
+                "symbols": [],
+                "plan": {"present": False},
+                "account": {},
+                "positions": [],
+                "confirmation_phrase": "",
+                "review": {},
+            }
+        try:
+            return self.live.view()
+        except Exception as exc:
+            return {
+                "configured": True,
+                "armed": False,
+                "next_signal_sends_real_order": False,
+                "blockers": [
+                    {
+                        "reason": "live_view_unreadable",
+                        "message": f"The live view could not be read ({type(exc).__name__}).",
+                        "hint": "Nothing is armed if this panel cannot be read.",
+                    }
+                ],
+                "candidates": [],
+                "symbols": [],
+                "plan": {"present": False},
+                "account": {},
+                "positions": [],
+            }
+
+    def live_summary(self) -> dict[str, Any]:
+        """The one fact every page may show: would the next signal send an order?"""
+
+        if self.live is None:
+            return {
+                "present": False,
+                "armed": False,
+                "next_signal_sends_real_order": False,
+                "sentence": (
+                    "No live trading adapter is wired into this workstation, so no "
+                    "signal can send an order."
+                ),
+            }
+        try:
+            summary = dict(self.live.summary())
+        except Exception:
+            return {
+                "present": True,
+                "armed": False,
+                "next_signal_sends_real_order": False,
+                "sentence": "The live state could not be read; nothing is assumed armed.",
+            }
+        return summary
+
     def _context(self, page: str, title: str, notice: str = "") -> PageContext:
         # One preflight per page render: it is read-only, and running it twice
         # would let two panels disagree about the same facts.
@@ -455,6 +536,8 @@ class WorkstationApp:
                 "provider_setup": (
                     self.provider_setup_view() if page == "provider-setup" else {}
                 ),
+                "live": self.live_view() if page == "live" else {},
+                "live_summary": self.live_summary(),
             },
         )
 
@@ -491,6 +574,23 @@ class WorkstationApp:
             session.connect()
             if session.connected:
                 self._log(f"session active: source={session.view().get('source_kind')}")
+                live_note = ""
+                if self.live is not None and not simulated:
+                    # The trading adapter adopts this terminal; it opens no second
+                    # session and sends nothing. A refusal is reported, not hidden.
+                    try:
+                        outcome = self.live.connect()
+                    except Exception as exc:
+                        outcome = {"connected": False, "reason": type(exc).__name__}
+                    if not outcome.get("connected"):
+                        self._log(
+                            f"live adapter not attached: {outcome.get('reason') or 'unknown'}"
+                        )
+                        live_note = (
+                            " The live trading adapter did not attach ("
+                            f"{outcome.get('reason') or 'unknown'}); the Live execution "
+                            "page shows the blocker and no order can be sent."
+                        )
                 if simulated:
                     return (
                         HTTPStatus.SEE_OTHER,
@@ -502,7 +602,7 @@ class WorkstationApp:
                     HTTPStatus.SEE_OTHER,
                     "/",
                     "Connected to the terminal. Choose how orders would be executed on "
-                    "the Trading mode screen.",
+                    "the Trading mode screen." + live_note,
                 )
             error = (session.view().get("error") or {})
             reason = str(error.get("reason", "unknown"))
@@ -511,6 +611,14 @@ class WorkstationApp:
         if action == "disconnect":
             self._log("disconnect requested")
             simulate = wizard.simulated
+            # Closing the adapter first disarms it and closes the shared terminal
+            # session; the session's own disconnect then finds nothing to shut down.
+            if self.live is not None:
+                try:
+                    self.live.disconnect(reason="disconnect_action")
+                except Exception as exc:
+                    self._log(f"live adapter disconnect failed: {type(exc).__name__}")
+            self._stop_live(detail="disconnect action")
             wizard.session.disconnect()
             # Live execution depends on the session that was just closed, so the
             # mode returns to paper -- because the operator clicked Disconnect,
@@ -531,6 +639,9 @@ class WorkstationApp:
         if action == "mode-paper":
             if self.mode is None:
                 return HTTPStatus.INTERNAL_SERVER_ERROR, "/mode", "mode controller unavailable"
+            # Moving to paper must end any live session: simulated fills and real
+            # orders must never be one click apart.
+            self._stop_live(detail="mode switched to paper")
             change = self.mode.set_paper(detail="workstation mode selector")
             self._log(f"execution mode: {change.to_mode} ({change.reason})")
             return HTTPStatus.SEE_OTHER, "/", change.message
@@ -607,6 +718,8 @@ class WorkstationApp:
             )
         if action == "provider-setup-save":
             return self._provider_setup_save(form)
+        if action in {"live-arm", "live-disarm", "live-start", "live-stop"}:
+            return self._live_action(action, form)
         if action in {"imports-refresh", "ticks-convert", "dataset-evaluate"}:
             return self._data_action(action, form)
         if action == "acknowledge-sign-in":
@@ -632,6 +745,113 @@ class WorkstationApp:
             self._log(f"symbols selected: {len(chosen)}")
             return HTTPStatus.SEE_OTHER, "/account", f"{len(chosen)} symbol(s) selected."
         return HTTPStatus.NOT_FOUND, "/", "unknown action"
+
+    # -- live execution -----------------------------------------------------
+    def _live_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        """Arm, disarm, start, or stop the live session.  Sends nothing by itself."""
+
+        live = self.live
+        if live is None:
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "/live",
+                "This workstation has no live trading adapter, so it cannot send a real "
+                "order. Start it with the terminal settings to enable live execution.",
+            )
+
+        def field(name: str) -> str:
+            raw = form.get(name)
+            if isinstance(raw, (list, tuple)):
+                raw = raw[0] if raw else ""
+            return str(raw if raw is not None else "").strip()
+
+        if action == "live-arm":
+            values = {
+                "candidate_id": field("candidate_id"),
+                "pair": field("pair"),
+                "quantity": field("quantity"),
+                "max_open_positions": field("max_open_positions"),
+                "max_daily_loss_account": field("max_daily_loss_account"),
+            }
+            result = live.arm(
+                values,
+                confirmation=field("confirmation"),
+                reviewed=field("reviewed") == "yes",
+            )
+            self.live_result = result.audit_view()
+            if result.armed:
+                self._log(
+                    "live plan armed: "
+                    f"{values['candidate_id'] or 'unknown'} "
+                    f"{values['pair'] or 'unknown'} "
+                    f"qty={values['quantity'] or 'unset'}"
+                )
+                return (
+                    HTTPStatus.SEE_OTHER,
+                    "/live",
+                    "Armed. The next strategy signal would send a REAL order. "
+                    "Press Start to begin the session.",
+                )
+            self._log(f"live arm refused: {result.reason}")
+            detail = "; ".join(
+                f"{item.message}" for item in result.blockers[:3] if item.message
+            )
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/live",
+                f"Nothing was armed: {result.message}"
+                + (f" ({detail})" if detail and detail != result.message else ""),
+            )
+
+        if action == "live-disarm":
+            self._stop_live(detail="operator disarm", close=True)
+            self._log("live plan disarmed")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/live",
+                "Disarmed. No signal can send an order until you arm again.",
+            )
+
+        if action == "live-start":
+            outcome = live.start_session()
+            if outcome.get("started"):
+                self._log("live session started")
+                return (
+                    HTTPStatus.SEE_OTHER,
+                    "/live",
+                    "Live session running. Every approved signal now goes to MetaTrader 5.",
+                )
+            self._log(f"live session refused: {outcome.get('reason')}")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/live",
+                f"The live session did not start: {outcome.get('reason')}. "
+                f"{outcome.get('message', '')} Nothing was sent.",
+            )
+
+        # live-stop: the prominent control.  Always allowed, never refused.
+        live.stop_session(reason="operator_stop", close=True)
+        self._log("live session stopped and disarmed")
+        return (
+            HTTPStatus.SEE_OTHER,
+            "/live",
+            "Stopped and disarmed. No further order can be sent from this session.",
+        )
+
+    def _stop_live(self, *, detail: str, close: bool = True) -> None:
+        """Stop the live session and disarm, swallowing nothing a page needs."""
+
+        live = self.live
+        if live is None:
+            return
+        try:
+            live.stop_session(reason=detail.replace(" ", "_"), close=close)
+        except Exception as exc:
+            self._log(f"live stop failed: {type(exc).__name__}")
+            try:
+                live.disarm(reason="stop_failed")
+            except Exception:
+                pass
 
     # -- data workflow -----------------------------------------------------
     def _data_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:

@@ -22,8 +22,28 @@ Modules
     robustness criteria and a one-use locked test window.
 ``data_audit``
     What historical data exists, where it came from, and what it is missing.
+``live``
+    The live leg: one approved plan, through the gate, to the MT5 adapter.
+``live_workflow`` / ``live_host`` / ``live_assembly`` / ``live_plan``
+    The operator's live workflow (plan, review, arm, start, stop), its session
+    host, its assembly, and the plan document. These are the only modules here
+    that may name an arming or order-submitting API; the browser layer holds the
+    workflow as an opaque controller and never names one itself.
 """
 
 from __future__ import annotations
 
-__all__ = ["data_audit", "evaluation", "feed", "journal", "runner", "strategy"]
+__all__ = [
+    "data_audit",
+    "evaluation",
+    "feed",
+    "journal",
+    "live",
+    "live_assembly",
+    "live_host",
+    "live_plan",
+    "live_workflow",
+    "provider",
+    "runner",
+    "strategy",
+]

@@ -33,7 +33,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from app.execution.broker import TradingBlocked
 
@@ -205,6 +205,7 @@ class PaperStrategyRunner:
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Any] | None = None,
         live: Any = None,
+        allow_unvalidated: bool = False,
     ) -> None:
         errors = config.validate()
         if errors:
@@ -219,6 +220,11 @@ class PaperStrategyRunner:
         #: does not enable live trading: the mode, the arming, and every gate in
         #: the leg still have to be satisfied first.
         self.live = live
+        #: Live only: a strategy the operator armed on purpose may run without
+        #: measured results.  It is labelled UNVALIDATED everywhere, and paper
+        #: still refuses it -- this relaxes nothing about the order path.
+        self.allow_unvalidated = bool(allow_unvalidated)
+        self.unvalidated_live = False
         self.journal = journal
         self.clock = clock or _utc_now
         import time as _time
@@ -270,6 +276,14 @@ class PaperStrategyRunner:
             {**self.candidate.evidence, "evaluated": bool(self.candidate.evidence)},
         )
 
+    def _may_run_unvalidated_live(self) -> bool:
+        """True only for a live leg, a live mode, and an explicit operator opt-in."""
+
+        if not self.allow_unvalidated or self.live is None:
+            return False
+        mode_name = str(getattr(self.mode, "mode", "") or "").upper()
+        return mode_name == "LIVE" and bool(getattr(self.mode, "live_effective", False))
+
     def guard_blockers(self) -> tuple[RunnerBlocker, ...]:
         """Everything that must be true before an order may be placed."""
 
@@ -317,17 +331,24 @@ class PaperStrategyRunner:
             )
 
         status = self.status()
+        self.unvalidated_live = False
         if status != STATUS_SELECTED:
-            blockers.append(
-                RunnerBlocker(
-                    REASON_STRATEGY_NOT_SELECTED,
-                    f"{self.candidate.candidate_id} is {status}, so it may not run on "
-                    "paper yet.",
-                    "Run the chronological evaluation on real imported history and let it "
-                    "select the candidate; synthetic fixtures and demo exports can never "
-                    "select one.",
+            if self._may_run_unvalidated_live():
+                # The operator armed this strategy deliberately, the plan says
+                # UNVALIDATED, and the page says so.  Live only: paper keeps the
+                # selection rule.
+                self.unvalidated_live = True
+            else:
+                blockers.append(
+                    RunnerBlocker(
+                        REASON_STRATEGY_NOT_SELECTED,
+                        f"{self.candidate.candidate_id} is {status}, so it may not run on "
+                        "paper yet.",
+                        "Run the chronological evaluation on real imported history and let it "
+                        "select the candidate; synthetic fixtures and demo exports can never "
+                        "select one.",
+                    )
                 )
-            )
 
         try:
             validation = self.lane.spec.validate()
@@ -445,6 +466,19 @@ class PaperStrategyRunner:
                 "live_broker_orders" if self.live is not None else "paper_simulation_only"
             ),
             "order_sending": self.live is not None,
+            # A strategy the operator armed without measured results is labelled
+            # here, in the plan, and on the page -- never quietly upgraded.
+            "unvalidated": bool(self.unvalidated_live),
+            "evidence_state": "UNVALIDATED" if self.unvalidated_live else "MEASURED",
+            "warnings": (
+                [
+                    "This strategy has no measured result behind it. It is running LIVE "
+                    "because an operator armed it deliberately; that is not evidence of "
+                    "anything except the decision."
+                ]
+                if self.unvalidated_live
+                else []
+            ),
             "stops": sorted(STOPPING_REASONS),
         }
 
@@ -717,7 +751,9 @@ class PaperStrategyRunner:
             return {"reason": REASON_JOURNAL_FAILED, "state": self.state, "filled": False}
 
         if self._live_active():
-            return self._execute_live(plan=plan, bar=bar)
+            result = self._execute_live(plan=plan, bar=bar)
+            self._resolve_intent(plan, result)
+            return result
 
         try:
             record, fill = self.lane.paper_execution.execute(
@@ -888,6 +924,30 @@ class PaperStrategyRunner:
         self._persist()
         return view
 
+    def _resolve_intent(self, plan: ExecutionPlan, result: Mapping[str, Any]) -> None:
+        """Record how the intent ended.  Never a reason to stop the loop."""
+
+        if self.journal is None:
+            return
+        if result.get("submitted"):
+            status = "FILLED" if result.get("filled") else "SENT"
+        elif result.get("filled"):
+            status = "FILLED"
+        else:
+            status = "REFUSED"
+        try:
+            self.journal.resolve_intent(
+                run_id=self.config.run_id,
+                sequence=self._sequence,
+                status=status,
+                reason=str(result.get("reason", "") or ""),
+                request_id=plan.request.request_id,
+            )
+        except Exception:
+            # If the resolution cannot be written, the guard stays strict: the
+            # next start sees a pending intent and asks the operator.
+            pass
+
     # -- persistence -----------------------------------------------------
 
     def _write_intent(self, plan: ExecutionPlan, bar: Any) -> None:
@@ -1025,6 +1085,11 @@ class PaperStrategyRunner:
         unmatched = []
         for intent in self.journal.intents(self.config.run_id):
             request_id = str(intent.get("request_id", ""))
+            # A resolved intent (refused, filled, or sent) is a known outcome.
+            # Only an intent still PENDING -- or one written before this field
+            # existed -- means the process stopped between decision and outcome.
+            if str(intent.get("status", "PENDING")).upper() != "PENDING":
+                continue
             if request_id and request_id not in orders:
                 unmatched.append(intent)
         return unmatched

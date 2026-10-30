@@ -235,22 +235,18 @@ def test_the_runner_opens_and_closes_paper_positions_in_replay(platform):
     assert final["order_sending"] is False
 
 
-def test_the_paper_runner_package_has_no_order_sending_or_arming_surface():
+def test_only_the_live_modules_can_arm_and_nothing_here_can_send_an_order():
+    """The order-sending surface is confined to the modules that exist for it.
+
+    ``live.py``/``live_workflow.py``/``live_host.py``/``live_assembly.py`` are the
+    live leg and the operator workflow behind it; every other module in this
+    package stays paper-only and cannot arm anything.  ``order_send`` appears
+    nowhere: only the MT5 adapter may call it.
+    """
+
     root = Path(__file__).resolve().parents[1] / "axiom_forex" / "paper_runner"
-    reachable: set[str] = set()
-    for path in sorted(root.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                reachable.add(node.attr)
-            elif isinstance(node, ast.Name):
-                reachable.add(node.id)
-            elif isinstance(node, ast.ImportFrom):
-                reachable.update(alias.name for alias in node.names)
-                reachable.add(node.module or "")
-    forbidden = {
-        "order_send",
-        "order_check",
+    live_modules = {"live.py", "live_host.py", "live_workflow.py", "live_assembly.py"}
+    paper_only_forbidden = {
         "submit_order",
         "place_order",
         "arm_trading",
@@ -261,7 +257,26 @@ def test_the_paper_runner_package_has_no_order_sending_or_arming_surface():
         "set_paper",
         "ExecutionModeController",
     }
-    assert reachable & forbidden == set(), sorted(reachable & forbidden)
+    arming: dict[str, set[str]] = {}
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        reachable: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                reachable.add(node.attr)
+            elif isinstance(node, ast.Name):
+                reachable.add(node.id)
+            elif isinstance(node, ast.ImportFrom):
+                reachable.update(alias.name for alias in node.names)
+                reachable.add(node.module or "")
+        # No module here sends an order directly, live or not.
+        assert "order_send" not in reachable, path.name
+        assert "order_check" not in reachable, path.name
+        if path.name in live_modules:
+            if reachable & {"arm_trading", "disarm_trading"}:
+                arming[path.name] = reachable & {"arm_trading", "disarm_trading"}
+            continue
+        assert reachable & paper_only_forbidden == set(), (path.name, sorted(reachable))
 
 
 # ---------------------------------------------------------------------------

@@ -558,6 +558,141 @@ def _build_runner_host(args, app, settings_path: Path):
     return host
 
 
+def _utc_now():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+def _live_symbol_resolver(session, provider_setup):
+    """Resolve one pair for the review: the spec and the broker's own rules.
+
+    Read-only, and never a substitute for the real stack: it is used to show the
+    operator the volume grid they must fit *before* they arm, not to trade.
+    """
+
+    from dataclasses import dataclass
+    from typing import Any
+
+    from axiom_forex.brokers.mt5.catalogue import SymbolRequest, build_catalogue
+    from axiom_forex.config.provider_setup import ProviderSetupError, load_provider_setup
+
+    @dataclass
+    class Resolved:
+        spec: Any
+        broker_symbol: str
+        symbol_info: dict
+
+    try:
+        setup = load_provider_setup(provider_setup)
+    except ProviderSetupError:
+        return None
+    except Exception:
+        return None
+    terminal = read_only_terminal(session)
+
+    def resolve(pair):
+        terms = setup.terms_for(pair)
+        if terms is None:
+            return None
+        report = build_catalogue(
+            terminal,
+            [
+                SymbolRequest(
+                    pair=terms.pair,
+                    pip_size=terms.pip_size,
+                    calendar_id=terms.calendar_id,
+                    calendar_version=terms.calendar_version,
+                    correlation_group=terms.correlation_group,
+                    margin_multiplier=terms.margin_multiplier,
+                    spec_version=terms.spec_version,
+                    broker_symbol=terms.broker_symbol,
+                    suffix=terms.suffix,
+                    source=terms.source,
+                )
+            ],
+        )
+        resolved = report.resolved_for(pair)
+        if resolved is None:
+            return None
+        info = terminal.symbol_info(str(resolved.broker_symbol))
+        return Resolved(
+            spec=resolved.spec,
+            broker_symbol=str(resolved.broker_symbol),
+            symbol_info={
+                "volume_min": str(info.volume_min),
+                "volume_step": str(info.volume_step),
+                "volume_max": str(info.volume_max),
+                "digits": info.digits,
+                "trade_mode": info.trade_mode,
+            },
+        )
+
+    return resolve
+
+
+def _wire_live(args, app, *, settings, settings_path: Path):
+    """Hand the launch-time objects to the live assembly.  Builds nothing itself."""
+
+    from axiom_forex.paper_runner.live_assembly import build_live_workflow
+    from axiom_forex.paper_runner.provider import build_provider_feed
+    from axiom_forex.paper_runner.strategy import candidate_family
+
+    if settings is None:
+        print(
+            "[axiom-workstation] live execution unavailable: no usable settings document",
+            file=sys.stderr,
+        )
+        return None
+    provider_setup = getattr(args, "paper_runner_provider_setup", None)
+    if not provider_setup:
+        print(
+            "[axiom-workstation] live execution needs --paper-runner-provider-setup "
+            "(the broker terms); the Live execution page will show the blocker.",
+            file=sys.stderr,
+        )
+    db_path = _runner_db_path(args, settings_path)
+
+    def platform_factory(pair: str):
+        return _provider_platform(app.wizard.session, provider_setup, db_path, pair)
+
+    def feed_factory(platform):
+        from decimal import Decimal
+
+        return build_provider_feed(
+            platform=platform,
+            terminal=read_only_terminal(app.wizard.session),
+            interval_seconds=max(int(args.paper_runner_interval), 1),
+            max_quote_age_seconds=Decimal(str(args.paper_runner_quote_age)),
+        )
+
+    live = build_live_workflow(
+        settings=settings,
+        mode=app.mode,
+        project_root=_repo_root(),
+        db_path=db_path,
+        platform_factory=platform_factory,
+        feed_factory=feed_factory,
+        terminal_getter=lambda: read_only_terminal(app.wizard.session),
+        provider_setup_path=provider_setup or None,
+        interval_seconds=max(int(args.paper_runner_interval), 1),
+        quote_age_seconds=str(args.paper_runner_quote_age),
+        candidates=candidate_family(),
+        symbol_resolver=(
+            _live_symbol_resolver(app.wizard.session, provider_setup)
+            if provider_setup
+            else None
+        ),
+        audit_log=getattr(getattr(app, "platform", None), "audit_log", None),
+    )
+    if live is not None:
+        print(
+            "[axiom-workstation] live execution wired: review, arm, start, stop. "
+            "Nothing is connected, armed, or sent until you do each of those."
+        )
+    return live
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # Naming a provider setup is already a request for the runner: requiring the
@@ -648,6 +783,13 @@ def main(argv: list[str] | None = None) -> int:
             args, app, settings_path
         )
 
+    # The live path is wired whenever the operator's own settings were loaded.
+    # Building it connects nothing and sends nothing; every decision stays on
+    # the Live execution page.  The assembly itself lives beside the live leg so
+    # that this browser layer never names an order-submitting API.
+    app.live = _wire_live(args, app, settings=None if args.simulate else settings,
+                          settings_path=settings_path)
+
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and not args.simulate:
         print("Refusing to expose a real terminal session beyond this machine.", file=sys.stderr)
@@ -710,6 +852,11 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.shutdown()
         server.server_close()
+        if getattr(app, "live", None) is not None:
+            try:
+                app.live.stop_session(reason="workstation_shutdown", close=True)
+            except Exception:
+                pass
         if getattr(app, "runner", None) is not None:
             app.runner.close()
     return 0

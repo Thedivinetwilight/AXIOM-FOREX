@@ -281,6 +281,21 @@ Three preconditions, in order, because a strategy is a hypothesis until the data
    **Start runner** begins cycles; **Stop runner** (or Ctrl+C) ends them. Restarting with the same
    `--paper-runner-database` restores the ledger and counters and then waits for an explicit Start.
 
+### Live execution
+
+`/live` is the only screen from which a real order can ever be sent, and it says
+in one line whether the next strategy signal would send one. Enabling LIVE, arming
+the plan, and starting the session are three separate clicks; none of them sends
+an order, and **Stop and disarm** always works.
+
+You choose the strategy, symbol, order size, maximum open positions, and daily
+loss limit, then read a review of exactly what arming authorises before typing the
+confirmation phrase. A strategy without measured results is labelled
+**UNVALIDATED** — AXIOM never picks one for you and never presents it as tested.
+Every order still goes through the same planner, pre-trade gate, risk limits and
+ledger the paper lane uses; the intent is written durably before submission, and
+an in-doubt order is never re-sent. Full detail: `docs/LIVE_EXECUTION.md`.
+
 ### Provider setup (`provider_setup.local.json`)
 
 The runner trades the symbol *your broker* quotes, so it needs one local document
@@ -394,6 +409,12 @@ a real path rather than a label:
 - **The live entry point.** `axiom live-run` assembles the provider platform, the planner, the
   gate, the approved candidate, and the live leg in one bounded, reconciled run. It refuses unless
   the adapter is already connected *and* armed, so starting a runner can never arm a broker.
+- **The operator's live workflow.** In the workstation, **Live execution** (`/live`) is the whole
+  of it: choose the strategy, symbol, order size, maximum open positions and daily loss limit, read
+  the review, type the confirmation phrase, arm, then start. The page states in one line whether
+  the next strategy signal would send a real order, and **Stop and disarm** always works. Arming
+  writes `live_plan.local.json` (Git-ignored) and sends nothing; a strategy without measured
+  results is labelled **UNVALIDATED** and is never chosen for you. See `docs/LIVE_EXECUTION.md`.
 
 It is proven against the **fake** MetaTrader 5 module only: no real order has been placed and no
 account has been contacted. Broker-specific symbols, filling modes, retcodes, and margin behaviour

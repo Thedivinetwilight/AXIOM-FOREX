@@ -421,6 +421,19 @@ available, so connecting and pressing it again is the whole recovery path.
 
 ---
 
+## 6e. Where live takes over
+
+The paper runner never sends an order and never arms anything. The live path is a
+separate, operator-driven workflow on the **Live execution** page
+(`/live`), documented in `docs/LIVE_EXECUTION.md`: it reuses this lane's planner,
+pre-trade gate, risk limits, journal and ledger, and adds the MT5 order
+submission, the durable write-ahead intent, and the broker reconciliation.
+
+One deliberate difference: the paper runner refuses a candidate that the recorded
+evaluation did not select, while the live workflow lets an operator who has read
+the **UNVALIDATED** label run one on purpose. Neither path claims a strategy is
+profitable.
+
 ## 6d. The provider setup document
 
 `--paper-runner-provider-setup` points at one local JSON document of broker terms,

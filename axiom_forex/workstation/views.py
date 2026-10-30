@@ -32,6 +32,7 @@ APP_SUBTITLE = "FOREX"
 NAV: tuple[tuple[str, str, str], ...] = (
     ("overview", "/", "Overview"),
     ("mode", "/mode", "Trading mode"),
+    ("live", "/live", "Live execution"),
     ("setup", "/setup", "Setup"),
     ("account", "/account", "Account & symbols"),
     ("positions", "/positions", "Positions"),
@@ -44,6 +45,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
 ICONS: dict[str, str] = {
     "overview": "M3 12h4l3 7 4-14 3 7h4",
     "mode": "M4 7h10l-3-3M20 17H10l3 3M14 7h6v6M10 17H4v-6",
+    "live": "M12 3v3M12 18v3M3 12h3M18 12h3M6.3 6.3l2.1 2.1M15.6 15.6l2.1 2.1M17.7 6.3l-2.1 2.1M8.4 15.6l-2.1 2.1M12 9a3 3 0 100 6 3 3 0 000-6z",
     "setup": "M4 6h10M4 12h16M4 18h7M18 4v4M16 18h4M20 16v4",
     "account": "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
     "positions": "M4 18V9M10 18V5M16 18v-6M22 18h-20",
@@ -311,6 +313,19 @@ select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;
 .data-form{border-top:1px solid var(--line-soft);padding-top:12px;margin-top:12px}
 .data-form:first-of-type{border-top:0;padding-top:0;margin-top:0}
 .legend{display:flex;gap:var(--s4);flex-wrap:wrap;font-size:12px;color:var(--text-3)}
+
+.live-banner{
+  display:flex;align-items:center;gap:var(--s3);padding:14px 16px;border-radius:12px;
+  border:1px solid var(--line);background:var(--panel);margin-bottom:var(--s3)
+}
+.live-banner strong{font-size:14.5px}
+.live-banner .spacer{margin-left:auto}
+.live-banner--live-on{border-color:rgba(255,138,138,.55);background:linear-gradient(120deg,rgba(255,138,138,.18),rgba(17,24,35,.92))}
+.live-banner--live-armed{border-color:rgba(255,206,120,.45);background:linear-gradient(120deg,rgba(255,206,120,.12),rgba(17,24,35,.92))}
+.live-banner--live-off{border-color:rgba(126,227,167,.35);background:linear-gradient(120deg,rgba(126,227,167,.10),rgba(17,24,35,.92))}
+.field--check{flex-direction:row;align-items:center;gap:8px}
+.field--check input{width:16px;height:16px;accent-color:var(--accent-2)}
+.list{margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px}
 
 /* ---------- responsive ---------- */
 @media (max-width:1120px){
@@ -2476,6 +2491,315 @@ def render_provider_setup(ctx: PageContext) -> str:
     body = head + last_card + fact_card + file_card + form + blockers_card + example
     return render_shell(ctx, body)
 
+# --------------------------------------------------------------------------
+# live execution
+# --------------------------------------------------------------------------
+
+
+def _live_view(ctx: PageContext) -> Mapping[str, Any]:
+    return dict((ctx.extra or {}).get("live") or {})
+
+
+def live_status_banner(ctx: PageContext) -> str:
+    """The one line that must never be ambiguous: will the next signal send an order?"""
+
+    view = _live_view(ctx)
+    sentence = str(
+        ((ctx.extra or {}).get("live_summary") or {}).get("sentence", "")
+    )
+    sending = bool(view.get("next_signal_sends_real_order"))
+    armed = bool(view.get("armed"))
+    if sending:
+        tone, title, klass = "danger", "The next strategy signal WILL send a real order", "live-on"
+    elif armed:
+        tone, title, klass = "warn", "Armed, but no session is running", "live-armed"
+    else:
+        tone, title, klass = "ok", "No real order can be sent right now", "live-off"
+    return (
+        f"<div class='live-banner live-banner--{klass}' role='status'>"
+        f"<div><strong>{escape(title)}</strong>"
+        f"<p class='small muted' style='margin:4px 0 0'>{escape(sentence)}</p></div>"
+        f"<div class='spacer'></div>{chip(tone, tone, dot=True)}</div>"
+    )
+
+
+def _live_blockers(view: Mapping[str, Any]) -> str:
+    blockers = [dict(item) for item in view.get("blockers") or []]
+    if not blockers:
+        return notice("ok", "Every arming precondition holds", "Nothing stands between this plan and a real order.")
+    body = "<ul class='list'>" + "".join(
+        "<li><strong class='mono'>{}</strong> {}".format(
+            escape(str(item.get("reason", ""))), escape(str(item.get("message", "")))
+        )
+        + (
+            "<div class='small muted'>{}</div>".format(escape(str(item.get("hint", ""))))
+            if item.get("hint")
+            else ""
+        )
+        + "</li>"
+        for item in blockers
+    ) + "</ul>"
+    return card(
+        f"{len(blockers)} reason(s) no order can be sent",
+        body,
+        hint="Every one of these is checked again for each order, not just here.",
+    )
+
+
+def _live_plan_card(view: Mapping[str, Any]) -> str:
+    plan = dict(view.get("plan") or {})
+    if not plan.get("present"):
+        return card(
+            "No live plan on disk",
+            empty_state(
+                "Nothing is armed",
+                "A live plan is written only when you arm one on this page. "
+                "Until then no strategy, symbol, size, or limit is chosen for you.",
+            ),
+            hint="The file is live_plan.local.json in the project root, ignored by Git.",
+        )
+    validated = bool(plan.get("validated"))
+    return card(
+        "The plan on disk",
+        dl(
+            [
+                ("Strategy", f"<span class='mono'>{escape(str(plan.get('candidate_id', '')))}</span>"),
+                ("Evidence", chip("measured", "ok") if validated else chip("UNVALIDATED", "warn", dot=True)),
+                ("Symbol", escape(str(plan.get("pair", ""))) + (
+                    f" <span class='small muted'>({escape(str(plan.get('broker_symbol', '')))})</span>"
+                    if plan.get("broker_symbol") else ""
+                )),
+                ("Order size", f"<span class='mono'>{escape(str(plan.get('quantity', '')))}</span> lots"),
+                ("Max open positions", escape(str(plan.get("max_open_positions", "")))),
+                (
+                    "Daily loss limit",
+                    f"<span class='mono'>{escape(str(plan.get('max_daily_loss_account', '')))}</span> "
+                    f"{escape(str(plan.get('account_currency', '')))}",
+                ),
+                ("Written", escape(str(plan.get("created_at", "")))),
+            ]
+        )
+        + f"<p class='small muted'>{escape(str(plan.get('evidence_note', '')))}</p>",
+        hint="This file records intent only. Arming is a separate, in-process decision.",
+    )
+
+
+def _live_review_card(view: Mapping[str, Any]) -> str:
+    review = dict(view.get("review") or {})
+    if not review:
+        return ""
+    problems = [dict(item) for item in review.get("problems") or []]
+    facts = review.get("symbol") or {}
+    account = review.get("account") or {}
+    rows = [
+        ("Would trade", escape(str(review.get("values", {}).get("pair", "")) or "—")
+         + (f" <span class='small muted'>({escape(str(facts.get('broker_symbol', '') ))})</span>"
+            if facts.get("broker_symbol") else "")),
+        ("Order size", escape(str(review.get("values", {}).get("quantity", "")) or "—") + " lots"),
+        ("Broker volume rules",
+         "min {} / step {} / max {}".format(
+             escape(str(facts.get("broker_volume_min", facts.get("min_quantity", "—")))),
+             escape(str(facts.get("broker_volume_step", facts.get("quantity_step", "—")))),
+             escape(str(facts.get("broker_volume_max", facts.get("max_quantity", "—")))),
+         )),
+        ("Max open positions", escape(str(review.get("values", {}).get("max_open_positions", "")) or "—")),
+        ("Daily loss limit", escape(str(review.get("values", {}).get("max_daily_loss_account", "")) or "—")
+         + " " + escape(str((review.get("plan") or {}).get("account_currency", "")))),
+        ("Account", escape(str(account.get("login_masked", "")) or "—")
+         + " · " + escape(str(account.get("account_mode", "")) or "mode unknown")
+         + " · " + escape(str(account.get("server", "")) or "server unknown")),
+        ("Account signature", f"<span class='mono'>{escape(str(account.get('fingerprint', '')) or '—')}</span>"),
+        ("Currency / leverage", escape(str(account.get("currency", "")) or "—")
+         + " · 1:" + escape(str(account.get("leverage", "")) or "—")),
+    ]
+    body = dl(rows)
+    if problems:
+        body += notice(
+            "warn",
+            f"{len(problems)} field(s) still need a value",
+            "; ".join(f"{item.get('path')}: {item.get('message')}" for item in problems[:4]),
+        )
+    what = review.get("what_will_happen") or []
+    if what:
+        body += "<ul class='list'>" + "".join(f"<li>{escape(str(line))}</li>" for line in what) + "</ul>"
+    return card(
+        "Final review — what arming would authorise",
+        body,
+        hint="Read this before arming. It is the same document the order path uses.",
+        right=chip("review", "muted"),
+    )
+
+
+def render_live(ctx: PageContext) -> str:
+    view = _live_view(ctx)
+    configured = bool(view.get("configured"))
+    armed = bool(view.get("armed"))
+    running = bool(view.get("session_running"))
+    nonce = ctx.action_nonce
+    candidates = [dict(item) for item in view.get("candidates") or []]
+    symbols = [str(item) for item in view.get("symbols") or []]
+
+    body = [live_status_banner(ctx)]
+
+    if not configured:
+        body.append(
+            notice(
+                "warn",
+                "No MetaTrader 5 trading adapter is wired in",
+                "This workstation cannot send a real order at all. Start it against your "
+                "terminal with the MT5 settings present to enable the live path.",
+            )
+        )
+        return render_shell(ctx, "".join(body))
+
+    # -- controls ---------------------------------------------------------
+    controls = []
+    if running:
+        controls.append(
+            action_form("live-stop", nonce, "STOP and disarm", tone="danger")
+        )
+    elif armed:
+        controls.append(action_form("live-disarm", nonce, "Disarm", tone="danger"))
+    if armed and not running:
+        controls.append(action_form("live-start", nonce, "Start live session", tone="primary"))
+    if controls:
+        body.append(
+            "<div class='row' style='margin:8px 0 12px'>" + "".join(controls) + "</div>"
+        )
+
+    body.append(_live_plan_card(view))
+    body.append(_live_blockers(view))
+    body.append(_live_review_card(view))
+
+    # -- the plan form ----------------------------------------------------
+    options = ["<option value=''>Choose a strategy…</option>"]
+    for item in candidates:
+        label = str(item.get("candidate_id", ""))
+        state = str(item.get("evidence_state", "UNVALIDATED"))
+        mark = " · measured" if state == "MEASURED" else " · UNVALIDATED"
+        options.append(f"<option value='{escape(label)}'>{escape(label + mark)}</option>")
+    symbol_options = ["<option value=''>Choose a symbol…</option>"] + [
+        f"<option value='{escape(item)}'>{escape(item)}</option>" for item in symbols
+    ]
+    form = (
+        f"<form method='post' action='/actions/live-arm' class='stack'>"
+        f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+        "<label class='field'><span>Strategy</span>"
+        f"<select name='candidate_id' required>{''.join(options)}</select>"
+        "<span class='small muted'>A strategy without measured results is labelled "
+        "UNVALIDATED. AXIOM will not pick one for you.</span></label>"
+        "<label class='field'><span>Symbol</span>"
+        f"<select name='pair' required>{''.join(symbol_options)}</select>"
+        "<span class='small muted'>Only pairs declared in your provider setup are listed.</span></label>"
+        "<label class='field'><span>Order size (lots)</span>"
+        "<input type='text' name='quantity' inputmode='decimal' autocomplete='off' "
+        "placeholder='e.g. 0.10' required>"
+        "<span class='small muted'>Must sit on the broker's own size grid for this symbol.</span></label>"
+        "<label class='field'><span>Maximum open positions</span>"
+        "<input type='text' name='max_open_positions' inputmode='numeric' autocomplete='off' "
+        "placeholder='e.g. 1' required>"
+        "<span class='small muted'>May tighten your provider setup, never widen it.</span></label>"
+        "<label class='field'><span>Daily loss limit (account currency)</span>"
+        "<input type='text' name='max_daily_loss_account' inputmode='decimal' autocomplete='off' "
+        "placeholder='e.g. 100' required>"
+        "<span class='small muted'>Enforced by AXIOM before each order; it is not a broker "
+        "stop-loss.</span></label>"
+        "<label class='field field--check'><input type='checkbox' name='reviewed' value='yes'>"
+        "<span>I read the review above and I am choosing these terms myself.</span></label>"
+        "<label class='field'><span>Type <span class='mono'>"
+        f"{escape(str(view.get('confirmation_phrase', 'ENABLE LIVE TRADING')))}</span> to arm</span>"
+        "<input type='text' name='confirmation' autocomplete='off' spellcheck='false' required></label>"
+        "<div class='row'><button class='btn btn--danger' type='submit'>Arm live orders</button></div>"
+        "</form>"
+    )
+    body.append(
+        card(
+            "Choose the terms, then arm",
+            form,
+            hint="Arming writes the plan and authorises the adapter. It sends nothing and starts nothing.",
+            right=chip("armed" if armed else "not armed", "danger" if armed else "muted", dot=True),
+        )
+    )
+
+    # -- account and broker state ----------------------------------------
+    account = dict(view.get("account") or {})
+    positions = [dict(item) for item in view.get("positions") or []]
+    account_card = card(
+        "The account this would trade",
+        dl(
+            [
+                ("Connected", chip("yes", "ok") if view.get("connected") else chip("no", "warn", dot=True)),
+                ("Mode", escape(str(view.get("mode", "")))),
+                ("Armed", chip("yes", "danger") if armed else chip("no", "muted")),
+                ("Account mode", escape(str(view.get("account_mode", "")) or "unknown")),
+                ("Login", escape(str(account.get("login_masked", "")) or "—")),
+                ("Server", escape(str(account.get("server", "")) or "—")),
+                ("Signature", f"<span class='mono'>{escape(str(account.get('fingerprint', '')) or '—')}</span>"),
+                ("Trading allowed in terminal", chip("yes", "ok") if account.get("trading_allowed") else chip("no", "warn")),
+                ("Orders sent this session", escape(str(view.get("orders_sent", 0)))),
+                ("Broker positions", escape(str(len(positions)))),
+                ("Unresolved orders", escape(str(len(view.get("unresolved") or [])))),
+            ]
+        ),
+        hint="Identifiers are masked. No balance, equity, password, or token is shown or stored.",
+        right=chip("live account" if view.get("live_effective") else "paper", "danger" if view.get("live_effective") else "paper"),
+    )
+    body.append(account_card)
+
+    if positions:
+        body.append(
+            card(
+                "Broker positions",
+                table(
+                    "Open positions at the terminal",
+                    [("Symbol", "mono"), ("Side", ""), ("Volume", "num"), ("Open price", "num")],
+                    [
+                        [
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("side", ""))),
+                            escape(str(item.get("volume", ""))),
+                            escape(str(item.get("price_open", ""))),
+                        ]
+                        for item in positions
+                    ],
+                ),
+                hint="Read from the terminal. The broker is authoritative; AXIOM books its fills.",
+            )
+        )
+
+    last = dict(view.get("last_outcome") or {})
+    refusal = dict(view.get("last_refusal") or {})
+    if last or refusal:
+        rows = []
+        if last:
+            rows.append(
+                [
+                    escape(str(last.get("at", ""))),
+                    escape(str(last.get("reason", ""))),
+                    escape(str(last.get("state", ""))),
+                    escape(str(last.get("retcode_name", ""))),
+                    escape(str(last.get("volume_filled", ""))),
+                    chip("booked", "ok") if last.get("booked") else chip("not booked", "warn"),
+                ]
+            )
+        body.append(
+            card(
+                "The last order path",
+                table(
+                    "Most recent live outcome",
+                    [("At", ""), ("Reason", "mono"), ("State", ""), ("Retcode", ""), ("Filled", "num"), ("Ledger", "")],
+                    rows,
+                )
+                if rows
+                else empty_state("No order attempt yet", "Nothing has been sent in this session."),
+                hint="An unknown outcome stops the session and is never re-sent.",
+            )
+        )
+
+    return render_shell(ctx, "".join(body))
+
+
+
 def render_message(ctx: PageContext, *, tone: str, title: str, message: str, actions: str = "") -> str:
     body = (
         f"<div class='notice notice--{escape(tone)}' role='alert'><div><strong>{escape(title)}</strong>"
@@ -2505,6 +2829,7 @@ PAGES = {
     "activity": render_activity,
     "data": render_data,
     "provider-setup": render_provider_setup,
+    "live": render_live,
     "health": render_health,
 }
 
@@ -2525,6 +2850,7 @@ __all__ = [
     "render_provider_setup",
     "render_connecting",
     "render_health",
+    "render_live",
     "render_message",
     "render_mode",
     "render_overview",

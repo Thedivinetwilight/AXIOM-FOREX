@@ -589,7 +589,7 @@ def test_a_settings_less_launch_cannot_connect_at_all():
 # ---------------------------------------------------------------------------
 
 
-def test_the_post_allowlist_is_exactly_the_setup_and_mode_actions():
+def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
     assert POST_ACTIONS == {
         "connect",
         "disconnect",
@@ -617,6 +617,15 @@ def test_the_post_allowlist_is_exactly_the_setup_and_mode_actions():
         # reads mt5_settings.local.json, never stores a credential, and sends
         # nothing.
         "provider-setup-save",
+        # The live workflow. Arming writes the operator's plan and authorises the
+        # broker adapter (sending nothing); starting begins the strategy loop
+        # that the guard stops on any failed check; stopping ends it and
+        # disarms. None of them connects, picks a strategy, symbol, size, or
+        # limit, or changes the mode.
+        "live-arm",
+        "live-disarm",
+        "live-start",
+        "live-stop",
     }
 
 

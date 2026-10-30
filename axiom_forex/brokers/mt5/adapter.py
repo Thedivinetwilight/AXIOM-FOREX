@@ -180,6 +180,7 @@ class MT5TradingAdapter:
         clock: Callable[[], datetime] | None = None,
         capabilities: MT5BrokerCapabilities | None = None,
         account_profile_check: Callable[[AccountTerms], Sequence[str]] | None = None,
+        terminal_factory: Callable[[], Any] | None = None,
     ):
         self.settings = settings
         self.password_store = password_store
@@ -199,6 +200,13 @@ class MT5TradingAdapter:
         self._armed_fingerprint: str | None = None
         self._account_validated: dict[str, Any] | None = None
         self.account_profile_check = account_profile_check
+        #: When supplied, :meth:`connect` adopts the terminal this callable
+        #: returns **if it is already connected** instead of opening a second
+        #: session to the same terminal process.  One process, one terminal
+        #: connection: a second ``initialize``/``shutdown`` pair would belong to
+        #: the same process-wide session and could tear down the operator's
+        #: observation connection underneath them.
+        self.terminal_factory = terminal_factory
         self._symbol_cache: dict[str, tuple[str, Any]] = {}
         self._last_recovery: tuple[RecoveryResult, ...] = ()
         #: ``(login, server, trade_mode)`` of the account last observed.
@@ -236,6 +244,9 @@ class MT5TradingAdapter:
         if not validation.valid:
             raise MT5SubmitRefused("mt5_settings_invalid", validation.reason)
         self.disarm(reason="connect")
+        adopted = self._adoptable_terminal()
+        if adopted is not None:
+            return self._finish_connect(adopted, adopted.status())
         terminal = MT5Terminal(self.settings, module=self._module(), clock=self.clock)
         try:
             status = terminal.connect()
@@ -252,6 +263,22 @@ class MT5TradingAdapter:
             login_attempt = self.password_store.secret_for_login()
             status = terminal.connect(password=login_attempt)
             del login_attempt
+        return self._finish_connect(terminal, status)
+
+    def _adoptable_terminal(self) -> Any:
+        """The already-connected terminal to share, or ``None``."""
+
+        if self.terminal_factory is None:
+            return None
+        try:
+            candidate = self.terminal_factory()
+        except Exception:
+            return None
+        if candidate is None or not getattr(candidate, "connected", False):
+            return None
+        return candidate
+
+    def _finish_connect(self, terminal: Any, status: Any) -> Any:
         self._terminal = terminal
         self._status = status
         self._terms = account_terms(status)
@@ -1218,6 +1245,7 @@ def make_mt5_adapter(
     audit_log: Any,
     module: Any | None = None,
     lifecycle_lookup: Callable[[str], Any] | None = None,
+    terminal_factory: Callable[[], Any] | None = None,
 ) -> MT5TradingAdapter:
     """Constructor used by the facade and tests.  Sends nothing."""
 
@@ -1232,6 +1260,7 @@ def make_mt5_adapter(
         audit_log=audit_log,
         module=module,
         lifecycle_lookup=lifecycle_lookup,
+        terminal_factory=terminal_factory,
     )
 
 
