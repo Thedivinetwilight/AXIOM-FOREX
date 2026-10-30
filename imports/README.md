@@ -22,3 +22,12 @@ format, validation rules, quotas, and manifest fields.
   [Multi-pair research evaluation](../docs/RESEARCH_EVALUATION.md); the
   evaluation consumes only imported datasets, never this directory's sample
   fixture as production data.
+- A broker tick export is converted into this format with
+  `python -m axiom_forex.cli convert-ticks --ticks-path ... --ticks-pair ... --ticks-server-offset-minutes ...`
+  (or `--ticks-server-timezone`), which writes the canonical CSV and a provenance sidecar next to
+  it. Only the broker's two-sided ticks become bars: a candle export is refused, empty windows are
+  reported as gaps and never filled, and the final partial window is dropped and named. See
+  [Converting a tick export](../docs/HISTORICAL_DATA_IMPORT.md#converting-a-tick-export-the-only-supported-mt5-route).
+- To see what this directory currently holds, and whether it is a format example
+  or real history, run `python -m axiom_forex.cli data-audit --evaluate-markdown`.
+  The audit only reads; it never downloads, guesses, or repairs a file.

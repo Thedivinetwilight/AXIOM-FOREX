@@ -164,6 +164,18 @@ class MT5ObservationSource:
             ) from exc
         self._terminal = terminal
 
+    @property
+    def terminal(self) -> MT5Terminal | None:
+        """The connected terminal, for data-only reads (catalogue, ticks).
+
+        The object returned has no order surface: ``quote``, ``tick``,
+        ``symbol_names``, and ``symbol_info``.  Nothing here can send an order.
+        """
+
+        if self._terminal is None or not self._terminal.connected:
+            return None
+        return self._terminal
+
     def market_data(self, freshness: Any) -> Any:
         """The terminal's quote surface, wrapped for paper execution.
 

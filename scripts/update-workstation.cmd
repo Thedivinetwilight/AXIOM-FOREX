@@ -7,6 +7,7 @@ rem
 rem      git fetch origin <branch>
 rem      git merge --ff-only origin/<branch>      (fast-forward only)
 rem      .venv\Scripts\python.exe -m pip install -e . --no-deps
+rem      .venv\Scripts\python.exe -c "import ..." (post-update import check)
 rem
 rem  What it will never do:
 rem    * delete, move, rename, reset, clean, stash, checkout or reclone
@@ -102,15 +103,35 @@ echo   Refreshing the project in .venv ...
 "%VENV_PY%" -m pip install -e . --no-deps --disable-pip-version-check
 if errorlevel 1 goto :pip_failed
 
+rem -- 7. Post-update check: the updated packages must import ---------
+echo   Checking that the updated code imports ...
+"%VENV_PY%" -c "import axiom_forex, axiom_forex.workstation.app, axiom_forex.workstation.dataflow, axiom_forex.paper_runner.runner, axiom_forex.paper_runner.live, axiom_forex.ingest.mt5_ticks" >nul 2>nul
+if errorlevel 1 goto :verify_failed
+
+rem -- 8. MetaTrader 5 package: report it, never install it ------------
+rem    That package is installed by YOU and only when you want the live
+rem    path. This script never installs anything outside .venv.
+set "MT5_NOTE=not installed (paper and research only until you install it)"
+"%VENV_PY%" -c "import MetaTrader5" >nul 2>nul
+if not errorlevel 1 set "MT5_NOTE=installed"
+
 echo.
 echo   Done.
 echo     branch  %EXPECTED_BRANCH%
 echo     commit  %AFTER%
+echo     python  %VENV_PY%
+echo     MetaTrader5 package: %MT5_NOTE%
 echo.
-echo   mt5_settings.local.json, .venv, and your other files were left as they
-echo   were. Start the workstation with:
+echo   mt5_settings.local.json, .venv, paper_runner.local.sqlite3, imports\,
+echo   and your other files were left exactly as they were.
+echo.
+echo   Start the workstation with:
 echo.
 echo       scripts\start-workstation.cmd
+echo.
+echo   Broker ticks are read from imports\ on the Data ^& evaluation page:
+echo   drop the MT5 tick export there, press Re-scan, declare the server's
+echo   time basis, convert it, then evaluate. Nothing is downloaded for you.
 echo.
 pause
 exit /b 0
@@ -254,6 +275,19 @@ echo.
 echo   Your settings and files are untouched. You can retry with:
 echo.
 echo       .venv\Scripts\python.exe -m pip install -e .
+echo.
+pause
+exit /b 1
+
+:verify_failed
+echo.
+echo   The code update succeeded ^(now at %AFTER%^) and the packages were
+echo   refreshed, but the updated code did NOT import cleanly.
+echo.
+echo   This script changes nothing else and rolls nothing back. Your settings
+echo   and data files are untouched. Please report the output of:
+echo.
+echo       .venv\Scripts\python.exe -c "import axiom_forex.workstation.app"
 echo.
 pause
 exit /b 1

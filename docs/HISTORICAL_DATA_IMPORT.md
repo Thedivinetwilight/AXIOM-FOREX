@@ -201,6 +201,99 @@ While imported data is adopted:
 - backtests and reports run normally and carry the imported dataset id, hashes,
   and provenance.
 
+## Exporting from MetaTrader 5
+
+Nothing in this repository downloads history. If you have a licensed export from
+your own MetaTrader 5 terminal, you convert it to the canonical CSV yourself (or
+with a reviewed script of your own) and import it offline. Three practical points:
+
+1. **Bar exports from MT5 are not bid/ask bars.** `copy_rates_from` /
+   `copy_rates_range`, and the terminal's "Save as CSV" for a chart, return one
+   OHLC series plus tick volume and a spread column. There is no separate bid and
+   ask OHLC. Because this format requires *executable* two-sided prices and the
+   evaluation fills at the ask for a buy and the bid for a sell, a single-series
+   export cannot be silently split into bid/ask: any such split invents the
+   spread. Use a **tick export** (`copy_ticks_range`: `time`, `bid`, `ask`,
+   `last`, `volume`, `flags`) and aggregate it into complete 1-minute bars
+   yourself, recording `quote_count`, `last_quote_at`, and `complete=true` only
+   for windows that actually received ticks.
+2. **Timestamps.** MT5 times are the terminal's server time, not UTC. Record the
+   server timezone offset you used and convert to UTC; put the UTC instant in
+   `timestamp` and `UTC` in `timezone`. A naive or mislabelled conversion is the
+   most common way a "profitable" backtest is born, and the importer rejects
+   ambiguous or nonexistent local times rather than guessing.
+3. **Declarations are yours.** The pair, timeframe, data class, source label,
+   source version, and validity bounds are command arguments at import time. A
+   local path is never treated as provenance. Source labels must be plain
+   identifiers (`MY_BROKER_EXPORT`), not paths or URLs.
+
+What the importer will not accept, and why:
+
+| Rejected | Reason |
+| --- | --- |
+| A single mid-price series | no executable side; a spread would have to be invented |
+| Bars with `complete=false` or a missing `quote_count` | a partial window is not a bar |
+| Naive timestamps, DST-ambiguous local times, mismatched offsets | the instant is unknown |
+| Crossed quotes (bid > ask) | not a tradeable market |
+| Rows with unknown columns or record types | the format is exact, and guessing hides errors |
+
+The result is a dataset with a manifest, hashes, quality events, and a data class.
+`USER_SUPPLIED_DEMO` and `SYNTHETIC_FIXTURE` data can be studied but can never
+select a strategy for paper running; only `USER_SUPPLIED_HISTORICAL` and
+`USER_SUPPLIED_PRODUCTION` can. See [PAPER_RUNNER.md](PAPER_RUNNER.md).
+
+## Converting a tick export (the only supported MT5 route)
+
+`python -m axiom_forex.ingest.mt5_ticks`'s command wrapper does the conversion:
+
+```bash
+python -m axiom_forex.cli convert-ticks \
+  --ticks-path C:/exports/EURUSD_2026-03-10.csv \
+  --ticks-pair EUR/USD \
+  --ticks-server-offset-minutes 120 \
+  --ticks-interval-seconds 60
+```
+
+It writes `<name>_canonical.csv` (the canonical format above) next to the export,
+plus `<name>_canonical.csv.provenance.json`. Pass `--ticks-server-timezone
+Europe/Athens` instead of a fixed offset when the server follows a DST zone: the
+offset form is a constant, and the zone form is refused for a wall time that is
+ambiguous or nonexistent.
+
+What it does, and what it refuses:
+
+| Step | Rule |
+| --- | --- |
+| Header | MetaTrader's bracketed tabs (`<DATE> <TIME> <BID> <ASK> <LAST> <VOLUME> <FLAGS>`) or the same names comma-separated; a file without bid *and* ask is not a tick export and is refused |
+| Time | Every row is server time. The offset (or an IANA zone) is a required argument; a wall time that is ambiguous or nonexistent under the declared zone is refused, never resolved by a guess |
+| Prices | Non-positive or crossed quotes are rejected and counted; a duplicate timestamp with a different price is a conflict, not an overwrite |
+| Order | Rows must already be sorted; an unsorted export is refused so nothing reorders your data behind your back |
+| Bars | Bid OHLC from bid ticks, ask OHLC from ask ticks, `quote_count`, `last_quote_at`, and `complete=true` only for windows the export actually filled |
+| Gaps | A window with no ticks is reported and **not** emitted. Coverage lists every empty window and the largest jump between two non-empty windows, in seconds |
+| Truncation | The final window is dropped when the file ends inside it, and is reported as `trailing_partial_window` |
+| Provenance | The sidecar records the source file name, its SHA-256, byte count, tick count, duplicates, rejected rows, coverage, the declared time basis, and `derivation: DERIVED_FROM_BROKER_TICKS`; nothing in it is a price the broker did not export |
+
+Then import the result with the declarations you choose:
+
+```bash
+python -m axiom_forex.cli paper-evaluate \
+  --import-path C:/exports/EURUSD_2026-03-10_canonical.csv \
+  --import-pair EUR/USD --import-timeframe 1m \
+  --import-data-class USER_SUPPLIED_HISTORICAL \
+  --import-source YOUR_BROKER_TICK_EXPORT --import-source-version v1 \
+  --import-valid-from 2026-03-10T00:00:00Z --import-valid-until 2026-03-11T00:00:00Z
+```
+
+A gap is not silently repaired at import time either: the importer raises
+`MISSING_BAR`, marks the dataset `QUARANTINED`, and the evaluation refuses it. Fix
+the export (or accept a shorter window), do not fill the hole.
+
+To see what you actually have before importing anything:
+
+```bash
+python -m axiom_forex.cli data-audit --evaluate-markdown
+```
+
 ## Provider-specific gaps
 
 The importer does not assume any vendor. Still required once a provider is
@@ -223,3 +316,19 @@ selected:
 
 Until those are supplied, imports remain offline research artifacts and no
 imported data can reach the local paper execution path.
+
+## Doing this in the workstation instead of the CLI
+
+`scripts\start-workstation.cmd` (or `python -m axiom_forex.workstation.launch`) serves the same
+workflow at `/data`:
+
+| Step | CLI equivalent | What the page will not do |
+| --- | --- | --- |
+| List the folder | `data-audit` | download, recurse into sub-folders, or accept a path from a form |
+| Convert a tick export | `convert-ticks` | guess the pair, the interval, or the server's time basis |
+| Evaluate a canonical file | `paper-evaluate` | pick a data class for you, or re-run a spent locked test |
+
+The page reports the same coverage, the same rejected rows, and the same evidence the CLI records,
+because it calls the same functions rather than shelling out. A conversion writes the canonical CSV
+and its `.provenance.json` sidecar into the folder it read from; nothing else is created.
+

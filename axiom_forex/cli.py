@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Sequence
@@ -287,6 +288,349 @@ def _run_mt5_session(args: argparse.Namespace) -> int:
         repository.close()
 
 
+def _run_live_run(args: argparse.Namespace) -> int:
+    """Run the approved strategy against the live MT5 path, for real.
+
+    This is the operator's live entry point, and it is deliberately explicit: the
+    settings document, the provider setup, the pair, the candidate, and the exact
+    arming phrase must all be given.  Without the phrase nothing is armed; without
+    an armed adapter the runner refuses.  The process never arms itself and never
+    changes the execution mode as a side effect.
+    """
+
+    from axiom_forex.brokers.mt5.catalogue import SymbolRequest, build_catalogue
+    from axiom_forex.config.provider_setup import load_provider_setup
+    from axiom_forex.paper_runner.live_run import (
+        LiveRunConfig,
+        LiveRunRefused,
+        run_live_session,
+    )
+
+    for flag, value in (
+        ("--mt5-settings-path", args.mt5_settings_path),
+        ("--provider-setup", args.provider_setup),
+        ("--paper-runner-pair", args.paper_runner_pair),
+        ("--paper-runner-candidate", args.paper_runner_candidate),
+        ("--confirm", args.confirm),
+    ):
+        if not value:
+            print(f"live-run: {flag} is required", file=sys.stderr)
+            return 2
+
+    try:
+        settings = load_settings_file(args.mt5_settings_path)
+    except MT5SettingsFileError as exc:
+        return _mt5_refusal({"reason": exc.reason, "detail": exc.detail}, 2)
+    if settings is None:
+        return _mt5_refusal({"reason": "mt5_settings_file_missing"}, 2)
+    try:
+        module = import_mt5()
+    except MT5ModuleUnavailable as exc:
+        return _mt5_refusal(
+            {
+                "reason": exc.reason,
+                "detail": exc.detail,
+                "next": (
+                    "Live execution needs the official MetaTrader5 package on the "
+                    "Windows machine that runs the logged-in terminal.  Nothing was "
+                    "connected, armed, or sent."
+                ),
+            },
+            3,
+        )
+
+    from .database.audit import DurableAuditLog
+    from .database.repository import ForexRepository
+
+    repository = ForexRepository(args.database_path)
+    audit_log = DurableAuditLog(repository=repository)
+    adapter = None
+    try:
+        setup = load_provider_setup(args.provider_setup)
+        try:
+            adapter = make_mt5_adapter(
+                settings=settings,
+                password_store=make_password_store(settings, audit_log=audit_log),
+                repository=repository,
+                audit_log=audit_log,
+                module=module,
+                lifecycle_lookup=None,
+            )
+            adapter.connect()
+            adapter.arm_trading(
+                account_login=settings.account_login,
+                server=settings.server,
+                confirm=args.confirm,
+            )
+        except Exception as exc:
+            return _mt5_refusal(
+                {
+                    "reason": getattr(exc, "reason", type(exc).__name__),
+                    "detail": getattr(exc, "detail", ""),
+                    "note": "Nothing was sent. Arming is refused unless the phrase "
+                    "matches the selected account exactly.",
+                },
+                3,
+            )
+
+        terminal = adapter.terminal
+        symbol_inputs = []
+        for terms in setup.symbols:
+            symbol_inputs.append(
+                SymbolRequest(
+                    pair=terms.pair,
+                    pip_size=terms.pip_size,
+                    calendar_id=terms.calendar_id,
+                    calendar_version=terms.calendar_version,
+                    correlation_group=terms.correlation_group,
+                    margin_multiplier=terms.margin_multiplier,
+                    spec_version=terms.spec_version,
+                    broker_symbol=terms.broker_symbol,
+                    suffix=terms.suffix,
+                    source=terms.source,
+                )
+            )
+        catalogue = build_catalogue(terminal, symbol_inputs)
+        resolved = catalogue.resolved_for(args.paper_runner_pair)
+        if resolved is None:
+            refusal = catalogue.refusal_for(args.paper_runner_pair)
+            return _mt5_refusal(
+                {
+                    "reason": getattr(refusal, "reason", "symbol_unresolved"),
+                    "detail": getattr(refusal, "detail", ""),
+                    "catalogue": catalogue.audit_view(),
+                    "note": "The symbol is never guessed. Fix the setup's symbol "
+                    "terms (or the terminal's Market Watch) and try again.",
+                },
+                3,
+            )
+        try:
+            report = run_live_session(
+                adapter=adapter,
+                terminal=terminal,
+                setup=setup,
+                config=LiveRunConfig(
+                    pair=args.paper_runner_pair,
+                    candidate_id=args.paper_runner_candidate,
+                    quantity=Decimal(str(args.paper_runner_quantity or setup.execution.quantity)),
+                    max_cycles=max(int(args.paper_runner_max_cycles), 1),
+                    interval_seconds=max(int(args.paper_runner_interval), 1),
+                ),
+                repository=repository,
+                resolved=resolved,
+                catalogue=catalogue,
+                audit_log=audit_log,
+                lifecycle=None,
+            )
+        except LiveRunRefused as exc:
+            return _mt5_refusal({"reason": exc.reason, "detail": exc.detail}, 3)
+        payload = {
+            "status": "COMPLETED",
+            "live_run": report,
+            "note": (
+                "Live orders were possible in this run. Nothing is retried: an unknown "
+                "outcome stays unresolved until reconciliation. Account identifiers, "
+                "balances, equity, and credentials are not reported."
+            ),
+        }
+        print(json.dumps(sanitize_audit_value(payload), indent=2, default=str))
+        return 0
+    finally:
+        if adapter is not None:
+            try:
+                adapter.disarm(reason="live_run_finished")
+            except Exception:
+                pass
+            try:
+                adapter.disconnect(reason="live_run_finished")
+            except Exception:
+                pass
+        repository.close()
+
+
+def _run_convert_ticks(args: argparse.Namespace) -> int:
+    """Convert a broker tick export into the canonical CSV, with provenance."""
+
+    from axiom_forex.ingest.mt5_ticks import TickExportRefused, convert
+
+    if not args.ticks_path:
+        print("convert-ticks: --ticks-path is required", file=sys.stderr)
+        return 2
+    if not args.ticks_pair:
+        print("convert-ticks: --ticks-pair is required", file=sys.stderr)
+        return 2
+    try:
+        report = convert(
+            source=args.ticks_path,
+            pair=args.ticks_pair,
+            output=args.ticks_output,
+            server_offset_minutes=args.ticks_server_offset_minutes,
+            server_timezone=args.ticks_server_timezone,
+            interval_seconds=max(int(args.ticks_interval_seconds), 1),
+        )
+    except TickExportRefused as exc:
+        print(
+            json.dumps(
+                {"converted": False, "reason": exc.reason, "detail": exc.detail},
+                indent=2,
+            )
+        )
+        return 3
+    print(json.dumps({"converted": True, **report}, default=str, indent=2, sort_keys=True))
+    # A gap is not an error, but it is never silent: importing a partial export is
+    # the operator's decision, and the coverage block above is how they see it.
+    return 0
+
+
+def _run_data_audit(args: argparse.Namespace) -> int:
+    """Report what history exists here, without downloading or inventing any."""
+
+    from .paper_runner import data_audit
+
+    repository = None
+    platform = None
+    try:
+        platform = build_fixture_platform(database_path=args.database_path)
+        repository = platform.repository
+        report = data_audit.audit(repository=repository, directory=args.import_dir)
+    finally:
+        if platform is not None:
+            platform.close()
+    if args.evaluate_markdown:
+        print(data_audit.markdown(report), end="")
+    else:
+        print(json.dumps(sanitize_audit_value(report), sort_keys=True, indent=2))
+    return 0
+
+
+def _run_paper_evaluate(platform: Any, args: argparse.Namespace) -> int:
+    """Evaluate the candidate grid on one imported dataset, once.
+
+    The locked test window is spent here and recorded, so the same dataset cannot
+    be re-evaluated later with a better-looking answer.  The output is evidence
+    about a historical sample, not a profitability claim.
+    """
+
+    from .paper_runner import evaluation
+    from .paper_runner.strategy import candidate_family, status_of
+
+    if not args.import_path:
+        raise SystemExit("--import-path is required for paper-evaluate")
+    if not args.import_data_class:
+        raise SystemExit("--import-data-class is required for paper-evaluate")
+    request = ImportRequest(
+        pair=args.import_pair or platform.pair,
+        timeframe=args.import_timeframe or platform.manifest.timeframe,
+        data_class=args.import_data_class,
+        source=args.import_source or "",
+        source_version=args.import_source_version or "",
+        valid_from=_instant(args.import_valid_from),
+        valid_until=_instant(args.import_valid_until),
+        documented_at=args.import_documented_at,
+    )
+    imported = platform.import_dataset(request, path=args.import_path)
+    if not imported.passed or imported.dataset is None:
+        print(
+            json.dumps(
+                {
+                    "imported": False,
+                    "reason": "import_failed",
+                    "note": "Nothing was evaluated: the import did not pass.",
+                },
+                indent=2,
+            )
+        )
+        return 2
+    dataset = imported.dataset
+    dataset_id = dataset.import_manifest.import_id
+    if evaluation.locked_test_consumed(repository=platform.repository, dataset_id=dataset_id):
+        print(
+            json.dumps(
+                {
+                    "evaluated": False,
+                    "reason": "locked_test_already_consumed",
+                    "dataset_id": dataset_id,
+                    "note": (
+                        "This dataset's locked test window has already been spent. "
+                        "Re-running it would turn the test set into a tuning set."
+                    ),
+                },
+                indent=2,
+            )
+        )
+        return 3
+    if not dataset.usable:
+        print(
+            json.dumps(
+                {
+                    "evaluated": False,
+                    "reason": "dataset_quality_not_usable",
+                    "dataset_id": dataset_id,
+                    "quality": dataset.quality.audit_view(),
+                },
+                default=str,
+                indent=2,
+            )
+        )
+        return 4
+    results = []
+    test_window_spent = False
+    for item in candidate_family():
+        outcome = evaluation.evaluate_candidate(
+            engine_factory=platform.new_engine,
+            candidate=item,
+            bars=dataset.bars,
+            data_class=dataset.data_class,
+            dataset_id=dataset_id,
+        )
+        evaluation.record_evaluation(
+            repository=platform.repository, payload=outcome.payload
+        )
+        test_window_spent = test_window_spent or bool(
+            outcome.payload.get("locked_test_consumed")
+        )
+        results.append(
+            {
+                "candidate_id": item.candidate_id,
+                "status": status_of(item.candidate_id, outcome.payload),
+                "passed": outcome.payload["passed"],
+                "failed_criteria": outcome.payload["failed_criteria"],
+                "locked_test": outcome.payload["metrics"].get("locked_test", {}),
+                "walk_forward": outcome.payload.get("walk_forward_summary", {}),
+                "baselines": outcome.payload.get("baselines", {}),
+            }
+        )
+    if test_window_spent:
+        # The window is only spent when a run actually walked into it: a sample
+        # too short to have a test window leaves the dataset still usable once.
+        evaluation.claim_locked_test(
+            repository=platform.repository,
+            dataset_id=dataset_id,
+            at=datetime.now(timezone.utc).isoformat(),
+        )
+    print(
+        json.dumps(
+            {
+                "dataset_id": dataset_id,
+                "data_class": dataset.data_class,
+                "locked_test_spent": test_window_spent,
+                "bars": len(dataset.bars),
+                "criteria": evaluation.DEFAULT_CRITERIA.audit_view(),
+                "assumptions": list(evaluation.ASSUMPTIONS),
+                "results": results,
+                "note": (
+                    "Historical evidence only. No result here is a promise of future "
+                    "returns, and nothing was sent to a broker."
+                ),
+            },
+            default=str,
+            sort_keys=True,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="axiom-forex",
@@ -307,6 +651,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "evaluate",
             "mt5",
             "mt5-session",
+            "data-audit",
+            "paper-evaluate",
+            "convert-ticks",
+            "live-run",
         ),
     )
     parser.add_argument("--database-path", default=":memory:")
@@ -328,6 +676,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--import-pairs",
         default=None,
         help="comma-separated pairs aligned with --import-paths",
+    )
+    parser.add_argument(
+        "--import-dir",
+        default="imports",
+        help="directory the data audit reads (never written to)",
     )
     parser.add_argument(
         "--mt5-settings-path",
@@ -362,6 +715,77 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--mt5-strategy-id", default=None)
     parser.add_argument("--evaluate-markdown", action="store_true")
     parser.add_argument(
+        "--ticks-path",
+        default=None,
+        help="MetaTrader 5 tick export to convert into the canonical quote-bar CSV",
+    )
+    parser.add_argument(
+        "--ticks-output",
+        default=None,
+        help="where to write the canonical CSV (default: next to the export)",
+    )
+    parser.add_argument("--ticks-pair", default=None, help="canonical pair of the export")
+    parser.add_argument(
+        "--ticks-server-offset-minutes",
+        type=int,
+        default=None,
+        help=(
+            "the broker server clock's offset from UTC in minutes, exactly as you "
+            "read it in the terminal; there is no default"
+        ),
+    )
+    parser.add_argument(
+        "--ticks-server-timezone",
+        default="",
+        help="IANA zone instead of a fixed offset (ambiguous local times are refused)",
+    )
+    parser.add_argument(
+        "--ticks-interval-seconds",
+        type=int,
+        default=60,
+        help="bar interval to aggregate the ticks into",
+    )
+    parser.add_argument(
+        "--provider-setup",
+        default=None,
+        help="the operator's provider setup document (axiom-provider-setup-v1)",
+    )
+    parser.add_argument(
+        "--paper-runner-pair",
+        default=None,
+        help="the catalogue pair a live run may trade (required, never defaulted)",
+    )
+    parser.add_argument(
+        "--paper-runner-candidate",
+        default=None,
+        help="the approved candidate id to run (required, never defaulted)",
+    )
+    parser.add_argument(
+        "--paper-runner-quantity",
+        default=None,
+        help="size per order in the setup's lots (defaults to the setup's own quantity)",
+    )
+    parser.add_argument(
+        "--paper-runner-max-cycles",
+        type=int,
+        default=1,
+        help="how many runner cycles a live run may take before it stops",
+    )
+    parser.add_argument(
+        "--paper-runner-interval",
+        type=int,
+        default=60,
+        help="bar interval in seconds for the live feed",
+    )
+    parser.add_argument(
+        "--confirm",
+        default=None,
+        help=(
+            'the exact arming phrase, e.g. "ENABLE LIVE TRADING 55500123"; a live run '
+            "refuses to arm without it"
+        ),
+    )
+    parser.add_argument(
         "--stress-scenarios",
         default=None,
         help="JSON document of explicitly configured stress scenarios",
@@ -372,6 +796,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="research size per pair (defaults to each spec's minimum quantity)",
     )
     args = parser.parse_args(argv)
+    if args.command == "data-audit":
+        return _run_data_audit(args)
+    if args.command == "convert-ticks":
+        return _run_convert_ticks(args)
+    if args.command == "live-run":
+        return _run_live_run(args)
     if args.command == "mt5":
         return _run_mt5(args)
     if args.command == "mt5-session":
@@ -429,6 +859,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "execution_eligible": False,
                     "note": "Historical simulation is not a profitability claim.",
                 }
+        elif args.command == "paper-evaluate":
+            return _run_paper_evaluate(platform, args)
         elif args.command == "evaluate":
             payload = _run_evaluation(platform, args)
             if args.evaluate_markdown:

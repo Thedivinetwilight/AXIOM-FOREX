@@ -235,9 +235,22 @@ def test_it_refreshes_the_existing_venv_without_recreating_it():
     lines = executed_lines()
     venv_calls = [line for line in lines if "%VENV_PY%" in line]
     assert venv_calls, "the updater should refresh .venv"
-    for line in venv_calls:
+    pip_calls = [line for line in venv_calls if " -m pip " in line]
+    check_calls = [line for line in venv_calls if ' -c "import ' in line]
+    # Exactly one install, and everything else that runs Python is a read-only
+    # import check: the updater never runs the application, a terminal, or a test.
+    assert len(pip_calls) == 1, pip_calls
+    for line in pip_calls:
         assert "-m pip install -e ." in line, line
         assert "--no-deps" in line, line
+    assert check_calls, "the updater should verify the updated code imports"
+    for line in check_calls:
+        assert line.rstrip().endswith(">nul 2>nul"), line
+        # Either the post-update import proof, or a presence check for the
+        # optional MetaTrader5 package. Neither installs it.
+        assert "workstation" in line or "import MetaTrader5" in line, line
+    for line in venv_calls:
+        assert " -m pip install -e ." in line or ' -c "import ' in line, line
     # The interpreter is the one already in .venv; it is never created or removed.
     assert 'VENV_PY=%CD%\\.venv\\Scripts\\python.exe' in text
     executed = "\n".join(line.lower() for line in lines)

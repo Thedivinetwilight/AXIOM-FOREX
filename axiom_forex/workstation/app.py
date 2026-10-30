@@ -9,6 +9,11 @@ The surface is deliberately tiny:
     Session and setup actions. Each requires the per-process nonce embedded in
     the page that offered the button, so an unrelated page cannot drive a
     connection.
+``POST /actions/{imports-refresh,ticks-convert,dataset-evaluate}``
+    The data workflow: re-scan the import folder, convert one broker tick export
+    into the canonical CSV, or evaluate the candidate grid on one canonical file.
+    They read and write *local files and the research database only*: they never
+    connect anywhere, never place an order, and never change the execution mode.
 ``POST /actions/{mode-paper,mode-live}``
     The execution-mode switch, and the whole of it. ``mode-paper`` is immediate
     and unconditional. ``mode-live`` recomputes the preflight, refuses while any
@@ -37,6 +42,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlparse
 
+from app.audit.log import sanitize_audit_value
+
 from .context import PaperSnapshot, PageContext, build_context, read_paper_snapshot
 from .mode import (
     REASON_SESSION_ENDED,
@@ -55,6 +62,7 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/setup": ("setup", "Setup"),
     "/account": ("account", "Account & symbols"),
     "/positions": ("positions", "Positions"),
+    "/data": ("data", "Data & evaluation"),
     "/activity": ("activity", "Activity"),
     "/health": ("health", "System health"),
     "/mode": ("mode", "Trading mode"),
@@ -70,7 +78,13 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
 #:     symbol set were reviewed;
 #:   * ``symbols``                -- which symbols to observe;
 #:   * ``mode-paper`` / ``mode-live`` -- the execution mode: simulate fills
-#:     locally, or route an approved order to the live execution path.
+#:     locally, or route an approved order to the live execution path;
+#:   * ``runner-start`` / ``runner-stop`` -- the paper strategy runner's own
+#:     loop.  They start and stop *simulated* cycles; they cannot place an
+#:     order, cannot arm anything, and refuse to run outside paper mode.
+#:   * ``imports-refresh`` / ``ticks-convert`` / ``dataset-evaluate`` -- the
+#:     data workflow.  They touch local files and the research database, and
+#:     nothing else: no connection, no order, no arming, no mode change.
 #:
 #: Anything that could trade, arm, switch accounts, or change broker settings is
 #: absent by construction, not by a permission check: there is no handler for it,
@@ -87,6 +101,11 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "symbols",
         "mode-paper",
         "mode-live",
+        "runner-start",
+        "runner-stop",
+        "imports-refresh",
+        "ticks-convert",
+        "dataset-evaluate",
     }
 )
 
@@ -177,6 +196,24 @@ class WorkstationApp:
     strategy: StrategyBinding | None = None
     #: An audit sink for mode changes (a durable log, when one is available).
     audit_sink: Any = None
+    #: The paper strategy runner's host, if this deployment has one.  It owns its
+    #: own thread and its own paper stack; the UI only sends it start/stop and
+    #: reads its state.  ``None`` means no runner is configured -- which is the
+    #: default, and leaves every other page exactly as it was.
+    runner: Any = None
+    #: Where the operator drops broker exports and canonical CSVs.  The data page
+    #: lists *names* in this folder and never accepts a path from a form.
+    import_dir: Any = None
+    #: The research database the runner reads its evidence from.  ``None`` means
+    #: this process has no durable research store, so evaluation is unavailable
+    #: rather than silently writing somewhere else.
+    research_db_path: str = ""
+    #: Builds a fresh evaluation platform (same terms as the paper lane) on
+    #: demand.  ``None`` means this process cannot evaluate -- the page says so.
+    evaluation_platform_builder: Any = None
+    #: The last data action's own result, shown on the next render.  Kept in
+    #: memory only; a restart forgets it, and the files are the record.
+    data_result: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.paper is None and self.platform is not None:
@@ -225,6 +262,20 @@ class WorkstationApp:
             blockers = self.preflight_view().get("blockers", ())
         return self.mode.view(blockers=blockers)
 
+    def runner_view(self) -> dict[str, Any]:
+        """Read the runner's state.  Never raises, never touches its objects."""
+
+        if self.runner is None:
+            return {}
+        try:
+            view = self.runner.view()
+        except Exception as exc:
+            return {"available": False, "error": type(exc).__name__}
+        if not isinstance(view, dict):
+            return {"available": False, "error": "runner_view_not_a_mapping"}
+        view.setdefault("available", True)
+        return sanitize_audit_value(view)
+
     def _context(self, page: str, title: str, notice: str = "") -> PageContext:
         # One preflight per page render: it is read-only, and running it twice
         # would let two panels disagree about the same facts.
@@ -239,6 +290,8 @@ class WorkstationApp:
             notice=notice,
             execution_mode=self.mode_view(blockers=preflight.get("blockers", ())),
             preflight=preflight,
+            runner=self.runner_view(),
+            extra={"data": self.data_view()},
         )
 
     # -- actions -----------------------------------------------------------
@@ -332,6 +385,58 @@ class WorkstationApp:
                 return HTTPStatus.SEE_OTHER, "/", change.message
             self._log(f"live mode refused: {change.reason}")
             return HTTPStatus.SEE_OTHER, "/mode", change.message
+        if action in {"runner-start", "runner-stop"}:
+            runner = self.runner
+            if runner is None:
+                return (
+                    HTTPStatus.BAD_REQUEST,
+                    "/positions",
+                    "No paper runner is configured for this workstation.",
+                )
+            if action == "runner-start":
+                try:
+                    view = runner.start_runner()
+                except Exception as exc:
+                    self._log(f"runner start failed: {type(exc).__name__}")
+                    return (
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "/positions",
+                        f"The paper runner could not be started ({type(exc).__name__}). "
+                        "Nothing was traded.",
+                    )
+                if view.get("running"):
+                    self._log("paper runner started")
+                    return (
+                        HTTPStatus.SEE_OTHER,
+                        "/positions",
+                        "Paper runner started. Every fill it produces is simulated locally.",
+                    )
+                blockers = view.get("blockers") or []
+                reason = blockers[0].get("reason") if blockers else view.get("reason", "refused")
+                self._log(f"paper runner refused to start: {reason}")
+                return (
+                    HTTPStatus.SEE_OTHER,
+                    "/positions",
+                    f"The paper runner did not start: {reason}. Nothing was traded.",
+                )
+            try:
+                view = runner.stop_runner()
+            except Exception as exc:
+                self._log(f"runner stop failed: {type(exc).__name__}")
+                return (
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "/positions",
+                    f"The paper runner could not be stopped cleanly ({type(exc).__name__}). "
+                    "No order was sent by this interface in any case.",
+                )
+            self._log("paper runner stopped")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/positions",
+                "Paper runner stopped. Open paper positions remain in the local ledger.",
+            )
+        if action in {"imports-refresh", "ticks-convert", "dataset-evaluate"}:
+            return self._data_action(action, form)
         if action == "acknowledge-sign-in":
             wizard.acknowledge_sign_in()
             return HTTPStatus.SEE_OTHER, "/setup", "Noted: you signed in inside MetaTrader 5."
@@ -355,6 +460,235 @@ class WorkstationApp:
             self._log(f"symbols selected: {len(chosen)}")
             return HTTPStatus.SEE_OTHER, "/account", f"{len(chosen)} symbol(s) selected."
         return HTTPStatus.NOT_FOUND, "/", "unknown action"
+
+    # -- data workflow -----------------------------------------------------
+    def _data_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        """Scan, convert, or evaluate -- local files only, never an order."""
+
+        from . import dataflow
+
+        if action == "imports-refresh":
+            self.data_result = {"action": "scan", "ok": True}
+            self._log("import folder re-scanned")
+            return HTTPStatus.SEE_OTHER, "/data", "Import folder re-scanned."
+
+        def field(name: str) -> str:
+            return str((form.get(name) or [""])[0]).strip()
+
+        if self.import_dir is None:
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "/data",
+                "This workstation has no import folder configured. Start it with "
+                "--imports-dir <folder> to enable the data workflow.",
+            )
+
+        try:
+            if action == "ticks-convert":
+                report = dataflow.convert_tick_export(
+                    self.import_dir,
+                    name=field("file"),
+                    pair=field("pair"),
+                    server_offset_minutes=field("server_offset_minutes") or None,
+                    server_timezone=field("server_timezone"),
+                    interval_seconds=int(field("interval_seconds") or 60),
+                )
+                self.data_result = {"action": "convert", "ok": True, **report}
+                self._log(
+                    f"tick export converted: {report['output_file']} "
+                    f"({report['bars_written']} bars from {report['tick_count']} ticks)"
+                )
+                gaps = report.get("coverage", {}).get("empty_windows", 0)
+                return (
+                    HTTPStatus.SEE_OTHER,
+                    "/data",
+                    f"Converted {report['source_file']} into {report['output_file']}: "
+                    f"{report['bars_written']} bids and asks from "
+                    f"{report['tick_count']} ticks, {gaps} empty window(s) reported as "
+                    "gaps. Nothing was filled in. Evaluate the canonical file next.",
+                )
+
+            # dataset-evaluate
+            if self.evaluation_platform_builder is None:
+                raise dataflow.DataflowRefused(
+                    "evaluation_not_configured",
+                    "this workstation was started without an evaluation platform; "
+                    "no candidate can be scored here",
+                )
+            data_class = field("data_class").upper()
+            if not data_class:
+                raise dataflow.DataflowRefused(
+                    "data_class_required",
+                    "declare what this file is; AXIOM will not guess a data class",
+                )
+            if data_class not in self._data_class_choices():
+                raise dataflow.DataflowRefused(
+                    "data_class_unknown", data_class
+                )
+            if field("declare") != "yes":
+                raise dataflow.DataflowRefused(
+                    "declaration_required",
+                    "tick this only after confirming the file is data you exported "
+                    "yourself; AXIOM does not vouch for it",
+                )
+            pair = field("pair").upper()
+            if not pair:
+                raise dataflow.DataflowRefused(
+                    "pair_required", "declare which pair this file is for"
+                )
+            platform, refusal = self.evaluation_platform_builder(pair)
+            if platform is None:
+                raise dataflow.DataflowRefused(
+                    getattr(refusal, "reason", "platform_unavailable"),
+                    getattr(refusal, "detail", ""),
+                )
+            bars, meta = dataflow.load_bars(
+                self.import_dir, name=field("file"), spec=platform.spec
+            )
+            outcome = dataflow.evaluate_dataset(
+                platform=platform,
+                bars=bars,
+                dataset_id=dataflow.dataset_id_for(meta),
+                data_class=data_class,
+            )
+            self.data_result = {
+                "action": "evaluate",
+                "ok": True,
+                "meta": meta,
+                **outcome,
+            }
+            self._log(
+                f"evaluation recorded: {meta['pair']} {meta['bars']} bars, "
+                f"{len(outcome['selected'])} candidate(s) at SELECTED_FOR_PAPER"
+            )
+            if outcome["selected"]:
+                message = (
+                    f"Evaluated {meta['bars']} bars of {meta['pair']} and recorded the "
+                    f"evidence. {len(outcome['selected'])} candidate(s) met the "
+                    "predeclared criteria on this sample. That is historical evidence, "
+                    "not a forecast; the paper runner must still be started by hand."
+                )
+            else:
+                message = (
+                    f"Evaluated {meta['bars']} bars of {meta['pair']} and recorded the "
+                    "evidence. No candidate met the predeclared criteria, so the paper "
+                    "runner stays blocked. The reasons are on the Data & evaluation page."
+                )
+            return HTTPStatus.SEE_OTHER, "/data", message
+        except dataflow.DataflowRefused as exc:
+            self.data_result = {"action": action, "ok": False, **exc.audit_view()}
+            self._log(f"data action refused: {exc.reason}")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/data",
+                f"Nothing was written or evaluated: {exc.reason}"
+                + (f" ({exc.detail})" if exc.detail else ""),
+            )
+        except (OSError, ValueError) as exc:
+            self.data_result = {
+                "action": action,
+                "ok": False,
+                "reason": type(exc).__name__,
+                "detail": str(exc),
+            }
+            self._log(f"data action failed: {type(exc).__name__}")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/data",
+                f"Nothing was written or evaluated: {type(exc).__name__}: {exc}",
+            )
+
+    def _data_class_choices(self) -> tuple[str, ...]:
+        """The data classes the operator may *declare*, never one AXIOM picks."""
+
+        return (
+            "USER_SUPPLIED_HISTORICAL",
+            "USER_SUPPLIED_DEMO",
+            "USER_SUPPLIED_PRODUCTION",
+        )
+
+    def data_view(self) -> dict[str, Any]:
+        """Everything the data page shows: files, the last result, and evidence."""
+
+        from . import dataflow
+
+        files: list[dict[str, Any]] = []
+        scan_error = ""
+        if self.import_dir is not None:
+            try:
+                files = [entry.audit_view() for entry in dataflow.scan(self.import_dir)]
+            except OSError as exc:
+                scan_error = type(exc).__name__
+        return {
+            "configured": self.import_dir is not None,
+            "import_dir": str(self.import_dir) if self.import_dir is not None else "",
+            "scan_error": scan_error,
+            "files": files,
+            "tick_files": [item for item in files if item["can_convert"]],
+            "dataset_files": [item for item in files if item["can_evaluate"]],
+            "data_classes": list(self._data_class_choices()),
+            "promoting_classes": list(dataflow.PROMOTING_DATA_CLASSES),
+            "last": dict(self.data_result),
+            "evaluation_available": self.evaluation_platform_builder is not None,
+            "evidence": self.evidence_view(),
+        }
+
+    def evidence_view(self) -> dict[str, Any]:
+        """The recorded evidence per candidate, read from the research database.
+
+        Read-only and short: the last recorded evaluation for each candidate the
+        runner knows about, plus what the runner currently requires.
+        """
+
+        if not self.research_db_path:
+            return {"available": False, "reason": "no_research_database", "rows": []}
+        from pathlib import Path as _Path
+
+        if not _Path(self.research_db_path).exists():
+            # Opening the store would create it; a page render must not write.
+            return {"available": False, "reason": "no_evidence_recorded_yet", "rows": []}
+        try:
+            from axiom_forex.database.repository import ForexRepository
+            from axiom_forex.paper_runner import evaluation
+            from axiom_forex.paper_runner.strategy import STATUS_SELECTED
+            from axiom_forex.paper_runner.strategy import candidate_family, status_of
+
+            repository = ForexRepository(self.research_db_path)
+            rows = []
+            for candidate in candidate_family():
+                latest = evaluation.latest_evidence(
+                    repository=repository, candidate_id=candidate.candidate_id
+                )
+                if latest is None:
+                    rows.append(
+                        {
+                            "candidate_id": candidate.candidate_id,
+                            "status": "NO_EVIDENCE",
+                            "detail": "never evaluated on a dataset you imported",
+                        }
+                    )
+                    continue
+                status = status_of(candidate.candidate_id, latest)
+                rows.append(
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "status": status,
+                        "selected": status == STATUS_SELECTED,
+                        "passed": bool(latest.get("passed")),
+                        "failed_criteria": list(latest.get("failed_criteria", [])),
+                        "dataset_id": latest.get("dataset_id", ""),
+                        "data_class": latest.get("data_class", ""),
+                        "evaluated_at": latest.get("evaluated_at", ""),
+                        "summary": evaluation.evidence_view(latest),
+                    }
+                )
+            return {"available": True, "reason": "", "rows": rows}
+        except Exception as exc:  # a read failure shows as an empty table
+            return {
+                "available": False,
+                "reason": type(exc).__name__,
+                "rows": [],
+            }
 
     def _log(self, message: str) -> None:
         line = f"[axiom-workstation] {message}"

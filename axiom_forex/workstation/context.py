@@ -245,6 +245,9 @@ class PageContext:
     execution_mode: Mapping[str, Any] = field(default_factory=dict)
     #: The live preflight, recomputed for each page load.  Never cached.
     preflight: Mapping[str, Any] = field(default_factory=dict)
+    #: The paper strategy runner's own state, read from its owner thread.
+    #: Empty when no runner is configured, which is the default.
+    runner: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def safety(self) -> dict[str, Any]:
@@ -276,6 +279,14 @@ class PageContext:
     def preflight_ready(self) -> bool:
         return bool(self.preflight.get("ready", False))
 
+    @property
+    def runner_available(self) -> bool:
+        return bool(self.runner.get("available", True)) and bool(self.runner.get("state"))
+
+    @property
+    def runner_running(self) -> bool:
+        return bool(self.runner.get("running", False))
+
     def nav_badge(self, page: str) -> str:
         if page == "positions" and self.paper.open_positions:
             return str(len(self.paper.open_positions))
@@ -294,6 +305,7 @@ def build_context(
     paper: PaperSnapshot | None = None,
     execution_mode: Mapping[str, Any] | None = None,
     preflight: Mapping[str, Any] | None = None,
+    runner: Mapping[str, Any] | None = None,
 ) -> PageContext:
     """Assemble a page.
 
@@ -321,4 +333,5 @@ def build_context(
         extra=dict(extra or {}),
         execution_mode=dict(execution_mode or default_mode_view()),
         preflight=dict(preflight or {}),
+        runner=dict(runner or {}),
     )

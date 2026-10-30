@@ -1,4 +1,20 @@
-"""Shared signal-to-paper-order planner for backtests and live-shaped paper runs."""
+"""Shared signal-to-paper-order planner for backtests and live paper runs.
+
+Two entry points, one decision model:
+
+``plan()``
+    Backtest/replay: the decision comes from a completed bar and the fill is the
+    *next* bar's open (ask for a buy, bid for a sell).
+``plan_at_quote()``
+    A running paper session: the decision comes from a completed bar and the
+    fill is a quote that arrived **after** that bar closed.  A quote stamped
+    before the decision bar's end is refused (``quote_precedes_decision``), so the
+    live path cannot look ahead any more than the backtest can.
+
+Both share :meth:`ForexExecutionPlanner._action`, so signal→order mapping,
+position sizing, close intents, calendar checks and gate contexts are identical
+whichever path is used.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +48,8 @@ class ExecutionPlan:
     decision_index: int
     execution_index: int
     calendar_state: CalendarState
+    #: ``NEXT_BAR`` for a backtest fill, ``LIVE_QUOTE`` for a running paper fill.
+    basis: str = "NEXT_BAR"
 
     def audit_view(self) -> dict[str, Any]:
         return {
@@ -45,6 +63,7 @@ class ExecutionPlan:
             "decision_index": self.decision_index,
             "execution_index": self.execution_index,
             "calendar": self.calendar_state.audit_view(),
+            "basis": self.basis,
         }
 
 
@@ -187,6 +206,100 @@ class ForexExecutionPlanner:
             decision_index=decision_index,
             execution_index=execution_index,
             calendar_state=calendar_state,
+        )
+
+    def plan_at_quote(
+        self,
+        *,
+        signal: Signal,
+        positions: Mapping[str, Any],
+        quote: ForexQuote,
+        decision_bar: ForexQuoteBar,
+        decision_index: int,
+        run_id: str,
+        strategy_id: str,
+    ) -> ExecutionPlan | ExecutionRejection | None:
+        """Plan one order to be filled at ``quote``, a price from *after* the decision.
+
+        The no-lookahead rule is enforced here rather than trusted to the caller:
+        if the quote's own timestamp precedes the decision bar's close, the plan
+        is refused.  Nothing is fabricated to rescue such a request.
+        """
+
+        action = self._action(signal, positions)
+        if action is None:
+            return None
+        kind, side, position_id = action
+        try:
+            quote_at = quote.timestamp_utc()
+            decision_end = decision_bar.end_at
+        except Exception as exc:
+            return ExecutionRejection(
+                "INVALID_TIMESTAMP", type(exc).__name__, decision_index, ""
+            )
+        request_id = f"{run_id}:{decision_index}:{kind}"
+        if quote_at < decision_end:
+            return ExecutionRejection(
+                "STALE_QUOTE", "quote_precedes_decision", decision_index, request_id
+            )
+        calendar_state = self.calendar.status(
+            self.spec.canonical_pair or "", quote_at
+        )
+        if not calendar_state.is_open:
+            return ExecutionRejection(
+                "MARKET_CLOSED",
+                calendar_state.status.value,
+                decision_index,
+                request_id,
+            )
+        validation = quote.validate(self.spec)
+        if not validation.valid:
+            return ExecutionRejection(
+                "INVALID_QUOTE", validation.reason, decision_index, request_id
+            )
+        if quote.canonical_pair and quote.canonical_pair != self.spec.canonical_pair:
+            return ExecutionRejection(
+                "QUOTE_PAIR_MISMATCH", str(quote.canonical_pair), decision_index, request_id
+            )
+        close_intent = None
+        if kind == "OPEN":
+            quantity = self.config.quantity
+        else:
+            position = positions[position_id or ""]
+            quantity = getattr(position, "remaining_quantity", None) or position.quantity
+            close_intent = CloseIntent(
+                position_id=str(getattr(position, "position_id", position_id)),
+                account_id=self.context_factory.account.account_id,
+                quantity=quantity,
+                pair=self.spec.canonical_pair,
+                quantity_unit=self.spec.quantity_unit_value,
+            )
+        request = OrderRequest(
+            request_id=request_id,
+            provider_id=self.config.provider_id,
+            provider_symbol=self.config.provider_symbol,
+            side=side,
+            quantity=quantity,
+            target_mode=TradingMode.PAPER,
+            evaluated_at=quote_at,
+            quote=quote,
+            strategy_id=strategy_id,
+            close_intent=close_intent,
+        )
+        context = self.context_factory.build(at=quote_at, bar=decision_bar)
+        return ExecutionPlan(
+            request=request,
+            context=context,
+            fill_price=quote.executable_price(side),
+            fill_at=quote_at,
+            action=kind,
+            position_id=position_id,
+            quantity=quantity,
+            signal=signal,
+            decision_index=decision_index,
+            execution_index=decision_index + 1,
+            calendar_state=calendar_state,
+            basis="LIVE_QUOTE",
         )
 
     def audit_view(self) -> dict[str, Any]:

@@ -601,6 +601,17 @@ def test_the_post_allowlist_is_exactly_the_setup_and_mode_actions():
         # approved order *would* be executed and cannot create one.
         "mode-paper",
         "mode-live",
+        # The paper runner's own loop. Starting it runs *simulated* cycles;
+        # it cannot send an order, arm anything, or change the mode.
+        "runner-start",
+        "runner-stop",
+        # The data workflow: re-scan the import folder, convert one broker tick
+        # export, and evaluate the candidate grid on one canonical file.  These
+        # touch local files and the research database only -- no connection, no
+        # order, no arming, no mode change.
+        "imports-refresh",
+        "ticks-convert",
+        "dataset-evaluate",
     }
 
 
@@ -1056,3 +1067,205 @@ def test_http_post_with_a_password_is_refused(live_server):
     assert status == 400
     assert SECRET_VALUE not in payload
     assert app.wizard.session.connected is False
+
+
+# ---------------------------------------------------------------------------
+# 6. the paper strategy runner
+# ---------------------------------------------------------------------------
+
+RUNNER_VIEW = {
+    "available": True,
+    "state": "STOPPED",
+    "running": False,
+    "reason": "restored_after_restart",
+    "reason_detail": "restored from durable state; press Start to resume cycles",
+    "blockers": [],
+    "strategy": {
+        "candidate_id": "trend_pullback_v1_8_21",
+        "status": "CANDIDATE_UNTESTED",
+        "parameters": {"fast_period": 8, "slow_period": 21},
+        "rationale": "trend plus pullback",
+        "assumptions": ["fills at the next price"],
+        "limitations": ["loses in ranging markets"],
+        "evidence": {},
+    },
+    "symbol": "AAA/BBB",
+    "quantity": "0.10",
+    "data": {"kind": "HISTORICAL_REPLAY", "data_class": "HISTORICAL_REPLAY", "label": "offline replay"},
+    "last_tick_at": "",
+    "last_signal_at": "",
+    "last_fill_at": "",
+    "last_signal": "HOLD",
+    "counters": {"cycles": 0, "bars": 0, "signals": 0, "orders": 0, "fills": 0, "refusals": 0},
+    "recent": [],
+    "positions": [],
+    "fills": [],
+    "restored": True,
+    "paper_only": True,
+    "order_sending": False,
+}
+
+
+class FakeRunnerHost:
+    """Records what the UI asks the runner to do; owns no thread and no data."""
+
+    def __init__(self, *, refuse: bool = False, error: str = "") -> None:
+        self.refuse = refuse
+        self.error = error
+        self.started = 0
+        self.stopped = 0
+
+    def view(self):
+        return dict(RUNNER_VIEW)
+
+    def start_runner(self):
+        self.started += 1
+        if self.refuse:
+            return {
+                **RUNNER_VIEW,
+                "state": "BLOCKED",
+                "running": False,
+                "reason": "live_mode_active",
+                "blockers": [
+                    {
+                        "reason": "live_mode_active",
+                        "message": "The paper runner only runs in PAPER mode.",
+                        "hint": "Switch to paper first.",
+                    }
+                ],
+            }
+        return {**RUNNER_VIEW, "state": "RUNNING", "running": True, "reason": "operator_started"}
+
+    def stop_runner(self):
+        self.stopped += 1
+        return {**RUNNER_VIEW, "state": "STOPPED", "reason": "operator_stopped"}
+
+
+def _page_text(app: WorkstationApp, path: str) -> str:
+    status, html = app.page(path)
+    assert int(status) == 200
+    page = _Page()
+    page.feed(html)
+    return " ".join(page.text)
+
+
+def test_the_runner_panel_shows_its_state_and_offers_one_action():
+    app = app_for(simulated_wizard())
+    app.runner = FakeRunnerHost()
+    for path in ("/", "/positions", "/activity"):
+        text = _page_text(app, path)
+        assert "Paper strategy runner" in text, path
+        assert "STOPPED" in text, path
+        assert "trend_pullback_v1_8_21" in text, path
+        assert "CANDIDATE_UNTESTED" in text, path
+        assert "HISTORICAL_REPLAY" in text, path
+        assert "paper only" in text.lower(), path
+
+
+def test_starting_the_runner_goes_through_the_host_and_never_touches_the_mode():
+    app = app_for(simulated_wizard())
+    host = FakeRunnerHost()
+    app.runner = host
+    before = app.mode.mode
+    status, redirect, message = app.act("runner-start", {"nonce": [app.nonce]})
+    assert int(status) == 303
+    assert redirect == "/positions"
+    assert "simulated" in message.lower()
+    assert host.started == 1
+    assert app.mode.mode == before  # the runner never changes the mode
+
+
+def test_stopping_the_runner_is_its_own_action():
+    app = app_for(simulated_wizard())
+    host = FakeRunnerHost()
+    app.runner = host
+    status, redirect, message = app.act("runner-stop", {"nonce": [app.nonce]})
+    assert int(status) == 303
+    assert host.stopped == 1
+    assert "stopped" in message.lower()
+
+
+def test_a_refused_start_reports_the_reason_and_trades_nothing():
+    app = app_for(simulated_wizard())
+    app.runner = FakeRunnerHost(refuse=True)
+    before = app.mode.mode
+    status, _, message = app.act("runner-start", {"nonce": [app.nonce]})
+    assert int(status) == 303
+    assert "live_mode_active" in message
+    assert app.mode.mode == before
+
+
+def test_without_a_configured_runner_the_ui_says_so_and_refuses():
+    app = app_for(simulated_wizard())
+    text = _page_text(app, "/")
+    assert "Paper strategy runner" in text
+    assert "No runner configured" in text
+    status, _, message = app.act("runner-start", {"nonce": [app.nonce]})
+    assert int(status) == 400
+    assert "No paper runner" in message
+
+
+def test_the_runner_panel_is_never_green_unless_the_runner_says_running():
+    app = app_for(simulated_wizard())
+    app.runner = FakeRunnerHost()
+    html = app.page("/")[1]
+    assert "RUNNING (PAPER)" not in html
+    assert "STOPPED" in html
+
+
+class LiveRunnerHost(FakeRunnerHost):
+    """A runner that *does* have a live path, so the panel must say which."""
+
+    def __init__(self, *, ready: bool = False) -> None:
+        super().__init__()
+        self.ready = ready
+
+    def view(self):
+        return {
+            **RUNNER_VIEW,
+            "execution_mode": "LIVE" if self.ready else "PAPER",
+            "live_effective": False,
+            "live_configured": True,
+            "paper_only": False,
+            "order_sending": True,
+            "trading_capability": "live_broker_orders",
+            "live_orders": 0,
+            "live": {
+                "ready": self.ready,
+                "mode": "LIVE" if self.ready else "PAPER",
+                "blockers": (
+                    []
+                    if self.ready
+                    else [
+                        {
+                            "reason": "mode_not_live",
+                            "message": "Execution mode is PAPER; a live order needs LIVE.",
+                            "hint": "Switch to LIVE and confirm it.",
+                        }
+                    ]
+                ),
+            },
+        }
+
+
+def test_the_runner_panel_shows_whether_a_live_path_exists_and_whether_it_is_ready():
+    app = app_for(simulated_wizard())
+    app.runner = LiveRunnerHost()
+    text = _page_text(app, "/")
+    assert "Live path" in text
+    assert "blocked" in text.lower()
+    assert "mode_not_live" in text
+    assert "live_broker_orders" in text
+    assert "order sending: yes" in text
+
+
+def test_a_ready_live_path_is_reported_as_ready_and_not_as_green_by_default():
+    app = app_for(simulated_wizard())
+    app.runner = LiveRunnerHost(ready=True)
+    text = _page_text(app, "/")
+    assert "Live path" in text
+    assert "ready" in text.lower()
+    # The *runner* is still stopped: a ready path is not a running strategy.
+    assert "STOPPED" in text
+    # And nothing claims the terminal is connected by this page.
+    assert "SIMULATED" in text.upper() or "simulated" in text

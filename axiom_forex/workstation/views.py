@@ -35,6 +35,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("setup", "/setup", "Setup"),
     ("account", "/account", "Account & symbols"),
     ("positions", "/positions", "Positions"),
+    ("data", "/data", "Data & evaluation"),
     ("activity", "/activity", "Activity"),
     ("health", "/health", "System health"),
 )
@@ -45,6 +46,7 @@ ICONS: dict[str, str] = {
     "setup": "M4 6h10M4 12h16M4 18h7M18 4v4M16 18h4M20 16v4",
     "account": "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
     "positions": "M4 18V9M10 18V5M16 18v-6M22 18h-20",
+    "data": "M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
     "activity": "M3 12h3l2-6 4 12 3-7h6",
     "health": "M12 21s-7-4.5-7-10a4 4 0 017-2.5A4 4 0 0119 11c0 5.5-7 10-7 10z",
     "connection": "M5 12a7 7 0 0114 0M8 12a4 4 0 018 0M12 12v0",
@@ -296,6 +298,16 @@ input[type="text"]{
   background:#0a1017;color:var(--text);font:inherit;font-size:13.5px
 }
 input[type="text"]:focus{border-color:var(--accent);outline:none;box-shadow:0 0 0 3px rgba(94,200,255,.18)}
+select,input[type="number"]{
+  background:var(--panel-2);border:1px solid var(--line);border-radius:10px;
+  color:var(--text);padding:9px 11px;font:inherit;font-size:13.5px;min-width:120px;
+}
+select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;box-shadow:0 0 0 3px rgba(94,200,255,.18)}
+.data-grid{display:grid;gap:var(--s2);grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.data-field{display:flex;flex-direction:column;gap:6px}
+.data-field label{font-size:12px;color:var(--text-2);font-weight:600}
+.data-form{border-top:1px solid var(--line-soft);padding-top:12px;margin-top:12px}
+.data-form:first-of-type{border-top:0;padding-top:0;margin-top:0}
 .legend{display:flex;gap:var(--s4);flex-wrap:wrap;font-size:12px;color:var(--text-3)}
 
 /* ---------- responsive ---------- */
@@ -805,6 +817,257 @@ def _paper_card(ctx: PageContext) -> str:
     )
 
 
+def _runner_state_chip(ctx: PageContext) -> str:
+    """The runner's own word for its state, never a green "OK" for a stopped one."""
+
+    runner = ctx.runner
+    if not runner or not runner.get("available", True):
+        return chip("RUNNER UNAVAILABLE", "muted")
+    state = str(runner.get("state", "")).upper()
+    if state == "RUNNING":
+        return chip("RUNNING (PAPER)", "paper", dot=True)
+    if state == "BLOCKED":
+        return chip("BLOCKED", "danger", dot=True)
+    if state == "STOPPED":
+        return chip("STOPPED", "muted")
+    return chip(state or "UNKNOWN", "muted")
+
+
+def _runner_card(ctx: PageContext) -> str:
+    """Everything the operator needs to see why the runner is or is not trading."""
+
+    runner = ctx.runner
+    if not runner:
+        return card(
+            "Paper strategy runner",
+            empty_state(
+                "No runner configured",
+                "This workstation was started without a paper strategy runner. "
+                "Nothing is trading and nothing can be started from here.",
+            ),
+            hint="A runner needs imported history, a passed evaluation, and paper mode.",
+        )
+    if not runner.get("available", True):
+        return card(
+            "Paper strategy runner",
+            empty_state(
+                "Runner unavailable",
+                escape(str(runner.get("error") or runner.get("reason") or "the runner could not be reached")),
+            ),
+            right=_runner_state_chip(ctx),
+        )
+
+    if runner.get("pending"):
+        # Alive, but nothing is built yet: a provider platform waits for the
+        # operator to connect a terminal.  Offering Start is the point.
+        return card(
+            "Paper strategy runner",
+            empty_state(
+                "Waiting for the terminal",
+                escape(
+                    str(
+                        runner.get("reason_detail")
+                        or "Connect in the browser, then press Start."
+                    )
+                ),
+            )
+            + "<div style='margin-top:12px'>"
+            + action_form("runner-start", ctx.action_nonce, "Start runner", tone="paper")
+            + "</div>",
+            hint=(
+                "The symbol, the price grid, and the contract terms come from your "
+                "connected terminal. Nothing is substituted while it is absent."
+            ),
+            right=_runner_state_chip(ctx),
+        )
+
+    strategy = runner.get("strategy") or {}
+    feed = runner.get("data") or {}
+    counters = runner.get("counters") or {}
+    blockers = list(runner.get("blockers") or ())
+    status = str(strategy.get("status", ""))
+    status_tone = "ok" if status == "SELECTED_FOR_PAPER" else "warn"
+    reason = str(runner.get("reason", ""))
+    detail = str(runner.get("reason_detail", ""))
+    live = runner.get("live") or {}
+    live_ready = bool(live.get("ready"))
+    live_reasons = [
+        str(item.get("reason", "")) for item in (live.get("blockers") or ())
+    ]
+    actions = ""
+    if ctx.live_effective and not runner.get("live_configured", False):
+        actions = chip(
+            "Live mode is active but no live path is configured: the runner refuses to start",
+            "danger",
+        )
+    elif ctx.live_effective and not live_ready:
+        actions = chip(
+            "Live mode is active: starting is refused until the live checks pass ("
+            + escape(", ".join(live_reasons[:3]) or "not ready")
+            + ")",
+            "danger",
+        )
+    elif ctx.live_effective and runner.get("running"):
+        actions = action_form("runner-stop", ctx.action_nonce, "Stop live runner", tone="danger")
+    elif ctx.live_effective:
+        actions = action_form("runner-start", ctx.action_nonce, "Start LIVE runner", tone="danger")
+    elif runner.get("running"):
+        actions = action_form("runner-stop", ctx.action_nonce, "Stop runner", tone="warn")
+    else:
+        actions = action_form("runner-start", ctx.action_nonce, "Start runner", tone="paper")
+
+    blocker_html = ""
+    if blockers:
+        items = "".join(
+            f"<li><strong>{escape(str(item.get('reason', '')))}</strong> "
+            f"<span class='muted small'>{escape(str(item.get('message', '')))}</span>"
+            + (
+                f"<br><span class='small'>{escape(str(item.get('hint', '')))}</span>"
+                if item.get("hint")
+                else ""
+            )
+            + "</li>"
+            for item in blockers
+        )
+        blocker_html = f"<ul class='list-reset small' style='margin:12px 0 0'>{items}</ul>"
+
+    recent = list(runner.get("recent") or ())[:5]
+    recent_rows = [
+        (
+            escape(str(item.get("at", ""))[:19]),
+            escape(str(item.get("reason", ""))),
+            escape(str(item.get("code", "") or "—")),
+            escape(str(item.get("detail", ""))[:80]),
+        )
+        for item in recent
+    ]
+
+    body = (
+        dl(
+            [
+                ("State", f"{_runner_state_chip(ctx)} <span class='muted small'>{escape(reason)}</span>"),
+                ("Last tick", escape(str(runner.get("last_tick_at", "") or "—"))),
+                ("Last signal", f"{escape(str(runner.get('last_signal', '') or '—'))} <span class='muted small'>{escape(str(runner.get('last_signal_at', '') or ''))}</span>"),
+                ("Last fill", escape(str(runner.get("last_fill_at", "") or "—"))),
+                ("Strategy", f"{escape(str(strategy.get('candidate_id', '')))} <span class='muted small'>{escape(str(strategy.get('parameters', '')))}</span>"),
+                ("Candidate status", f"<span class='chip chip--{status_tone}'>{escape(status)}</span>"),
+                ("Symbol", f"{escape(str(runner.get('symbol', '')))} <span class='muted small'>qty {escape(str(runner.get('quantity', '')))}</span>"),
+                (
+                    "Feed",
+                    f"{escape(str(feed.get('kind', '')))} "
+                    f"<span class='muted small'>{escape(str(feed.get('data_class', '')))} "
+                    f"· every {escape(str((feed.get('policy') or {}).get('interval_seconds', '—')))}s "
+                    f"· max quote age {escape(str((feed.get('policy') or {}).get('max_quote_age_seconds', '—')))}s "
+                    f"— {escape(str(feed.get('label', '')))}</span>",
+                ),
+                (
+                    "Mode",
+                    f"<span class='chip chip--{'danger' if str(runner.get('execution_mode', '')).upper() == 'LIVE' else 'paper'}'>"
+                    f"{escape(str(runner.get('execution_mode', 'PAPER')))}</span> "
+                    f"<span class='muted small'>order sending: "
+                    f"{'yes' if runner.get('order_sending') else 'no'} · "
+                    f"{escape(str(runner.get('trading_capability', '')))}</span>",
+                ),
+                (
+                    "Live path",
+                    (
+                        f"<span class='chip chip--{'ok' if live_ready else 'danger'}'>"
+                        f"{'ready' if live_ready else 'blocked'}</span> "
+                        f"<span class='muted small'>"
+                        f"{escape(', '.join(live_reasons[:4]) or 'every live check passes')}"
+                        f" · orders sent {escape(str(runner.get('live_orders', 0)))}</span>"
+                    )
+                    if runner.get("live_configured")
+                    else (
+                        "<span class='chip chip--warn'>not configured</span> "
+                        "<span class='muted small'>this process has no MT5 trading adapter; "
+                        "live execution runs from the operator's own `axiom live-run` session, "
+                        "never from the browser</span>"
+                    ),
+                ),
+                ("Cycles / bars", f"{escape(str(counters.get('cycles', 0)))} / {escape(str(counters.get('bars', 0)))}"),
+                ("Signals / orders / fills", f"{escape(str(counters.get('signals', 0)))} / {escape(str(counters.get('orders', 0)))} / {escape(str(counters.get('fills', 0)))}"),
+                ("Refusals", escape(str(counters.get("refusals", 0)))),
+                ("Why", f"{escape(reason)} <span class='muted small'>{escape(detail[:120])}</span>"),
+                ("Restored", "yes" if runner.get("restored") else "no (fresh state)"),
+            ]
+        )
+        + blocker_html
+        + "<div style='margin-top:12px'>"
+        + actions
+        + "</div>"
+        + (
+            table(
+                "Last decisions",
+                (("When", "text"), ("Reason", "text"), ("Code", "text"), ("Detail", "text")),
+                recent_rows,
+                empty=empty_state("No decisions yet", "Press Start; the first cycle records its reason here."),
+            )
+            if True
+            else ""
+        )
+        + "<p class='small muted' style='margin:12px 0 0'>"
+        + (
+            "Live mode: a signal that passes the same pre-trade gate is sent to MT5 and the "
+            "broker's own fill is booked back into the ledger. The runner never arms the "
+            "terminal, never retries an order, and stops on an unknown outcome."
+            if runner.get("live_configured")
+            else "Paper only: signals are simulated against the local ledger. The runner "
+            "cannot send an order, arm live execution, or change the execution mode; "
+            "without a live path it refuses to run in LIVE mode."
+        )
+        + "</p>"
+    )
+
+    positions = list(runner.get("positions") or ())
+    fills = list(runner.get("fills") or ())
+    position_rows = [
+        (
+            escape(str(item.get("pair", ""))),
+            escape(str(item.get("side", ""))),
+            escape(str(item.get("remaining_quantity", item.get("quantity", "")))),
+            escape(str(item.get("entry_price", ""))),
+            escape(str(item.get("entry_timestamp", ""))[:19]),
+        )
+        for item in positions
+    ]
+    fill_rows = [
+        (
+            escape(str(item.get("filled_at", ""))[:19]),
+            escape(str(item.get("action", ""))),
+            escape(str(item.get("side", ""))),
+            escape(str(item.get("quantity", ""))),
+            escape(str(item.get("price", ""))),
+        )
+        for item in reversed(fills[-8:])
+    ]
+
+    return (
+        card(
+            "Paper strategy runner",
+            body,
+            hint="Simulated fills only. This is not a live trading system and makes no promise of profit.",
+            right=_runner_state_chip(ctx),
+        )
+        + card(
+            "Runner positions and fills",
+            table(
+                "Positions opened by the runner (simulated ledger)",
+                (("Pair", "text"), ("Side", "text"), ("Qty", "num"), ("Entry", "num"), ("Opened", "text")),
+                position_rows,
+                empty=empty_state("No open runner positions", "Flat until the strategy signals an entry."),
+            )
+            + table(
+                "Recent simulated fills",
+                (("Filled", "text"), ("Action", "text"), ("Side", "text"), ("Qty", "num"), ("Price", "num")),
+                fill_rows,
+                empty=empty_state("No fills yet", "A fill appears only after a signal passes every gate."),
+            ),
+            flush=True,
+        )
+    )
+
+
 def _positions_card(ctx: PageContext) -> str:
     paper = ctx.paper
     if not paper.available:
@@ -1158,6 +1421,7 @@ def render_overview(ctx: PageContext) -> str:
         + _market_card(ctx)
         + _paper_card(ctx)
         + "</div></div>"
+        + _runner_card(ctx)
         + "<div class='grid grid--two'>"
         + _positions_card(ctx)
         + "<div class='grid'>" + _health_card(ctx) + _safety_card() + "</div>"
@@ -1468,6 +1732,7 @@ def render_positions(ctx: PageContext) -> str:
             "into this build, and no position can be opened, changed, or closed here.",
         )
         + _positions_card(ctx)
+        + _runner_card(ctx)
         + card(
             "About this ledger",
             "<p class='small muted' style='margin:0'>Fills come from the offline paper engine. "
@@ -1506,6 +1771,7 @@ def render_activity(ctx: PageContext) -> str:
             right=data_chip(ctx.paper_label),
             flush=True,
         )
+        + _runner_card(ctx)
     )
     return render_shell(ctx, body)
 
@@ -1550,6 +1816,395 @@ def render_health(ctx: PageContext) -> str:
     return render_shell(ctx, body)
 
 
+def _kind_chip(kind: str) -> str:
+    if kind == "MT5_TICK_EXPORT":
+        return chip("broker tick export", "live")
+    if kind == "CANONICAL_CSV":
+        return chip("canonical bid/ask", "paper")
+    return chip("unrecognised", "muted")
+
+
+def _bytes(size: int) -> str:
+    value = float(size or 0)
+    for unit in ("B", "kB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _convert_form(ctx: PageContext, entry: Mapping[str, Any]) -> str:
+    nonce = escape(ctx.action_nonce)
+    name = escape(str(entry.get("name", "")))
+    # The id only has to be unique on this page; the name travels as a value.
+    slug = "".join(ch for ch in str(entry.get("name", "")) if ch.isalnum())[:24] or "file0"
+    return (
+        "<form method='post' action='/actions/ticks-convert' class='stack' style='gap:10px'>"
+        f"<input type='hidden' name='nonce' value='{nonce}'>"
+        f"<input type='hidden' name='file' value='{name}'>"
+        "<div class='data-grid'>"
+        f"<div class='data-field'><label for='pair-{slug}'>Pair (canonical)</label>"
+        f"<input type='text' id='pair-{slug}' name='pair' placeholder='EUR/USD' "
+        "autocomplete='off' spellcheck='false' required></div>"
+        f"<div class='data-field'><label for='offset-{slug}'>Server UTC offset (minutes)</label>"
+        f"<input type='number' id='offset-{slug}' name='server_offset_minutes' "
+        "placeholder='e.g. 120' step='1' min='-840' max='840'></div>"
+        f"<div class='data-field'><label for='zone-{slug}'>…or server zone (IANA)</label>"
+        f"<input type='text' id='zone-{slug}' name='server_timezone' "
+        "placeholder='Europe/Athens' autocomplete='off' spellcheck='false'></div>"
+        f"<div class='data-field'><label for='interval-{slug}'>Bar interval</label>"
+        f"<select id='interval-{slug}' name='interval_seconds'>"
+        "<option value='60'>1 minute</option><option value='300'>5 minutes</option>"
+        "<option value='900'>15 minutes</option><option value='3600'>1 hour</option>"
+        "</select></div>"
+        "</div>"
+        "<div class='row'><button class='btn btn--primary' type='submit'>"
+        "Convert to canonical CSV</button>"
+        "<span class='small muted'>The server clock basis has no default. Empty windows "
+        "are reported as gaps, never filled.</span></div>"
+        "</form>"
+    )
+
+
+def _evaluate_form(ctx: PageContext, entry: Mapping[str, Any], classes: Sequence[str]) -> str:
+    nonce = escape(ctx.action_nonce)
+    name = escape(str(entry.get("name", "")))
+    options = "".join(
+        f"<option value='{escape(value)}'>{escape(value.replace('_', ' ').lower())}</option>"
+        for value in classes
+    )
+    return (
+        f"<form method='post' action='/actions/dataset-evaluate' class='stack' style='gap:10px'>"
+        f"<input type='hidden' name='nonce' value='{nonce}'>"
+        f"<input type='hidden' name='file' value='{name}'>"
+        "<div class='data-grid'>"
+        "<div class='data-field'><label>Pair (canonical)</label>"
+        "<input type='text' name='pair' value='"
+        f"{escape(', '.join(entry.get('pairs') or []))}' autocomplete='off' spellcheck='false' required></div>"
+        "<div class='data-field'><label>Declared data class</label>"
+        f"<select name='data_class'>{options}</select></div>"
+        "</div>"
+        "<label class='small' style='display:flex;gap:8px;align-items:flex-start'>"
+        "<input type='checkbox' name='declare' value='yes' required>"
+        "<span>I exported this file myself and confirm what it is. AXIOM will not guess, "
+        "and a sample or demo file can never promote a strategy.</span></label>"
+        "<div class='row'><button class='btn btn--primary' type='submit'>"
+        "Evaluate candidates</button>"
+        "<span class='small muted'>Chronological split, walk-forward folds, and one locked "
+        "test window per dataset. Evidence is recorded; nothing is traded.</span></div>"
+        "</form>"
+    )
+
+
+def render_data(ctx: PageContext) -> str:
+    view = dict((ctx.extra or {}).get("data") or {})
+    nonce = escape(ctx.action_nonce)
+    last = dict(view.get("last") or {})
+    files = list(view.get("files") or [])
+
+    if not view.get("configured"):
+        body = (
+            notice(
+                "warn",
+                "No import folder configured",
+                "Start the workstation with --imports-dir <folder> to list and convert "
+                "files here. Nothing is downloaded, and AXIOM never invents market data.",
+            )
+            + _runner_card(ctx)
+        )
+        return render_shell(ctx, body)
+
+    head = (
+        notice(
+            "ok",
+            "Local files only",
+            "This page reads the folder below. It connects to nothing, places no order, "
+            "arms nothing, and never changes the execution mode.",
+        )
+        + card(
+            "Import folder",
+            dl(
+                [
+                    ("Folder", f"<span class='mono'>{escape(str(view.get('import_dir', '')))}</span>"),
+                    ("Files listed", escape(str(len(files)))),
+                    (
+                        "Scan error",
+                        escape(str(view.get("scan_error", "")) or "none"),
+                    ),
+                ]
+            )
+            + "<div class='step-actions'>"
+            + action_form("imports-refresh", ctx.action_nonce, "Re-scan folder", tone="ghost")
+            + "</div>",
+            hint="Drop broker exports and canonical CSVs here, then re-scan.",
+        )
+    )
+
+    rows = []
+    for entry in files:
+        name = escape(str(entry.get("name", "")))
+        flags = []
+        if entry.get("looks_like_sample"):
+            flags.append(chip("sample — never evaluated as history", "warn"))
+        if entry.get("errors"):
+            flags.append(chip(f"{entry['errors']} error(s)", "danger"))
+        if entry.get("warnings"):
+            flags.append(chip(f"{entry['warnings']} warning(s)", "warn"))
+        provenance = dict(entry.get("provenance") or {})
+        if provenance:
+            flags.append(chip("has provenance sidecar", "paper"))
+        span = ""
+        if entry.get("first_at"):
+            span = (
+                f"{escape(str(entry['first_at'])[:19])} → "
+                f"{escape(str(entry['last_at'])[:19])}"
+            )
+        detail = (
+            f"{escape(_bytes(int(entry.get('size_bytes') or 0)))}"
+            + (f" · {escape(', '.join(entry.get('pairs') or []))}" if entry.get("pairs") else "")
+            + (f" · {escape(', '.join(entry.get('timeframes') or []))}" if entry.get("timeframes") else "")
+        )
+        rows.append(
+            (
+                f"<span class='mono'>{name}</span><div class='small muted'>{detail}</div>",
+                _kind_chip(str(entry.get("kind", ""))),
+                escape(
+                    f"{entry.get('records', 0)} records"
+                    f" ({entry.get('bars', 0)} bars, {entry.get('quotes', 0)} quotes/ticks)"
+                ),
+                escape(span or "—"),
+                " ".join(flags) or chip("no flags", "muted"),
+                escape(str(entry.get("note", "")) or "—"),
+            )
+        )
+
+    body = head + card(
+        "Files in the import folder",
+        table(
+            "Files, described rather than interpreted",
+            (
+                ("File", "text"),
+                ("Kind", "text"),
+                ("Contents", "text"),
+                ("Span (UTC)", "text"),
+                ("Flags", "text"),
+                ("Next step", "text"),
+            ),
+            rows,
+            empty=empty_state(
+                "No files yet",
+                "Put a MetaTrader 5 tick export or a canonical CSV in the folder above, "
+                "then re-scan. Nothing is fetched for you.",
+            ),
+        ),
+        flush=True,
+    )
+
+    actions = []
+    tick_files = list(view.get("tick_files") or [])
+    dataset_files = list(view.get("dataset_files") or [])
+    if tick_files:
+        forms = "".join(
+            f"<div class='data-form'><div class='row' style='justify-content:space-between'>"
+            f"<span class='mono'>{escape(str(entry.get('name', '')))}</span>"
+            f"{chip(str(entry.get('records', 0)) + ' ticks', 'live')}</div>"
+            + _convert_form(ctx, entry)
+            + "</div>"
+            for entry in tick_files
+        )
+        actions.append(card("1 · Convert a broker tick export", forms))
+    if dataset_files:
+        classes = view.get("data_classes") or []
+        forms = "".join(
+            f"<div class='data-form'><div class='row' style='justify-content:space-between'>"
+            f"<span class='mono'>{escape(str(entry.get('name', '')))}</span>"
+            f"{chip(str(entry.get('bars', 0)) + ' bars', 'paper')}</div>"
+            + _evaluate_form(ctx, entry, classes)
+            + "</div>"
+            for entry in dataset_files
+        )
+        actions.append(card("2 · Evaluate candidates on this dataset", forms))
+    if not actions:
+        actions.append(
+            card(
+                "Nothing to convert or evaluate",
+                empty_state(
+                    "No usable file",
+                    "A tick export must be a broker-exported bid/ask file, and an "
+                    "evaluable dataset must be a canonical CSV you exported. A candle "
+                    "export cannot be turned into bid/ask data here.",
+                ),
+            )
+        )
+
+    last_card = ""
+    if last:
+        ok = bool(last.get("ok"))
+        if last.get("action") == "convert" and ok:
+            coverage = dict(last.get("coverage") or {})
+            gaps = list(coverage.get("gap_windows") or [])
+            gap_rows = [
+                (
+                    escape(str(item.get("window", ""))[:19]),
+                    escape(str(item.get("reason", ""))),
+                )
+                for item in gaps[:50]
+            ]
+            last_card = card(
+                "Conversion report",
+                dl(
+                    [
+                        ("Source", f"<span class='mono'>{escape(str(last.get('source_file', '')))}</span>"),
+                        ("Written", f"<span class='mono'>{escape(str(last.get('output_file', '')))}</span>"),
+                        ("Ticks read", escape(str(last.get("tick_count", 0)))),
+                        ("Bars written", escape(str(last.get("bars_written", 0)))),
+                        ("Duplicate ticks", escape(str(last.get("duplicates", 0)))),
+                        ("Rejected rows", escape(str(len(last.get("rejected_rows") or [])))),
+                        ("Server time basis", escape(str(last.get("server_time_basis", "")))),
+                        ("Time basis detail", escape(str(last.get("time_basis_detail", ""))) or "—"),
+                        ("Empty windows", escape(str(coverage.get("empty_windows", 0)))),
+                        ("Largest gap (s)", escape(str(coverage.get("largest_gap_seconds", "0")))),
+                        (
+                            "Trailing partial window",
+                            escape(str(coverage.get("trailing_partial_window", "")) or "none"),
+                        ),
+                        ("Source SHA-256", f"<span class='mono'>{escape(str(last.get('source_sha256', ''))[:32])}…</span>"),
+                        ("Provenance", f"<span class='mono'>{escape(str(last.get('provenance_path', '')))}</span>"),
+                    ]
+                )
+                + (
+                    table(
+                        "Empty windows, reported not filled",
+                        (("Window start (UTC)", "text"), ("Reason", "text")),
+                        gap_rows,
+                    )
+                    if gap_rows
+                    else "<p class='small muted'>Every window in this range had ticks; no "
+                    "gaps were found.</p>"
+                ),
+                hint="Only complete windows became bars. A gap is named, never interpolated.",
+            )
+        elif last.get("action") == "evaluate" and ok:
+            results = list(last.get("results") or [])
+            result_rows = []
+            for item in results:
+                aggregate = dict(item.get("aggregate") or {})
+                result_rows.append(
+                    (
+                        f"<span class='mono'>{escape(str(item.get('candidate_id', '')))}</span>",
+                        chip(
+                            str(item.get("status", "")),
+                            "ok" if item.get("status") == "SELECTED_FOR_PAPER" else "warn",
+                        ),
+                        escape(
+                            ", ".join(item.get("failed_criteria") or [])
+                            or str(item.get("ineligible_reason", ""))
+                            or "—"
+                        ),
+                        escape(str(aggregate.get("return_fraction", "—"))),
+                        escape(str(aggregate.get("max_drawdown_fraction", "—"))),
+                        escape(str(aggregate.get("closed_trades", "—"))),
+                    )
+                )
+            last_card = card(
+                "Evaluation report",
+                dl(
+                    [
+                        ("Dataset", f"<span class='mono'>{escape(str(last.get('dataset_id', '')))}</span>"),
+                        ("Pair", escape(str((last.get("meta") or {}).get("pair", "")))),
+                        ("Bars", escape(str(last.get("bars", 0)))),
+                        ("Declared data class", escape(str(last.get("data_class", "")))),
+                        (
+                            "Locked test window",
+                            chip(
+                                "spent on this dataset" if last.get("locked_test_spent") else "not spent",
+                                "warn" if last.get("locked_test_spent") else "muted",
+                            ),
+                        ),
+                        (
+                            "Candidates selected",
+                            escape(", ".join(last.get("selected") or []) or "none"),
+                        ),
+                    ]
+                )
+                + table(
+                    "Candidate evidence on the sample you supplied",
+                    (
+                        ("Candidate", "text"),
+                        ("Status", "text"),
+                        ("Why not selected", "text"),
+                        ("Return (gross of nothing)", "num"),
+                        ("Max drawdown", "num"),
+                        ("Closed trades", "num"),
+                    ),
+                    result_rows,
+                )
+                + "<p class='small muted' style='margin-top:10px'>"
+                + escape(str(last.get("note", "")))
+                + " Assumptions: "
+                + escape("; ".join(last.get("assumptions") or []))
+                + "</p>",
+                hint="Evidence, not a forecast. Paper results follow only from the simulated lane.",
+            )
+        else:
+            last_card = card(
+                "Last action",
+                "<div class='notice notice--warn' role='alert'><div><strong>"
+                + escape(str(last.get("reason", "refused")))
+                + "</strong><p>"
+                + escape(str(last.get("detail", "")) or "Nothing was written.")
+                + "</p></div></div>",
+                hint="The folder is unchanged and nothing was evaluated.",
+            )
+
+    evidence = dict(view.get("evidence") or {})
+    evidence_rows = []
+    for row in list(evidence.get("rows") or []):
+        evidence_rows.append(
+            (
+                f"<span class='mono'>{escape(str(row.get('candidate_id', '')))}</span>",
+                chip(
+                    str(row.get("status", "")),
+                    "ok" if row.get("selected") else "muted",
+                ),
+                escape(str(row.get("dataset_id", "")) or "—"),
+                escape(str(row.get("data_class", "")) or "—"),
+                escape(str(row.get("evaluated_at", ""))[:19] or "—"),
+                escape(", ".join(row.get("failed_criteria") or []) or str(row.get("detail", "")) or "—"),
+            )
+        )
+    evidence_card = card(
+        "Recorded evidence",
+        table(
+            "What the research database holds for each candidate",
+            (
+                ("Candidate", "text"),
+                ("Status", "text"),
+                ("Dataset", "text"),
+                ("Data class", "text"),
+                ("Evaluated (UTC)", "text"),
+                ("Blocking criteria", "text"),
+            ),
+            evidence_rows,
+            empty=empty_state(
+                "No evidence recorded",
+                "No candidate has been evaluated on an imported dataset yet."
+                if evidence.get("available", True)
+                else f"Evidence store unavailable ({escape(str(evidence.get('reason', '')))}).",
+            ),
+        ),
+        hint="The paper runner reads exactly this; it will not start without a selected candidate.",
+    )
+
+    body = (
+        head
+        + (last_card if last_card else "")
+        + "".join(actions)
+        + evidence_card
+        + _runner_card(ctx)
+    )
+    return render_shell(ctx, body)
+
 def render_message(ctx: PageContext, *, tone: str, title: str, message: str, actions: str = "") -> str:
     body = (
         f"<div class='notice notice--{escape(tone)}' role='alert'><div><strong>{escape(title)}</strong>"
@@ -1577,6 +2232,7 @@ PAGES = {
     "account": render_account,
     "positions": render_positions,
     "activity": render_activity,
+    "data": render_data,
     "health": render_health,
 }
 
@@ -1593,6 +2249,7 @@ __all__ = [
     "STYLES",
     "render_account",
     "render_activity",
+    "render_data",
     "render_connecting",
     "render_health",
     "render_message",

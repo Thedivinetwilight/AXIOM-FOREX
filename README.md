@@ -242,12 +242,115 @@ from the offline paper platform, not from your broker. Session-time values come 
 declared calendar and are marked indicative until your broker's sessions, holidays, and DST
 rules are confirmed.
 
-The interface contains exactly eight form actions: `connect`, `disconnect`,
-`acknowledge-sign-in`, `confirm`, `unconfirm`, `symbols`, and the two execution-mode actions
-`mode-paper` and `mode-live`. There is no endpoint that can place an order, arm trading, switch
-accounts, or change broker settings; the mode actions never connect, submit, or arm anything,
-and they are refused without the page's per-process nonce. There is no JSON API, no polling,
-and no timer.
+The interface contains exactly ten form actions: `connect`, `disconnect`,
+`acknowledge-sign-in`, `confirm`, `unconfirm`, `symbols`, the two execution-mode actions
+`mode-paper` and `mode-live`, and the paper runner's `runner-start` / `runner-stop`. There is no
+endpoint that can place an order, arm trading, switch accounts, or change broker settings; the
+mode actions never connect, submit, or arm anything, the runner actions only start and stop
+*simulated* cycles, and all of them are refused without the page's per-process nonce. There is
+no JSON API.
+
+## Paper strategy runner (real-time, paper fills only)
+
+`axiom_forex/paper_runner/` runs one documented candidate strategy against completed bars and
+sends every signal through the existing planner, pre-trade gate, paper engine, reservations,
+settlement, and ledger. It cannot call `order_send`, cannot arm live execution, and cannot change
+the execution mode: it refuses to run unless the mode is `PAPER`. Full detail, including every
+reason code and every fail-closed path: [docs/PAPER_RUNNER.md](docs/PAPER_RUNNER.md).
+
+Three preconditions, in order, because a strategy is a hypothesis until the data says otherwise:
+
+1. **Audit what history you have.** `python -m axiom_forex.cli data-audit --evaluate-markdown`
+   lists the canonical CSVs in `imports/`, flags anything that is not canonical or is only a
+   format example, and lists what has actually been imported. Nothing is downloaded or guessed.
+   A fresh checkout ships a 6-bar **format example**, not market data.
+2. **Evaluate once, on your own licensed history.** `python -m axiom_forex.cli paper-evaluate
+   --import-path imports/YOUR_EXPORT.csv --import-data-class USER_SUPPLIED_HISTORICAL ...`
+   splits the sample chronologically (60/20/20), runs the fixed candidate grid plus baselines,
+   and spends the **locked test window once per dataset**. Costs are the spread in your data plus
+   the platform's commission, slippage, and swap model; fills are the next bar's executable side.
+   Predeclared criteria (minimum 30 closed test trades, 10% drawdown cap, positive validation and
+   test net P&L after costs, at least 3 walk-forward folds with 60% positive, no gate rejections,
+   usable data quality, promoting data class) decide whether a candidate is `SELECTED_FOR_PAPER`,
+   `REJECTED`, or `INSUFFICIENT_EVIDENCE`. **Demo and fixture data can never select a strategy.**
+3. **Run it.** `python -m axiom_forex.workstation.launch --paper-runner
+   --paper-runner-source terminal` (or `--simulate --paper-runner --paper-runner-source replay`
+   for an offline, clearly labelled replay). The *Paper strategy runner* panel on Overview and
+   Positions shows running/stopped, the last tick, signal, and fill times, the selected strategy
+   and its parameters, the feed's data class, the counters, and a reason for every quiet cycle.
+   **Start runner** begins cycles; **Stop runner** (or Ctrl+C) ends them. Restarting with the same
+   `--paper-runner-database` restores the ledger and counters and then waits for an explicit Start.
+
+### Importing and evaluating from the workstation itself
+
+The same three steps are on the **Data & evaluation** page (`/data`), so you do not need a
+terminal for them. Start the workstation with the runner flags (`--paper-runner
+--paper-runner-provider-setup <file>` adds the page's evaluation platform), drop your MT5 tick
+export into `imports/` (or point at another folder with `--imports-dir <folder>`), then:
+
+1. **Re-scan folder.** Every file is listed with its kind, records, span, and flags. A file whose
+   name starts with `SAMPLE` is marked as a sample and can never be evaluated as history.
+2. **Convert** a broker tick export. You must type the pair and the *server's* UTC offset (or its
+   IANA zone) — there is no default, because a guessed time basis would silently shift every bar.
+   The conversion writes the canonical CSV plus a provenance sidecar next to it and reports the
+   bars written, the ticks read, rejected rows, duplicates, and every empty window as a gap. It
+   never fills a gap, never splits a candle, and never derives one side of the quote from the other.
+3. **Evaluate** the canonical file. Declare its data class (historical / demo / production) and tick
+   the declaration box; AXIOM will not guess. The same chronological split, walk-forward folds,
+   locked test window, costs, and criteria as `paper-evaluate` run here, the evidence is recorded in
+   the runner's own database, and the page shows each candidate's status and exactly which criterion
+   blocked it. The locked window is spent once per dataset — re-running it is refused, because that
+   would turn a test set into a tuning set.
+
+Nothing on that page connects anywhere, places an order, arms anything, or changes the mode. Every
+form is nonce-guarded and the page renders with no JavaScript at all.
+
+It fails closed on live mode, an unselected candidate, an invalid instrument spec, an unresolved
+order, an intent without an order, a stale tick, a data gap, a missing price, a closed market, a
+gate refusal, or a lost terminal — each with its own reason code, none of which trades. The
+intent is written to SQLite *before* the paper engine executes, so a crash between the two makes
+the next start refuse rather than guess.
+
+### Real broker symbols and the live path
+
+Two additions make the runner usable on a symbol your own terminal quotes, and make live execution
+a real path rather than a label:
+
+- **The provider lane.** `--paper-runner-provider-setup ./provider_setup.local.json` builds the
+  paper platform from *your* terms plus the **connected terminal's own symbol catalogue**:
+  `brokers/mt5/catalogue.py` resolves the broker symbol exactly (explicit name, then
+  `canonical + suffix`, then the bare six letters), refuses an ambiguity, and builds the spec from
+  `symbol_info` cross-checked against your document. `config/provider_setup.py` loads the account,
+  costs, swap cards, risk limits, entry cap, calendar, and execution terms, and refuses a document
+  that is missing any of them or that looks like it holds a credential. Conversion rates come from
+  the broker's own quotes (`paper_runner/conversion.py`), labelled `DIRECT`, `INVERSE`, or `CROSS`,
+  and a leg that cannot be derived refuses the build instead of guessing.
+- **Tick history.** `python -m axiom_forex.cli convert-ticks --ticks-path <MT5 tick export>
+  --ticks-pair EUR/USD --ticks-server-offset-minutes <offset>` turns a real two-sided tick export
+  into the canonical bid/ask CSV plus a provenance sidecar (source hash, tick counts, coverage, every
+  gap, the declared server offset, `DERIVED_FROM_BROKER_TICKS`). It refuses a candle export, an
+  unsorted file, a crossed quote, and an unspecified or ambiguous time basis.
+- **The live leg.** `paper_runner/live.py` takes an approved plan through the *same* pre-trade gate
+  the paper path uses, wraps the approved intent, and routes it through
+  `ExecutionRouter.route_live` → `MT5TradingAdapter.submit` → `order_send`, books the broker's own
+  fill back into the ledger the gate reads, then reconciles positions against MT5. It lists every
+  blocker it can see (`mode_not_live`, `live_not_confirmed`, `live_not_armed`,
+  `live_account_mismatch`, `unresolved_order_present`, `duplicate_request`,
+  `live_positions_mismatch`, `live_fill_not_booked`, …), submits each plan once, and treats an
+  unknown outcome as unresolved: never resent, disarmed, blocked until broker history explains it.
+  Switching modes never submits anything, and the leg holds no order-building code.
+- **The live entry point.** `axiom live-run` assembles the provider platform, the planner, the
+  gate, the approved candidate, and the live leg in one bounded, reconciled run. It refuses unless
+  the adapter is already connected *and* armed, so starting a runner can never arm a broker.
+
+It is proven against the **fake** MetaTrader 5 module only: no real order has been placed and no
+account has been contacted. Broker-specific symbols, filling modes, retcodes, and margin behaviour
+remain unverified until you run it on Windows with your own account.
+
+Reported honestly: no market data is included, no candidate has been evaluated on real licensed
+history here, and no profitability or live-readiness claim is made. Win rate is always reported
+next to net expectancy after costs, drawdown, trade count, and losing periods — including when
+they are poor.
 
 ## Safety
 

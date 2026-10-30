@@ -192,11 +192,322 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not open the dashboard in your default browser",
     )
     parser.add_argument("--print-prerequisites", action="store_true", help="check the machine and exit")
+    # -- paper strategy runner (opt-in; paper fills only, never live) --------
+    parser.add_argument(
+        "--paper-runner",
+        action="store_true",
+        help=(
+            "enable the paper strategy runner panel. It simulates fills from "
+            "completed bars into the local paper ledger and never sends an order"
+        ),
+    )
+    parser.add_argument(
+        "--paper-runner-provider-setup",
+        default=None,
+        help=(
+            "build the lane from this operator setup document and the connected "
+            "terminal's own symbols (text, provided by the operator); implies "
+            "--paper-runner"
+        ),
+    )
+    parser.add_argument(
+        "--paper-runner-pair",
+        default=None,
+        help="pair from the provider setup to paper trade (default: the first one)",
+    )
+    parser.add_argument(
+        "--paper-runner-database",
+        default=None,
+        help=(
+            "durable paper database for the runner (default: next to the settings "
+            "file, so state survives a restart)"
+        ),
+    )
+    parser.add_argument(
+        "--paper-runner-source",
+        default="terminal",
+        choices=("terminal", "replay"),
+        help=(
+            "terminal: aggregate the connected terminal's bid/ask ticks into bars; "
+            "replay: walk the platform's own stored bars offline (labelled REPLAY)"
+        ),
+    )
+    parser.add_argument(
+        "--paper-runner-interval",
+        type=int,
+        default=60,
+        help="bar interval in seconds for the terminal feed (default 60)",
+    )
+    parser.add_argument(
+        "--paper-runner-quote-age",
+        default="5",
+        help="maximum age of the newest tick, in seconds, before the runner refuses",
+    )
+    parser.add_argument(
+        "--imports-dir",
+        default=None,
+        help=(
+            "folder the Data & evaluation page lists and converts (default: the "
+            "repository's imports/ folder). Nothing is ever downloaded into it"
+        ),
+    )
+    parser.add_argument(
+        "--paper-runner-quantity",
+        default=None,
+        help="paper quantity per entry (default: the platform's configured quantity)",
+    )
+    parser.add_argument(
+        "--paper-runner-candidate",
+        default="trend_pullback_v1_8_21",
+        help="candidate id from axiom_forex.paper_runner.strategy.candidate_family()",
+    )
     return parser
+
+
+def _runner_db_path(args, settings_path: Path) -> str:
+    """The one durable paper/research database this process uses."""
+
+    return getattr(args, "paper_runner_database", None) or str(
+        settings_path.parent / "paper_runner.local.sqlite3"
+    )
+
+
+def _evaluation_platform_builder(args, app, settings_path: Path):
+    """Build the platform an evaluation runs on: the *same* terms as the lane.
+
+    Nothing here connects on its own.  With a provider setup the catalogue is
+    read from the terminal the operator already connected in the browser, so a
+    dataset is scored against the broker's real spec; without one, the fixture
+    lane is used and the page says so.
+    """
+
+    provider_setup = getattr(args, "paper_runner_provider_setup", None)
+    db_path = _runner_db_path(args, settings_path)
+
+    def build(pair: str):
+        from axiom_forex.facade import build_fixture_platform
+        from axiom_forex.workstation.dataflow import DataflowRefused
+
+        if not provider_setup:
+            return build_fixture_platform(database_path=db_path), None
+        try:
+            return _provider_platform(app, provider_setup, db_path, pair), None
+        except RuntimeError as exc:
+            reason, _, detail = str(exc).partition(": ")
+            raise DataflowRefused(reason or "platform_unavailable", detail)
+
+    return build
+
+
+def _provider_platform(app, provider_setup, db_path, pair=None):
+    from axiom_forex.brokers.mt5.catalogue import SymbolRequest, build_catalogue
+    from axiom_forex.config.provider_setup import load_provider_setup
+    from axiom_forex.database.repository import ForexRepository
+    from axiom_forex.paper_runner.provider import build_provider_platform as _build
+
+    terminal = app.wizard.session.terminal
+    if terminal is None:
+        raise RuntimeError(
+            "terminal_not_connected: press Connect in the browser, then Start"
+        )
+    setup = load_provider_setup(provider_setup)
+    pair = pair or setup.pairs()[0]
+    catalogue_inputs = []
+    for terms in setup.symbols:
+        catalogue_inputs.append(
+            SymbolRequest(
+                pair=terms.pair,
+                pip_size=terms.pip_size,
+                calendar_id=terms.calendar_id,
+                calendar_version=terms.calendar_version,
+                correlation_group=terms.correlation_group,
+                margin_multiplier=terms.margin_multiplier,
+                spec_version=terms.spec_version,
+                broker_symbol=terms.broker_symbol,
+                suffix=terms.suffix,
+                source=terms.source,
+            )
+        )
+    report = build_catalogue(terminal, catalogue_inputs)
+    resolved = report.resolved_for(pair)
+    if resolved is None:
+        refusal = next(
+            (item for item in report.refused if item.pair == pair), None
+        )
+        detail = (
+            f"{getattr(refusal, 'reason', '')}: {getattr(refusal, 'detail', '')}"
+            if refusal is not None
+            else "pair_not_in_setup"
+        )
+        raise RuntimeError(f"symbol_unresolved: {detail}")
+    symbols = tuple(terminal.symbol_names())
+    symbol_of_pair = {
+        (item.spec.base_currency, item.spec.quote_currency): item.broker_symbol
+        for item in report.resolved
+    }
+    platform, refusal = _build(
+        setup=setup,
+        resolved=resolved,
+        repository=ForexRepository(db_path),
+        market=terminal,
+        terminal=terminal,
+        symbols=symbols,
+        symbol_of_pair=symbol_of_pair,
+    )
+    if platform is None:
+        raise RuntimeError(f"{refusal.reason}: {refusal.detail}")
+    return platform
+
+
+def _build_runner_host(args, app, settings_path: Path):
+    """Wire the runner's own thread, or explain why it could not be wired.
+
+    The runner gets a *separate*, durable paper database: the workstation's
+    fixture platform is in-memory and would lose the runner's book on exit.  It
+    also gets its own thread, because the platform's SQLite connection and its
+    portfolio are not shared between threads.
+
+    With ``--paper-runner-provider-setup`` the platform is built from that
+    operator document plus the *connected* terminal's own symbol catalogue, so the
+    runner trades the broker's real symbol with the broker's own terms.  That
+    build is deferred to the first Start: the catalogue cannot be read before the
+    operator presses Connect, and inventing instruments meanwhile is exactly what
+    this project refuses to do.
+    """
+
+    from decimal import Decimal
+
+    from .mode import PAPER
+
+    db_path = _runner_db_path(args, settings_path)
+    try:
+        from axiom_forex.facade import build_fixture_platform
+        from axiom_forex.paper_runner.feed import (
+            FeedPolicy,
+            LateBoundMarketData,
+            ReplayBarFeed,
+            TerminalBarFeed,
+        )
+        from axiom_forex.paper_runner.host import PaperRunnerHost, lane_from_platform
+        from axiom_forex.paper_runner.journal import RunnerJournal
+        from axiom_forex.paper_runner.runner import PaperStrategyRunner, RunnerConfig
+        from axiom_forex.paper_runner.strategy import candidate_family
+    except Exception as exc:
+        print(f"[axiom-workstation] paper runner unavailable: {type(exc).__name__}", file=sys.stderr)
+        return None
+
+    provider_setup = getattr(args, "paper_runner_provider_setup", None)
+
+    def build_platform():
+        if provider_setup:
+            return _provider_platform(
+                app,
+                provider_setup,
+                db_path,
+                getattr(args, "paper_runner_pair", None),
+            )
+        return build_fixture_platform(database_path=db_path)
+
+    def build_feed(platform):
+        if provider_setup:
+            from axiom_forex.paper_runner.provider import build_provider_feed
+
+            return build_provider_feed(
+                platform=platform,
+                terminal=app.wizard.session.terminal,
+                interval_seconds=max(int(args.paper_runner_interval), 1),
+                max_quote_age_seconds=Decimal(str(args.paper_runner_quote_age)),
+            )
+        if args.paper_runner_source == "replay":
+            return ReplayBarFeed(bars=tuple(platform.bars))
+        policy = FeedPolicy(
+            interval_seconds=max(int(args.paper_runner_interval), 1),
+            max_quote_age_seconds=Decimal(str(args.paper_runner_quote_age)),
+        )
+        # The session may not be connected yet (and may disconnect later): the
+        # proxy asks for the current quote surface on every poll, so a Connect
+        # starts the feed and a Disconnect makes the next poll fail closed.
+        market = LateBoundMarketData(
+            lambda: app.wizard.session.market_data(policy.freshness())
+        )
+        return TerminalBarFeed(market=market, spec=platform.spec, policy=policy)
+
+    def build_runner(platform, feed):
+        lane = lane_from_platform(platform)
+        from dataclasses import replace as _replace
+
+        from axiom_forex.paper_runner.evaluation import latest_evidence
+
+        chosen = next(
+            (
+                item
+                for item in candidate_family()
+                if item.candidate_id == args.paper_runner_candidate
+            ),
+            None,
+        )
+        if chosen is None:
+            raise ValueError("unknown_candidate_id")
+        evidence = latest_evidence(
+            repository=platform.repository, candidate_id=chosen.candidate_id
+        )
+        candidate = _replace(chosen, evidence=dict(evidence or {}))
+        quantity = Decimal(
+            str(
+                args.paper_runner_quantity
+                or getattr(platform.execution_config, "quantity", None)
+                or platform.spec.min_quantity
+            )
+        )
+        return PaperStrategyRunner(
+            lane=lane,
+            feed=feed,
+            strategy=candidate.build(),
+            candidate=candidate,
+            config=RunnerConfig(
+                run_id=f"paper-runner-{chosen.candidate_id}",
+                symbol=platform.pair,
+                quantity=quantity,
+                pause_seconds=0.25,
+            ),
+            mode=app.mode,
+            journal=RunnerJournal(
+                repository=platform.repository, audit_log=platform.audit_log
+            ),
+        )
+
+    host = PaperRunnerHost(
+        build_platform=build_platform,
+        build_feed=build_feed,
+        build_runner=build_runner,
+        defer_platform=bool(provider_setup),
+    )
+    view = host.start()
+    if not view.get("available", True):
+        print(
+            f"[axiom-workstation] paper runner could not start: {view.get('error', '')}",
+            file=sys.stderr,
+        )
+        return None
+    if provider_setup:
+        print(
+            "[axiom-workstation] paper runner ready (broker symbols from the "
+            "connected terminal; press Connect, then Start)"
+        )
+    else:
+        print(
+            f"[axiom-workstation] paper runner ready ({args.paper_runner_source} feed, paper only)"
+        )
+    return host
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Naming a provider setup is already a request for the runner: requiring the
+    # operator to remember a second flag would only produce "no runner configured"
+    # after they had configured one.
+    if getattr(args, "paper_runner_provider_setup", None):
+        args.paper_runner = True
     settings_path = Path(args.settings)
 
     # Read the document once, here, and let the environment report use the same
@@ -262,6 +573,16 @@ def main(argv: list[str] | None = None) -> int:
         # pane; a session attached to a real terminal never is.
         allow_framing=args.simulate,
     )
+    # The data page's folder and its read-only view of the research store.
+    # Neither connects anywhere: the folder is read, the database is opened
+    # read-only, and only an explicit action writes.
+    app.import_dir = Path(args.imports_dir) if args.imports_dir else _repo_root() / "imports"
+    app.research_db_path = _runner_db_path(args, settings_path)
+    if args.paper_runner:
+        app.runner = _build_runner_host(args, app, settings_path)
+        app.evaluation_platform_builder = _evaluation_platform_builder(
+            args, app, settings_path
+        )
 
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and not args.simulate:
@@ -300,6 +621,12 @@ def main(argv: list[str] | None = None) -> int:
     print("  stop       Ctrl+C")
     print("")
     print(f"  execution  {app.mode_view().get('short', 'PAPER')} (chosen in the browser)")
+    if args.paper_runner:
+        print(
+            "  runner     paper only, source="
+            f"{args.paper_runner_source}, candidate={args.paper_runner_candidate}"
+        )
+        print("             it never sends an order and never arms live execution")
     print("  It never reconnects and never accepts an MT5 password.")
     print("  Connecting happens only when you press Connect in the browser;")
     print("  switching execution mode never places an order.")
@@ -319,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.shutdown()
         server.server_close()
+        if getattr(app, "runner", None) is not None:
+            app.runner.close()
     return 0
 
 
