@@ -356,6 +356,21 @@ def test_the_pages_state_every_remaining_blocker_when_connected():
     assert "Data &amp; evaluation" in html or "Data & evaluation" in html
 
 
+def test_a_configured_but_missing_setup_file_is_its_own_blocker(tmp_path):
+    app = app_with_runner(
+        _ViewRunner({"available": True, "pending": False, "running": False, "blockers": []}),
+        tmp_path,
+        provider_setup_path="provider_setup.local.json",
+        runner_source="terminal",
+        project_root=str(tmp_path),
+    )
+    reasons = [item["reason"] for item in app.runner_setup_blockers({}, {"dataset_files": [], "evidence": {}})]
+    assert "provider_setup_file_missing" in reasons
+    _, html = app.page("/positions")
+    assert "provider_setup_file_missing" in html
+    assert "Provider setup" in html
+
+
 def test_no_imported_dataset_and_no_evidence_are_named_separately(tmp_path):
     app = app_with_runner(
         _ViewRunner({"available": True, "pending": False, "running": False, "blockers": []}),
@@ -371,11 +386,14 @@ def test_no_imported_dataset_and_no_evidence_are_named_separately(tmp_path):
 
 
 def test_a_connected_session_with_an_approved_dataset_shows_no_setup_blocker(tmp_path):
+    # The configured setup file has to exist: a missing one is its own blocker.
+    (tmp_path / "provider_setup.local.json").write_text("{}", encoding="utf-8")
     app = app_with_runner(
         _ViewRunner({"available": True, "pending": False, "running": False, "blockers": []}),
         tmp_path,
         provider_setup_path="provider_setup.local.json",
         runner_source="terminal",
+        project_root=str(tmp_path),
     )
     # A session that really is connected, and a data view that reports one
     # evaluable file and one selected candidate.  The blockers must disappear;

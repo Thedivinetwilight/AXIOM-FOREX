@@ -122,7 +122,8 @@ echo     commit  %AFTER%
 echo     python  %VENV_PY%
 echo     MetaTrader5 package: %MT5_NOTE%
 echo.
-echo   mt5_settings.local.json, .venv, paper_runner.local.sqlite3, imports\,
+echo   mt5_settings.local.json, provider_setup.local.json, .venv,
+echo   paper_runner.local.sqlite3, imports\,
 echo   and your other files were left exactly as they were.
 echo.
 echo   Start the workstation with:

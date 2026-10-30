@@ -230,6 +230,17 @@ def test_the_local_settings_file_is_never_written_moved_or_deleted():
     assert "untouched" in text or "left as they" in text
 
 
+def test_the_local_provider_setup_file_is_never_written_moved_or_deleted():
+    for line in executed_lines():
+        assert "provider_setup" not in line.lower(), line
+    text = script_text()
+    # Named only to promise that the operator's terms file survives the update.
+    assert "provider_setup.local.json" in text
+    # ...and it is ignored by Git, so a dirty-tree check can never trip on it.
+    ignore = Path(".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "*.local.json" in ignore
+
+
 def test_it_refreshes_the_existing_venv_without_recreating_it():
     text = script_text()
     lines = executed_lines()

@@ -612,6 +612,11 @@ def test_the_post_allowlist_is_exactly_the_setup_and_mode_actions():
         "imports-refresh",
         "ticks-convert",
         "dataset-evaluate",
+        # The guided provider setup: writes one local, Git-ignored document from
+        # terms the operator types plus facts the terminal reports. It never
+        # reads mt5_settings.local.json, never stores a credential, and sends
+        # nothing.
+        "provider-setup-save",
     }
 
 

@@ -14,6 +14,11 @@ The surface is deliberately tiny:
     into the canonical CSV, or evaluate the candidate grid on one canonical file.
     They read and write *local files and the research database only*: they never
     connect anywhere, never place an order, and never change the execution mode.
+``POST /actions/{provider-setup-save}``
+    Write ``provider_setup.local.json`` from values the operator typed plus the
+    account facts the connected terminal reports. Validated by the same loader
+    the runner uses, so a saved file is one the runner accepts. It never reads or
+    writes ``mt5_settings.local.json`` and refuses any credential field.
 ``POST /actions/{mode-paper,mode-live}``
     The execution-mode switch, and the whole of it. ``mode-paper`` is immediate
     and unconditional. ``mode-live`` recomputes the preflight, refuses while any
@@ -63,6 +68,7 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/account": ("account", "Account & symbols"),
     "/positions": ("positions", "Positions"),
     "/data": ("data", "Data & evaluation"),
+    "/provider-setup": ("provider-setup", "Provider setup"),
     "/activity": ("activity", "Activity"),
     "/health": ("health", "System health"),
     "/mode": ("mode", "Trading mode"),
@@ -106,6 +112,9 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "imports-refresh",
         "ticks-convert",
         "dataset-evaluate",
+        # The guided provider setup. It writes one local, Git-ignored document
+        # (provider_setup.local.json) and never reads or touches the MT5 settings.
+        "provider-setup-save",
     }
 )
 
@@ -220,6 +229,9 @@ class WorkstationApp:
     #: Where the runner's prices come from: "terminal" or "replay".  A replay
     #: build is a labelled offline walk, not a live lane, and says so.
     runner_source: str = ""
+    #: The project root: where ``provider_setup.local.json`` is written.  It is
+    #: deliberately the same folder the launcher and the updater use.
+    project_root: str = ""
 
     def __post_init__(self) -> None:
         if self.paper is None and self.platform is not None:
@@ -322,20 +334,43 @@ class WorkstationApp:
                     "hint": "Press Connect on the Setup page, then start the runner.",
                 }
             )
-        if self.runner_source == "terminal" and not self.provider_setup_path:
-            blockers.append(
-                {
-                    "reason": "provider_setup_missing",
-                    "message": (
-                        "The runner was started without a provider setup document, so "
-                        "it has no broker symbol, costs, swap, or risk limits to use."
-                    ),
-                    "hint": (
-                        "Start the workstation with "
-                        "--paper-runner --paper-runner-provider-setup <file>."
-                    ),
-                }
-            )
+        if self.runner_source == "terminal":
+            if not self.provider_setup_path:
+                blockers.append(
+                    {
+                        "reason": "provider_setup_missing",
+                        "message": (
+                            "The runner was started without a provider setup document, so "
+                            "it has no broker symbol, costs, swap, or risk limits to use."
+                        ),
+                        "hint": (
+                            "Open Provider setup to create provider_setup.local.json, then "
+                            "start with --paper-runner --paper-runner-provider-setup <file>."
+                        ),
+                    }
+                )
+            else:
+                from pathlib import Path as _Path
+
+                configured = _Path(self.provider_setup_path)
+                if not configured.is_absolute():
+                    configured = self.project_root_path() / configured
+                if not configured.exists():
+                    blockers.append(
+                        {
+                            "reason": "provider_setup_file_missing",
+                            "message": (
+                                "The runner is pointed at "
+                                f"{_Path(self.provider_setup_path).name}, and that file "
+                                "does not exist yet."
+                            ),
+                            "hint": (
+                                "Open Provider setup in this browser: it writes the file "
+                                "from your broker terms plus the account facts your "
+                                "terminal reports."
+                            ),
+                        }
+                    )
         if data is None:
             try:
                 data = self.data_view()
@@ -415,7 +450,12 @@ class WorkstationApp:
             execution_mode=self.mode_view(blockers=preflight.get("blockers", ())),
             preflight=preflight,
             runner=self.runner_view(data=data),
-            extra={"data": data},
+            extra={
+                "data": data,
+                "provider_setup": (
+                    self.provider_setup_view() if page == "provider-setup" else {}
+                ),
+            },
         )
 
     # -- actions -----------------------------------------------------------
@@ -565,6 +605,8 @@ class WorkstationApp:
                 "/positions",
                 "Paper runner stopped. Open paper positions remain in the local ledger.",
             )
+        if action == "provider-setup-save":
+            return self._provider_setup_save(form)
         if action in {"imports-refresh", "ticks-convert", "dataset-evaluate"}:
             return self._data_action(action, form)
         if action == "acknowledge-sign-in":
@@ -603,7 +645,10 @@ class WorkstationApp:
             return HTTPStatus.SEE_OTHER, "/data", "Import folder re-scanned."
 
         def field(name: str) -> str:
-            return str((form.get(name) or [""])[0]).strip()
+            raw = form.get(name)
+            if isinstance(raw, (list, tuple)):
+                raw = raw[0] if raw else ""
+            return str(raw if raw is not None else "").strip()
 
         if self.import_dir is None:
             return (
@@ -819,6 +864,164 @@ class WorkstationApp:
                 "reason": type(exc).__name__,
                 "rows": [],
             }
+
+    # -- guided provider setup ---------------------------------------------
+    def project_root_path(self) -> Any:
+        from pathlib import Path as _Path
+
+        return _Path(self.project_root) if self.project_root else _Path.cwd()
+
+    def provider_setup_file(self) -> Any:
+        from axiom_forex.config.provider_setup_wizard import setup_path
+
+        return setup_path(self.project_root_path())
+
+    def provider_setup_view(self) -> dict[str, Any]:
+        """What the setup page shows: the terminal's facts, and the file's state."""
+
+        from axiom_forex.config import provider_setup_wizard as wizard
+
+        session = getattr(self.wizard, "session", None)
+        facts = wizard.terminal_facts(session)
+        path = self.provider_setup_file()
+        status: dict[str, Any] = {
+            "path": str(path),
+            "exists": path.exists(),
+            "valid": False,
+            "problems": [],
+        }
+        if path.exists():
+            from axiom_forex.config.provider_setup import (
+                ProviderSetupError,
+                load_provider_setup,
+            )
+
+            try:
+                setup = load_provider_setup(path)
+            except ProviderSetupError as exc:
+                status["problems"] = [
+                    {
+                        "path": exc.reason,
+                        "kind": "invalid",
+                        "message": wizard.ERROR_HELP.get(
+                            exc.reason, f"The runner refused this document: {exc.reason}"
+                        ),
+                        "field_kind": wizard.OPERATOR,
+                    }
+                ]
+            else:
+                status["valid"] = True
+                status["summary"] = setup.audit_view()
+        return {
+            "facts": facts.audit_view(),
+            "file": status,
+            "fields": [item.audit_view() for item in wizard.FIELDS],
+            "list_formats": dict(wizard.LIST_FORMATS),
+            "example_path": str(wizard.EXAMPLE_PATH),
+            "setup_filename": wizard.SETUP_FILENAME,
+            "last": dict(self.data_result) if self.data_result.get("page") == "provider-setup" else {},
+            "blockers": self.runner_setup_blockers(
+                {"blockers": []}, self.data_view()
+            ),
+        }
+
+    def _provider_setup_save(self, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        from axiom_forex.config import provider_setup_wizard as wizard
+
+        def value_of(key: str) -> str:
+            """One form value, whether the caller passed a list (HTTP) or a string."""
+
+            raw = form.get(key)
+            if isinstance(raw, (list, tuple)):
+                raw = raw[0] if raw else ""
+            return str(raw if raw is not None else "").strip()
+
+        values = {
+            key: value_of(key) for key in form if key not in {"nonce", "overwrite"}
+        }
+        overwrite = value_of("overwrite") == "yes"
+        session = getattr(self.wizard, "session", None)
+        payload, problems = wizard.validate(values, session=session)
+        if problems:
+            self.data_result = {
+                "page": "provider-setup",
+                "action": "provider-setup-save",
+                "ok": False,
+                "problems": [item.audit_view() for item in problems],
+            }
+            self._log(f"provider setup refused: {problems[0].path}")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/provider-setup",
+                f"Nothing was written: {wizard.describe_problems(problems)}",
+            )
+        path = self.provider_setup_file()
+        try:
+            written = wizard.write_payload(payload, path, overwrite=overwrite)
+        except FileExistsError:
+            self.data_result = {
+                "page": "provider-setup",
+                "action": "provider-setup-save",
+                "ok": False,
+                "problems": [
+                    {
+                        "path": "file",
+                        "kind": "invalid",
+                        "message": (
+                            f"{path.name} already exists. Tick 'replace the existing file' "
+                            "if you mean to overwrite it."
+                        ),
+                        "field_kind": "OPERATOR",
+                    }
+                ],
+            }
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/provider-setup",
+                f"Nothing was written: {path.name} already exists.",
+            )
+        except wizard.SetupIncomplete as exc:
+            self.data_result = {
+                "page": "provider-setup",
+                "action": "provider-setup-save",
+                "ok": False,
+                "problems": exc.audit_view()["problems"],
+            }
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/provider-setup",
+                "Nothing was written: the document contained a credential field.",
+            )
+        except OSError as exc:
+            self.data_result = {
+                "page": "provider-setup",
+                "action": "provider-setup-save",
+                "ok": False,
+                "problems": [
+                    {
+                        "path": "file",
+                        "kind": "invalid",
+                        "message": f"The file could not be written ({type(exc).__name__}).",
+                        "field_kind": "OPERATOR",
+                    }
+                ],
+            }
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/provider-setup",
+                "Nothing was written: the file could not be saved.",
+            )
+        # The runner reads this path from here on, so a saved file clears the
+        # "missing provider setup" blocker without a restart.
+        self.provider_setup_path = str(written)
+        self.data_result = {"page": "provider-setup", "action": "provider-setup-save", "ok": True}
+        self._log(f"provider setup written: {written.name} (valid)")
+        return (
+            HTTPStatus.SEE_OTHER,
+            "/provider-setup",
+            f"Saved {written.name}. It is Git-ignored and stays on this machine. Next: "
+            "import broker tick history, evaluate a candidate, then start the runner.",
+        )
 
     def _log(self, message: str) -> None:
         line = f"[axiom-workstation] {message}"

@@ -421,6 +421,38 @@ available, so connecting and pressing it again is the whole recovery path.
 
 ---
 
+## 6d. The provider setup document
+
+`--paper-runner-provider-setup` points at one local JSON document of broker terms,
+schema `axiom-provider-setup-v1` (`axiom_forex/config/provider_setup.py`). The
+workstation builds it on **Provider setup** (`/provider-setup`):
+
+| Field group | Source | Notes |
+| --- | --- | --- |
+| `account.currency`, `account.leverage` | **terminal** | read from `account_info()`; the terminal wins if the form disagrees |
+| `symbols[].broker_symbol`, `suffix`, `pip_size` | **terminal** | read from `symbol_info()`; an unquoted symbol is refused by name |
+| `account.account_id`, `initial_capital`, `entry_exposure_limit` | operator | a label, your starting balance, your hard entry cap |
+| `costs.*` | operator | commission, slippage, financing; never defaulted to zero |
+| `rollover.*` and `swap[]` | operator | daily cutoff, triple-swap weekday, swap points |
+| `calendar.*` | operator | explicit session windows with `valid_from`/`valid_until`, plus holidays |
+| `conversion_rates[]` | operator | required when the account currency is not the pair's quote currency |
+| `risk.*` | operator | every limit the pre-trade gate enforces |
+| `execution.*` | operator | lot size, position count, whether shorts are allowed |
+
+The page validates with `load_provider_setup` — the runner's own loader — so a
+saved file is one the runner accepts, and a refusal names the exact field
+(`costs.commission_rate`, `calendar.valid_from`, …). Nothing is written until the
+whole document validates, and an existing file is only replaced when the operator
+ticks the replace box.
+
+The file lives in the project root as `provider_setup.local.json`, is ignored by
+Git through `*.local.json`, and the Windows updater neither reads nor moves it.
+`profiles/provider_setup.example.json` documents the schema with placeholders and
+is explicitly non-runnable; it is a different document from
+`profiles/provider_onboarding_template.json`.
+
+---
+
 ## 7. Current state, honestly
 
 * Everything above is implemented and covered by tests that run offline against

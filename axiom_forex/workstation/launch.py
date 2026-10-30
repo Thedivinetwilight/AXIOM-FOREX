@@ -638,6 +638,9 @@ def main(argv: list[str] | None = None) -> int:
     # What the runner card needs in order to state the remaining blockers in the
     # operator's own terms rather than as an exception.
     app.provider_setup_path = str(args.paper_runner_provider_setup or "")
+    # The guided setup writes provider_setup.local.json here, beside the
+    # launcher, which is where the operator's command points.
+    app.project_root = str(_repo_root())
     app.runner_source = str(args.paper_runner_source or "") if args.paper_runner else ""
     if args.paper_runner:
         app.runner = _build_runner_host(args, app, settings_path)

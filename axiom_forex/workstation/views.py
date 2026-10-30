@@ -36,6 +36,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("account", "/account", "Account & symbols"),
     ("positions", "/positions", "Positions"),
     ("data", "/data", "Data & evaluation"),
+    ("provider-setup", "/provider-setup", "Provider setup"),
     ("activity", "/activity", "Activity"),
     ("health", "/health", "System health"),
 )
@@ -47,6 +48,7 @@ ICONS: dict[str, str] = {
     "account": "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
     "positions": "M4 18V9M10 18V5M16 18v-6M22 18h-20",
     "data": "M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+    "provider-setup": "M9 3h7l4 4v14H9zM4 7v14h5M12 8h4M12 12h4M12 16h4",
     "activity": "M3 12h3l2-6 4 12 3-7h6",
     "health": "M12 21s-7-4.5-7-10a4 4 0 017-2.5A4 4 0 0119 11c0 5.5-7 10-7 10z",
     "connection": "M5 12a7 7 0 0114 0M8 12a4 4 0 018 0M12 12v0",
@@ -2227,6 +2229,253 @@ def render_data(ctx: PageContext) -> str:
     )
     return render_shell(ctx, body)
 
+# ---------------------------------------------------------------------------
+# provider setup
+# ---------------------------------------------------------------------------
+
+_SETUP_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("account", "Account", "A label, the starting balance, your declared conversion source, and the entry cap."),
+    ("costs", "Costs", "Commission, slippage, and financing, from your broker's schedule."),
+    ("rollover", "Rollover and swap", "The broker's daily cutoff, triple-swap weekday, and swap schedule."),
+    ("risk", "Risk limits", "Every limit the pre-trade gate enforces. None of them has a default."),
+    ("calendar", "Trading calendar", "The session windows the market is actually open, with validity bounds."),
+    ("execution", "Execution", "Lot size, position count, and whether shorts are allowed."),
+)
+
+
+def _setup_field(ctx: PageContext, item: Mapping[str, Any], facts: Mapping[str, Any]) -> str:
+    path = str(item.get("path", ""))
+    label = str(item.get("label", ""))
+    kind = str(item.get("kind", ""))
+    name = escape(path)
+    anchor = "f-" + "".join(ch for ch in path if ch.isalnum() or ch == "-")
+    value = ""
+    if kind == "TERMINAL":
+        value = {
+            "account.currency": str(facts.get("currency", "")),
+            "account.leverage": str(facts.get("leverage", "")),
+        }.get(path, "")
+    badge = (
+        chip("from terminal", "live")
+        if kind == "TERMINAL"
+        else chip("you supply", "warn")
+    )
+    placeholder = escape(str(item.get("placeholder", "")))
+    if kind == "TERMINAL":
+        # Read-only: the terminal's own value, and the operator cannot type over it.
+        control = (
+            f"<input type='text' id='{anchor}' value='{escape(value)}' readonly "
+            "aria-readonly='true'>"
+        )
+    else:
+        control = (
+            f"<input type='text' id='{anchor}' name='{name}' value='{escape(value)}' "
+            f"placeholder='{placeholder}' autocomplete='off' spellcheck='false'>"
+        )
+    optional = " (optional)" if item.get("optional") else ""
+    return (
+        "<div class='data-field'>"
+        f"<label for='{anchor}'>{escape(label)}{escape(optional)}</label>"
+        f"{control}"
+        f"<span class='help'>{escape(str(item.get('help', '')))}</span>"
+        f"<span>{badge}</span>"
+        "</div>"
+    )
+
+
+def _setup_textareas(ctx: PageContext, formats: Mapping[str, str]) -> str:
+    areas = []
+    for name, title, hint in (
+        ("symbols", "Symbols", "One line per pair. Blank broker symbol and pip size are filled from your terminal."),
+        ("swap", "Swap", "Long and short swap per lot per night, as your broker quotes them."),
+        ("calendar.windows", "Trading windows", "One line per session window, inside the validity bounds above."),
+        ("calendar.holidays", "Holidays", "Optional: one line per closed day."),
+        ("conversion_rates", "Conversion rates", "Required when the account currency is not the pair's quote currency."),
+    ):
+        anchor = "t-" + "".join(ch for ch in name if ch.isalnum() or ch == "-")
+        areas.append(
+            "<div class='data-field' style='grid-column:1/-1'>"
+            f"<label for='{anchor}'>{escape(title)}</label>"
+            f"<textarea id='{anchor}' name='{escape(name)}' rows='3' spellcheck='false'></textarea>"
+            f"<span class='help'>{escape(hint)}</span>"
+            f"<span class='small muted'>Format: {escape(str(formats.get(name, '')))}</span>"
+            "</div>"
+        )
+    return "".join(areas)
+
+
+def render_provider_setup(ctx: PageContext) -> str:
+    view = dict((ctx.extra or {}).get("provider_setup") or {})
+    facts = dict(view.get("facts") or {})
+    status = dict(view.get("file") or {})
+    last = dict(view.get("last") or {})
+    fields = list(view.get("fields") or [])
+    formats = dict(view.get("list_formats") or {})
+    connected = bool(facts.get("connected"))
+
+    head = notice(
+        "ok" if connected else "warn",
+        "Writes one local file, and nothing else",
+        "This page builds provider_setup.local.json from terms you type plus the "
+        "account facts your terminal reports. It never reads or changes "
+        "mt5_settings.local.json, never stores a password or token, and never "
+        "sends an order.",
+    )
+
+    if connected:
+        fact_card = card(
+            "Account facts from your terminal",
+            dl(
+                [
+                    ("Currency", escape(str(facts.get("currency", ""))) or "—"),
+                    ("Leverage", escape(str(facts.get("leverage", ""))) or "—"),
+                    ("Server", escape(str(facts.get("server", ""))) or "—"),
+                    ("Margin mode", escape(str(facts.get("margin_mode", ""))) or "—"),
+                    ("Symbols in Market Watch", escape(str(len(facts.get("symbols") or [])))),
+                ]
+            ),
+            hint="These are read from the terminal; they are the only fields AXIOM fills in for you.",
+            right=chip("terminal connected", "live", dot=True),
+        )
+    else:
+        fact_card = card(
+            "Account facts from your terminal",
+            empty_state(
+                "Not connected",
+                "Connect on the Setup page first. AXIOM will not guess your account "
+                "currency, your leverage, or a symbol's tick size. You can still read "
+                "the term list below.",
+            ),
+            right=chip("not connected", "muted", dot=True),
+        )
+
+    if status.get("exists"):
+        if status.get("valid"):
+            summary = dict(status.get("summary") or {})
+            file_body = dl(
+                [
+                    ("File", f"<span class='mono'>{escape(str(status.get('path', '')))}</span>"),
+                    ("Pairs", escape(", ".join(summary.get("pairs") or []) or "—")),
+                    ("Account currency", escape(str(summary.get("account_currency", ""))) or "—"),
+                    ("Leverage", escape(str(summary.get("leverage", ""))) or "—"),
+                    ("Cost model", escape(str(summary.get("cost_model", ""))) or "—"),
+                    ("Calendar", escape(str(summary.get("calendar_id", ""))) or "—"),
+                    ("Quantity", escape(str(summary.get("quantity", ""))) or "—"),
+                ]
+            ) + "<p class='small muted'>It loads cleanly with the runner's own loader. It is Git-ignored.</p>"
+            right = chip("valid", "ok", dot=True)
+        else:
+            problems = [dict(item) for item in status.get("problems") or []]
+            file_body = dl(
+                [("File", f"<span class='mono'>{escape(str(status.get('path', '')))}</span>")]
+            ) + _blocker_list(problems)
+            right = chip("needs attention", "warn", dot=True)
+    else:
+        file_body = empty_state(
+            "No setup file yet",
+            f"{view.get('setup_filename', 'provider_setup.local.json')} does not exist in the "
+            "project root. Fill in the terms below and save it.",
+        )
+        right = chip("not created", "muted", dot=True)
+
+    file_card = card(
+        "Current setup file",
+        file_body,
+        hint="Located in the project root, next to the launcher. Ignored by Git.",
+        right=right,
+    )
+
+    sections = []
+    for key, title, hint in _SETUP_GROUPS:
+        group_fields = [item for item in fields if str(item.get("path", "")).startswith(key + ".")]
+        if not group_fields:
+            continue
+        sections.append(
+            card(
+                title,
+                f"<div class='data-grid'>{''.join(_setup_field(ctx, item, facts) for item in group_fields)}</div>",
+                hint=hint,
+            )
+        )
+
+    form = (
+        "<form method='post' action='/actions/provider-setup-save' class='stack' style='gap:14px'>"
+        f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+        + "".join(sections)
+        + card(
+            "Symbols, swap, sessions, and rates",
+            f"<div class='data-grid'>{_setup_textareas(ctx, formats)}</div>",
+            hint=(
+                "Blank broker symbol or pip size is filled from the terminal, because the "
+                "terminal is the authority for those two. Everything else you type is "
+                "stored exactly as typed."
+            ),
+        )
+        + card(
+            "Save",
+            "<label class='small' style='display:flex;gap:8px;align-items:center'>"
+            "<input type='checkbox' name='overwrite' value='yes'>"
+            "Replace an existing provider_setup.local.json</label>"
+            "<div class='step-actions'><button class='btn btn--primary' type='submit'>"
+            "Validate and save the setup file</button>"
+            "<span class='small muted'>Validation uses the same loader the runner uses.</span></div>",
+            hint="Nothing is written until every required term validates.",
+        )
+        + "</form>"
+    )
+
+    last_card = ""
+    if last:
+        if last.get("ok"):
+            last_card = notice(
+                "ok",
+                "Setup file saved",
+                "It is local, Git-ignored, and loads with the runner's own loader.",
+            )
+        else:
+            problems = [dict(item) for item in last.get("problems") or []]
+            last_card = card(
+                "Nothing was written",
+                _blocker_list(
+                    [
+                        {
+                            "reason": str(item.get("path", "")),
+                            "message": str(item.get("message", "")),
+                            "hint": "Fix this field and save again."
+                            if item.get("kind") == "missing"
+                            else "",
+                        }
+                        for item in problems
+                    ]
+                )
+                or "<p class='small'>No detail was recorded.</p>",
+                hint="The existing file, if any, was left exactly as it was.",
+            )
+
+    blockers = list(view.get("blockers") or [])
+    blockers_card = card(
+        "What is still missing before the runner can trade paper",
+        _blocker_list(blockers)
+        or "<p class='small muted'>Nothing: the setup file exists, a dataset is imported, "
+        "and a candidate has been selected. Start the runner on Positions.</p>",
+        hint="The same list appears on Positions, so the two pages cannot disagree.",
+    )
+
+    example = card(
+        "Example document",
+        f"<p class='small'><span class='mono'>{escape(str(view.get('example_path', '')))}</span> "
+        "shows every field of the real <span class='mono'>axiom-provider-setup-v1</span> "
+        "schema. It is an example only: all of its values are placeholders and it will "
+        "not run until you replace them.</p>"
+        "<p class='small muted'>It is not "
+        "<span class='mono'>profiles/provider_onboarding_template.json</span>, which is a "
+        "different schema for a different purpose.</p>",
+        hint="Read it for the shape; do not copy it into place.",
+    )
+
+    body = head + last_card + fact_card + file_card + form + blockers_card + example
+    return render_shell(ctx, body)
+
 def render_message(ctx: PageContext, *, tone: str, title: str, message: str, actions: str = "") -> str:
     body = (
         f"<div class='notice notice--{escape(tone)}' role='alert'><div><strong>{escape(title)}</strong>"
@@ -2255,6 +2504,7 @@ PAGES = {
     "positions": render_positions,
     "activity": render_activity,
     "data": render_data,
+    "provider-setup": render_provider_setup,
     "health": render_health,
 }
 
@@ -2272,6 +2522,7 @@ __all__ = [
     "render_account",
     "render_activity",
     "render_data",
+    "render_provider_setup",
     "render_connecting",
     "render_health",
     "render_message",

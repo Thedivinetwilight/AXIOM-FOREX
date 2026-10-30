@@ -281,6 +281,35 @@ Three preconditions, in order, because a strategy is a hypothesis until the data
    **Start runner** begins cycles; **Stop runner** (or Ctrl+C) ends them. Restarting with the same
    `--paper-runner-database` restores the ledger and counters and then waits for an explicit Start.
 
+### Provider setup (`provider_setup.local.json`)
+
+The runner trades the symbol *your broker* quotes, so it needs one local document
+with your broker's terms. Build it in the browser: **Provider setup** (`/provider-setup`).
+
+* **What AXIOM fills in for you**: the account currency and leverage, and each
+  symbol's exact broker name, suffix, and tick size — all read from the connected
+  terminal (`account_info()`, `symbol_info()`). Those fields are marked
+  *from terminal* and cannot be typed over.
+* **What you supply**: commission, slippage, financing, swap, the rollover cutoff,
+  the trading calendar (session windows with validity bounds), conversion rates,
+  the risk limits, the entry cap, the lot size, and a versioned label for each.
+  Every one is marked *you supply* and is required. A blank commission is blank,
+  never `0`; a blank risk limit is a blocker, never a default.
+* **What it writes**: `provider_setup.local.json` in the project root, atomically,
+  only after the document passes the *same* loader the runner uses. It is ignored
+  by Git (`*.local.json`), and it is never read back into a page.
+* **What it never touches**: `mt5_settings.local.json` (never read, written, or
+  moved), and any credential — the loader refuses a document that contains a
+  password, token, API key, or market-access-token field.
+* **A safe example**: `profiles/provider_setup.example.json` documents the real
+  `axiom-provider-setup-v1` schema with placeholder values and a `_status` of
+  `EXAMPLE ONLY -- NOT RUNNABLE`. It is *not*
+  `profiles/provider_onboarding_template.json`, which is a different schema for a
+  different purpose.
+
+After saving, the page lists what is still missing: the required broker tick-history
+import, the evaluation, and the candidate selection.
+
 ### If the runner says it is blocked
 
 The runner card never shows an exception. Pressing **Start** either starts the
@@ -290,7 +319,8 @@ lane or reports the exact blocker, in the operator's words:
 | --- | --- | --- |
 | `terminal_not_connected` | No terminal session is open, so there are no symbols or ticks | Press **Connect** on Setup, then **Start** again |
 | `market_data_unavailable` | This session has no read-only market data (a `--simulate` preview) | Start against your terminal |
-| `provider_setup_missing` | Started without `--paper-runner-provider-setup`, so there are no broker terms | Add the flag and the document |
+| `provider_setup_missing` | Started without `--paper-runner-provider-setup`, so there are no broker terms | Add the flag, then build the document on **Provider setup** |
+| `provider_setup_file_missing` | The flag points at `provider_setup.local.json` and that file does not exist | Open **Provider setup** and save it — no restart needed |
 | `no_imported_history` | No evaluable dataset in the import folder | Export MT5 ticks, convert and evaluate them |
 | `strategy_not_evaluated` | No candidate has passed the predeclared criteria on your data | Read the blocking criterion on Data & evaluation |
 | `symbol_unresolved` | Your terminal does not quote the configured symbol | Fix the pair/suffix in the setup document; nothing is substituted |
