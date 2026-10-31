@@ -209,11 +209,22 @@ def make_bars(mids: list[Decimal], spec: Any, *, start: datetime = START) -> lis
 
 
 class Mode:
-    """Read-only stand-in for the execution-mode controller."""
+    """Read-only stand-in for the execution-mode controller.
 
-    def __init__(self, mode: str = "PAPER", live_effective: bool = False) -> None:
+    ``session_account`` is the account signature the operator confirmed when LIVE
+    was selected; the live workflow refuses orders when the terminal is on a
+    different account, so the stand-in carries it like the real controller.
+    """
+
+    def __init__(
+        self,
+        mode: str = "PAPER",
+        live_effective: bool = False,
+        session_account: str = "",
+    ) -> None:
         self.mode = mode
         self.live_effective = live_effective
+        self.session_account = session_account
 
 
 def candidate_for(evidence: dict | None = None, *, fast: int = 8, slow: int = 21):

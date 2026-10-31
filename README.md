@@ -70,7 +70,7 @@ and no background polling.
 | Mode | What it does |
 | --- | --- |
 | **Paper trading — live market data** | Reads bid/ask ticks from the terminal you connected and simulates every fill locally through the paper engine. No order is ever sent. Active by default. |
-| **Live trading — MetaTrader 5 execution** | Routes an approved, gate-passed order through the existing MT5 adapter to the account you signed in to. Off until you pass the preflight and confirm once. |
+| **Live trading — MetaTrader 5 execution** | Routes an approved, gate-passed order through the existing MT5 adapter to the account you signed in to. Selected when you confirm once, naming the account. |
 
 Execution mode and account type are different things, and the interface never conflates
 them. The **mode** (paper/live) is your decision and is remembered in
@@ -81,22 +81,23 @@ sign in to it inside MetaTrader 5 and press Disconnect, then Connect.
 
 ### Switching mode — the exact flow
 
-1. Open **Trading mode** in the left navigation (or press *Review live checks* on the
+1. Open **Trading mode** in the left navigation (or press *Trading mode* on the
    dashboard). The PAPER/LIVE indicator is in the top bar and the sidebar on **every** page.
-2. **To paper:** press *Switch to paper now*. It is immediate — no preflight, no confirmation,
-   because it can only remove execution capability.
-3. **To live:** the page runs the preflight and lists **every** genuine blocker at once, each
-   with the step that clears it — environment, settings, session, account identity, account
-   type, terminal trading permission, symbol selection, and your own confirmation. A second
-   list shows what is re-checked for *every* order in either mode (account identity, gate,
-   approved active strategy, quote freshness, drift/volume/margin, unresolved orders, arming);
-   those cannot be waived from any screen.
-4. When the blocker list is empty the page offers **one** confirmation: type
-   `ENABLE LIVE TRADING` and press *Enable live execution*. That is the only confirmation, it
-   is recorded, and it sends nothing — no order, no connection, no arming.
+2. **Both modes can be selected at any time.** No preflight, no cooldown, no completed paper
+   test, and no strategy qualification stands between you and either choice: a check that is
+   not met refuses the *order* it applies to, with its reason shown, and never takes the
+   switch away or greys it out.
+3. **To paper:** press *Switch to paper now*. It is immediate — no confirmation, because it can
+   only remove execution capability. It stops new live entries at once and **closes nothing**:
+   broker positions stay open, are listed on the page, and are yours to manage in the terminal.
+4. **To live:** the page states plainly that real-money orders may follow from the active
+   strategy, then asks for two things — type `ENABLE LIVE TRADING`, and type the signature of
+   the account connected right now. That is the only confirmation, it is recorded, and it sends
+   nothing: no order, no connection, no arming. LIVE then means LIVE-against-that-account; if
+   the terminal is later signed in elsewhere, orders are refused rather than rerouted.
 5. Switching back to paper is always one click. Disconnecting, or restarting the workstation,
    also returns to paper: a saved `LIVE` is remembered but is **never** effective in a new
-   process until you pass the preflight and confirm again.
+   process until you confirm the account again.
 
 Every switch and every refused switch is appended to `execution_mode_audit.local.json`
 (also beside your settings file) and to the platform's durable audit log when one is open. The
@@ -105,18 +106,20 @@ number, a balance, or an equity figure.
 
 Both files are `*.local.json`, so they are git-ignored and travel only with your machine.
 
-### Why live may still say "blocked"
+### Why an order may still be refused
 
-The preflight never hides a check. Two of them commonly need real work:
+Every check is listed on the page with the step that clears it, and none of them touches the
+mode switch. Two commonly need real work:
 
 * `mt5_account_mismatch` / `mt5_server_mismatch` — MetaTrader 5 is signed in to a different
   account or server than `mt5_settings.local.json` names. Sign in to the configured account
   inside the terminal, then press Disconnect and Connect again. The identity check is **not**
-  relaxed: a different account is never treated as a match.
+  relaxed: a different account is never treated as a match, and it is not the account the
+  session confirmed either, so the order is refused on both counts.
 * `strategy_not_approved` — if a deployment attaches a strategy that is not approved and
-  active, live stays blocked until it is. This repository ships **no** approved live strategy
-  and AXIOM never invents one, so live execution here can be enabled but cannot produce an
-  order until a deployment attaches its own approved strategy through
+  active, no order is submitted through it. This repository ships **no** approved live strategy
+  and AXIOM never invents one, so live mode can be selected here but cannot produce an order
+  until a deployment attaches its own approved strategy through
   `MT5SessionCycle`/`MT5TradingAdapter`.
 
 ### One-time setup on Windows
@@ -479,5 +482,5 @@ they are poor.
 ## Safety
 
 This repository must not contain credentials or secrets, and it ships no approved live strategy:
-live order routing exists only behind the execution-mode preflight, an explicit confirmation, an
-approved active strategy, arming, and the pre-trade gate. Unknown instruments, stale or incomplete quotes, missing specifications, closed markets, invalid risk calculations, unresolved orders, failed provider/broker conformance, failed provider profile onboarding, rejected or quarantined imported data, or live-mode requests fail closed and block new orders. Generic 24/5 availability is never a production default; explicit broker calendars, daily breaks, holidays, DST, weekend gaps, instrument availability, costs, financing, leverage, and account terms must be supplied and conformance-tested before any external integration is considered.
+live order routing exists only behind an explicit mode confirmation that names the connected
+account, an approved active strategy, arming, and the per-order pre-trade gate. Unknown instruments, stale or incomplete quotes, missing specifications, closed markets, invalid risk calculations, unresolved orders, failed provider/broker conformance, failed provider profile onboarding, rejected or quarantined imported data, or live-mode requests fail closed and block new orders. Generic 24/5 availability is never a production default; explicit broker calendars, daily breaks, holidays, DST, weekend gaps, instrument availability, costs, financing, leverage, and account terms must be supplied and conformance-tested before any external integration is considered.

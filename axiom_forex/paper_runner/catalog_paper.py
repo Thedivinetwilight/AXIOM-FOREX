@@ -18,13 +18,6 @@ What it refuses to do, by construction:
 * refuse to treat a short history as a finished evaluation: the run reports
   ``waiting_for_history`` and keeps collecting, it never claims a result.
 
-If it is handed a :class:`QualificationClock` it also feeds that clock one
-heartbeat per cycle, saying honestly whether the cycle was healthy.  A stale quote,
-a closed market, a disconnected terminal, or a cycle that raised pauses the clock:
-the broken time is booked as a pause and never counts toward the 24 hours.  Passing
-that clock does not, and cannot, make anything live: arming is a separate,
-deliberate operator act on a different code path.
-
 What it cannot do: change the execution mode, arm live trading, read credentials,
 touch the account, or produce a profit claim.  Every number it writes is a locally
 simulated fill from a real broker quote, labelled as such.
@@ -48,17 +41,6 @@ from ..strategies.catalog.candidates import Candidate, catalog, timeframes_for
 from ..strategies.catalog.indicators import IndicatorCache
 from ..strategies.catalog.primitives import HigherTimeframe
 from ..strategies.catalog.simulate import context_for, signals_for
-from .qualification import (
-    FAILED,
-    FAILURE_CYCLE,
-    NOT_STARTED,
-    PASSED,
-    PAUSE_CYCLE_ERROR,
-    PAUSE_OPERATOR,
-    PAUSE_STALE,
-    STOPPED,
-    QualificationClock,
-)
 
 # -- states -----------------------------------------------------------------
 IDLE = "IDLE"
@@ -305,7 +287,6 @@ class CatalogPaperTest:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         bar_window: int = DEFAULT_BAR_WINDOW,
         clock: Callable[[], datetime] = _utc_now,
-        qualification: QualificationClock | None = None,
     ) -> None:
         self._quotes = quotes
         self._watches = tuple(watches)
@@ -315,9 +296,6 @@ class CatalogPaperTest:
         self._poll = max(0.5, float(poll_seconds))
         self._bar_window = max(120, int(bar_window))
         self._clock = clock
-        self._qualification = qualification
-        self._cycle_quotes = {"fresh": 0, "stale": 0, "missing": 0}
-        self._cycle_decisions = 0
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -359,10 +337,6 @@ class CatalogPaperTest:
     @property
     def watches(self) -> tuple[Watch, ...]:
         return self._watches
-
-    @property
-    def qualification(self) -> QualificationClock | None:
-        return self._qualification
 
     # -- guards -----------------------------------------------------------
 
@@ -437,7 +411,6 @@ class CatalogPaperTest:
             self._stopped_at = ""
             self._blockers = ()
             self._restore_state()
-            self._open_qualification()
             self._write_state()
             self._record(EVENT_STARTED, {"watches": len(self._watches)})
             self._thread = threading.Thread(
@@ -461,8 +434,6 @@ class CatalogPaperTest:
                 self._reason = reason or "operator_stopped"
                 self._record(EVENT_STOPPED, {"reason": self._reason})
                 self._write_state()
-            if self._qualification is not None:
-                self._qualification.stop(reason=self._reason or reason or PAUSE_OPERATOR)
             self._thread = None
             return {"status": self._status, "reason": self._reason}
 
@@ -500,11 +471,6 @@ class CatalogPaperTest:
                     )
                     self._status = BLOCKED
                     self._reason = "cycle_error"
-                self._heartbeat(healthy=False, reason=PAUSE_CYCLE_ERROR)
-                if self._qualification is not None:
-                    self._qualification.record_failure(
-                        FAILURE_CYCLE, detail=type(error).__name__
-                    )
             self._stop.wait(self._poll)
         with self._lock:
             if self._status == RUNNING:
@@ -515,67 +481,6 @@ class CatalogPaperTest:
             self._write_state()
 
     def _cycle(self) -> None:
-        self._cycle_quotes = {"fresh": 0, "stale": 0, "missing": 0}
-        self._cycle_decisions = 0
-        self._cycle_watches()
-        self._heartbeat_from_cycle()
-
-    def _open_qualification(self) -> None:
-        """Open, or resume, the 24-hour record this run is being judged by."""
-
-        qualification = self._qualification
-        if qualification is None:
-            return
-        status = qualification.state().get("status")
-        verdict = qualification.verdict()
-        if verdict == PASSED:
-            # A completed pass is not thrown away by starting another run.
-            return
-        if verdict != FAILED:
-            if status == RUNNING:
-                # The process came back with a test already under way: the dark
-                # period is booked as a pause, never credited.
-                qualification.recover()
-                return
-            if status == STOPPED:
-                # A stop is a pause.  Half a day of counted time survives it, and
-                # the stopped period is booked as exactly that.
-                qualification.resume()
-                return
-        qualification.start(
-            symbols=sorted({watch.symbol for watch in self._watches}),
-            candidates=[watch.key for watch in self._watches],
-            note=(
-                f"replacing a {verdict} record"
-                if verdict not in ("", NOT_STARTED)
-                else ""
-            ),
-        )
-
-    def _heartbeat_from_cycle(self) -> None:
-        """One honest heartbeat per cycle, derived from what the cycle saw."""
-
-        quotes = self._cycle_quotes
-        if quotes["missing"]:
-            self._heartbeat(healthy=False, reason=PAUSE_STALE)
-            return
-        if quotes["stale"] and not quotes["fresh"]:
-            self._heartbeat(healthy=False, reason=PAUSE_STALE, quote_fresh=False)
-            return
-        self._heartbeat(healthy=True, quote_fresh=not quotes["stale"])
-
-    def _heartbeat(self, *, healthy: bool, reason: str = "", quote_fresh: bool | None = None) -> None:
-        qualification = self._qualification
-        if qualification is None:
-            return
-        qualification.tick(
-            healthy=healthy,
-            reason=reason,
-            quote_fresh=bool(self._cycle_quotes["fresh"]) if healthy else quote_fresh,
-            decisions=self._cycle_decisions,
-        )
-
-    def _cycle_watches(self) -> None:
         symbol_bars: dict[tuple[str, str], Any] = {}
         for watch in self._watches:
             if self._stop.is_set():
@@ -626,7 +531,6 @@ class CatalogPaperTest:
                 if self._last_bar.get(watch.key) == stamp:
                     continue  # no new completed bar; nothing can have changed
                 self._last_bar[watch.key] = stamp
-            self._cycle_decisions += 1
             self._decide(watch, series, quote)
 
     # -- decisions --------------------------------------------------------
@@ -977,7 +881,6 @@ class CatalogPaperTest:
                     "state": "unavailable",
                     "age_seconds": None,
                 }
-                self._cycle_quotes["missing"] += 1
             return None
         when = getattr(quote, "time", None)
         age = None
@@ -1000,10 +903,8 @@ class CatalogPaperTest:
                 "ask": ask,
             }
             if bid is None or ask is None or bid <= 0 or ask < bid:
-                self._cycle_quotes["missing"] += 1
                 return None
             if age is None or age > self._max_age:
-                self._cycle_quotes["stale"] += 1
                 self._stats.skipped_stale += 1
                 self._record(
                     EVENT_STALE,
@@ -1014,7 +915,6 @@ class CatalogPaperTest:
                     },
                 )
                 return None
-            self._cycle_quotes["fresh"] += 1
         return quote
 
     def _bars_for(self, watch: Watch, cache: dict[tuple[str, str], Any]) -> Any:

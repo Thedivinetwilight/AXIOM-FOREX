@@ -20,10 +20,12 @@ The surface is deliberately tiny:
     the runner uses, so a saved file is one the runner accepts. It never reads or
     writes ``mt5_settings.local.json`` and refuses any credential field.
 ``POST /actions/{mode-paper,mode-live}``
-    The execution-mode switch, and the whole of it. ``mode-paper`` is immediate
-    and unconditional. ``mode-live`` recomputes the preflight, refuses while any
-    blocker stands, and requires the typed confirmation phrase -- and it sends
-    no order, connects nothing, and arms nothing. Changing modes is not a trade.
+    The execution-mode switch, and the whole of it. Both modes are always on
+    offer. ``mode-paper`` is immediate and unconditional. ``mode-live`` requires
+    the typed confirmation phrase and the signature of the account connected
+    right now -- and it sends no order, connects nothing, and arms nothing.
+    Changing modes is not a trade, and nothing a preflight reports can take the
+    switch away; those checks refuse orders, with their reasons, further down.
 
 Anything else is a 405/404. There is no JSON API, no order endpoint, no arming
 endpoint, no account switch, and no background timer: a request renders the
@@ -290,11 +292,6 @@ class WorkstationApp:
     #: The last catalog action's result, shown once on the next render.
     catalog_result: dict[str, Any] = field(default_factory=dict)
 
-    #: The 24-hour paper-test record LIVE is gated on.  ``None`` means "read it
-    #: from the catalog panel or the live workflow"; either way the record only
-    #: ever says whether the test passed.  Passing still enables and arms nothing.
-    qualification: Any = None
-
     #: The optional Kronos forecasting panel. ``None`` means this deployment has
     #: no forecasting component, which is the default and leaves every other page
     #: exactly as it was. It can never reach the live or risk objects.
@@ -358,7 +355,6 @@ class WorkstationApp:
             confirmed=bool(self.wizard.choices.confirmed),
             selected_symbols=self.wizard.choices.selected_symbols,
             strategy=self.strategy,
-            qualification=self.qualification_view(),
         )
 
     def preflight_view(self) -> dict[str, Any]:
@@ -525,52 +521,6 @@ class WorkstationApp:
                 )
         return blockers
 
-    def qualification_record(self) -> Any:
-        """The paper-test record this process reads, wherever it was wired in."""
-
-        if self.qualification is not None:
-            return self.qualification
-        for holder in (self.live, self.catalog):
-            source = getattr(holder, "qualification", None)
-            if source is not None:
-                return source
-        return None
-
-    def qualification_view(self) -> dict[str, Any]:
-        """The one-day paper test's report, or an honest "no record" state.
-
-        This is the gate LIVE availability is read from.  It never enables LIVE,
-        never selects it, and never arms anything.
-        """
-
-        source = self.qualification_record()
-        if source is None:
-            return {
-                "present": False,
-                "passed": False,
-                "verdict": "NOT_STARTED",
-                "summary": "No live-market paper test has been run here yet.",
-                "report": {},
-            }
-        try:
-            report = dict(source.report())
-            return {
-                "present": True,
-                "passed": bool(source.live_available()),
-                "verdict": str(report.get("verdict", "")),
-                "summary": str(report.get("summary", "")),
-                "report": report,
-            }
-        except Exception as exc:  # a read model never raises, and never assumes a pass
-            self._log(f"qualification view failed: {type(exc).__name__}")
-            return {
-                "present": True,
-                "passed": False,
-                "verdict": "UNREADABLE",
-                "summary": "The paper-test record could not be read, so LIVE stays closed.",
-                "report": {},
-            }
-
     def live_view(self) -> dict[str, Any]:
         """The live page's whole model.  Reads only, never sends."""
 
@@ -608,6 +558,29 @@ class WorkstationApp:
                 "account": {},
                 "positions": [],
             }
+
+    def connected_account_fingerprint(self) -> str:
+        """The account signature of the account in front of the operator right now.
+
+        The live adapter is the authority when it is wired in, because it is the
+        object that would trade; otherwise the redacted observation snapshot
+        answers.  Both are fingerprints, never logins, and neither is a secret.
+        """
+
+        live = self.live
+        getter = getattr(live, "confirmed_account_fingerprint", None)
+        if callable(getter):
+            try:
+                fingerprint = str(getter() or "")
+            except Exception:
+                fingerprint = ""
+            if fingerprint:
+                return fingerprint
+        try:
+            snapshot = dict(self.wizard.session.view().get("snapshot") or {})
+        except Exception:
+            return ""
+        return str((snapshot.get("account") or {}).get("fingerprint") or "")
 
     def live_summary(self) -> dict[str, Any]:
         """The one fact every page may show: would the next signal send an order?"""
@@ -662,7 +635,9 @@ class WorkstationApp:
                 "provider_setup": (
                     self.provider_setup_view() if page == "provider-setup" else {}
                 ),
-                "live": self.live_view() if page == "live" else {},
+                # The mode page shows the broker positions that stay open when LIVE
+                # is switched off, so it reads the same read-only view.
+                "live": self.live_view() if page in {"live", "mode"} else {},
                 "kronos": self.kronos_view() if page == "kronos" else {},
                 "strategies": (
                     self.strategies_view(query=query) if page == "strategies" else {}
@@ -670,7 +645,6 @@ class WorkstationApp:
                 "research": self.research_view() if page == "quick-setup" else {},
                 "catalog": self.catalog_view() if page == "quick-setup" else {},
                 "live_summary": self.live_summary(),
-                "qualification": self.qualification_view(),
             },
         )
 
@@ -961,20 +935,27 @@ class WorkstationApp:
         if action == "mode-paper":
             if self.mode is None:
                 return HTTPStatus.INTERNAL_SERVER_ERROR, "/mode", "mode controller unavailable"
-            # Moving to paper must end any live session: simulated fills and real
-            # orders must never be one click apart.
-            self._stop_live(detail="mode switched to paper")
+            # Paper takes effect before anything else happens, so nothing can be
+            # authorised in the gap.  Then the live session is stopped and disarmed:
+            # simulated fills and real orders must never be one click apart.  No
+            # broker position is closed here -- a mode switch ends authorisation,
+            # not the operator's positions, which stay open and theirs to manage.
             change = self.mode.set_paper(detail="workstation mode selector")
+            self._stop_live(detail="mode switched to paper")
             self._log(f"execution mode: {change.to_mode} ({change.reason})")
             return HTTPStatus.SEE_OTHER, "/", change.message
         if action == "mode-live":
             if self.mode is None:
                 return HTTPStatus.INTERNAL_SERVER_ERROR, "/mode", "mode controller unavailable"
-            preflight = self.preflight_view()
+            # The mode switch is always offered: what the account, the settings,
+            # or a strategy rule out is shown as an order-level reason, never as a
+            # disabled button.  Selecting LIVE names the account it means.
             confirmation = str((form.get("confirmation") or [""])[0])
+            account_confirmation = str((form.get("account_confirmation") or [""])[0])
             change = self.mode.enable_live(
-                blockers=preflight.get("blockers", ()),
                 confirmation=confirmation,
+                account_fingerprint=self.connected_account_fingerprint(),
+                account_confirmation=account_confirmation,
                 detail="workstation mode selector",
             )
             if change.changed:

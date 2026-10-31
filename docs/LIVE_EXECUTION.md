@@ -5,52 +5,51 @@ be used deliberately, one decision at a time, and it is the only path in the
 running system that can reach the broker.
 
 ```
-One-day paper test  ──►  Provider setup  ──►  Trading mode LIVE  ──►  Live execution
-(24 counted hours)       (broker terms)       (confirmation)          choose terms
-                                                                      review → arm → Start
-                                                                           │
-                                                                           ▼
-                                                              strategy signal → checks → order
+Trading mode  ──►  Provider setup  ──►  Live execution: choose terms  ──►  strategy
+PAPER / LIVE       (broker terms)       review → arm → Start               signal
+                                                                             │
+                                                                             ▼
+                                                                  checks → order
 ```
 
-Passing the paper test **makes LIVE available**. It does not switch the mode,
-arm anything, or send anything: every arrow after it is still a separate act by
-the operator, and each one can refuse.
+**Both modes are always offered.** Nothing about the account, the terminal, the
+settings, a strategy, or a test run earlier hides or disables either one: you can
+switch at any time, in either direction. A mode change sends no order, connects
+nothing, arms nothing, and closes nothing.
+
+Selecting LIVE warns that real-money orders may follow from the active strategy,
+then asks for two things: the confirmation phrase, and the signature of the
+account connected **right now**. That signature is what "LIVE" means for the
+session — if the terminal is later signed in to a different account, the orders
+are refused rather than sent to it.
 
 Nothing in that chain happens by itself. Connecting arms nothing, enabling LIVE
 arms nothing, arming sends nothing, and starting the session sends nothing until
 the strategy actually signals.
 
-## The gate in front of it: the one-day paper test
+## What the safeguards are attached to
 
-LIVE is not offered until the live-market paper test has run for a continuous,
-counted day on the terminal's own quotes with locally simulated fills. Its clock
-counts only time AXIOM can vouch for: a stale or unreachable quote, a closed
-market, a disconnected terminal, a runner that stopped, a cycle that raised, or a
-gap longer than the heartbeat allowance **pauses** the clock and books the reason.
-A restart closes the interval at the last heartbeat, so the time the machine was
-off is never credited. A stop pauses rather than ends the record; the hours
-already counted survive it.
+The checks live on the **order path**, not on the mode switch:
 
-The report shows the verdict, the counted and paused hours, every criterion with
-its required and actual value, every pause by reason, and every failure. It is
-shown on the Live execution page and beside the catalog.
+| Check | Where it acts | What it does |
+| --- | --- | --- |
+| Account identity | every order | refuses if the terminal's account is not the one the session confirmed |
+| Broker connection | every order | refuses if there is no session, or the terminal is not trading-enabled |
+| Order validity | every order | refuses a stale/crossed quote, bad volume, drift, or missing specs |
+| Configured risk limits | every order | refuses size, open-position count, or daily loss beyond the plan |
+| Unresolved orders | every order | refuses anything new while an earlier order is in doubt |
+| Protective stop | every order | an entry without its stop is not sent (see the provider setup) |
 
-The default criteria are deliberately boring to satisfy: 24 counted hours inside
-a 24-hour span, at most 30% of the span paused, at most 25% of heartbeats stale,
-at least one decision taken, no failures, and no more than five restarts. They are
-fixed when the test starts and stored in the record.
+Each of these shows on the page with the reason and the step that clears it. None
+of them hides, disables, or reverts the mode you chose. Paper mode itself never
+sends a real order: in PAPER the loop is a simulation and there is no order
+surface in reach.
 
-Two things this gate is not:
-
-* **Not a mode switch.** Passing changes no mode, arms nothing, and starts no
-  loop. There is no code path from the paper runner to `order_send`; it is handed
-  a read-only quote surface and writes a local ledger.
-* **Not proof of anything about money.** One day of paper running is an
-  operational check of the pipeline — that quotes arrive, decisions are taken,
-  fills are simulated, costs are applied and nothing crashes. It says nothing
-  about whether the strategy makes money, and nothing about whether you are ready
-  to risk any.
+Switching to PAPER takes effect immediately: the live session is stopped and
+disarmed, so no new live entry can follow. **It does not close anything.** Broker
+positions stay open, are listed on the Trading mode and Live execution pages, and
+are yours to manage in the terminal — AXIOM never closes a broker position because
+the mode changed.
 
 ## What the operator chooses, every time
 
@@ -78,7 +77,7 @@ that warning run one. That is a deliberate difference, and it is the only one.
 
 | Action | Writes | Sends | Can refuse? |
 | --- | --- | --- | --- |
-| **Enable LIVE** (Trading mode) | mode file + audit | nothing | yes — preflight (which includes the paper test) + typed phrase |
+| **Select LIVE** (Trading mode) | mode file + audit | nothing | yes — typed phrase + the connected account's signature |
 | **Arm** (Live execution) | `live_plan.local.json` + audit | nothing | yes — every check below, plus the account signature typed exactly |
 | **Start** (Live execution) | runner journal | nothing on its own | yes — unarmed/disconnected/unconfirmed |
 | **Stop and disarm** | audit | nothing | never — always available |
@@ -133,14 +132,14 @@ No password, token, balance, or equity figure is ever shown, logged, or stored.
 
 All of these must be true, and the page names each one that is not:
 
-0. The one-day paper test has passed on this installation; LIVE is unavailable
-   until it has. Read its report before going on — a pass is not a green light.
 1. `mt5_settings.local.json` exists, with `"mode": "TRADING_ENABLED"`.
 2. MetaTrader 5 is installed, open, and signed in to the account you mean to use.
 3. `provider_setup.local.json` exists and loads — **Provider setup** writes it.
 4. You pressed **Connect**; the terminal reports the expected account and
    `trade_allowed`.
-5. **Trading mode → LIVE**, with its preflight clean and the phrase typed.
+5. **Trading mode → LIVE**: the phrase typed and the connected account's signature
+   confirmed. (An outstanding check refuses the order later; it never blocks this
+   choice.)
 6. On **Live execution**: strategy, symbol, size, position count and daily loss
    entered (nothing is pre-filled from paper), the review acknowledged, the
    account signature typed exactly as shown, `ENABLE LIVE TRADING` typed, **Arm**.
@@ -159,7 +158,6 @@ plan.
 | --- | --- | --- |
 | `provider_setup.local.json` | broker terms, costs, calendar, risk limits | ignored (`*.local.json`) |
 | `live_plan.local.json` | the armed plan: strategy, symbol, size, limits | ignored |
-| `data/catalog/qualification.json` | the one-day paper test's record and report | ignored (`data/catalog/`) |
 | `paper_runner.local.sqlite3` | durable orders, intents, fills, audit | ignored |
 | `mt5_settings.local.json` | terminal path, server, login, mode | ignored, never read or written by the live flow |
 

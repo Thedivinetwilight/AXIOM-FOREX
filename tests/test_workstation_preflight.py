@@ -129,7 +129,6 @@ def ready_facts(**overrides):
         confirmed=True,
         selected_symbols=("EURUSD",),
         strategy=StrategyBinding("strat-ok", "APPROVED", approved_active=True),
-        qualification={"present": True, "passed": True, "summary": "PASSED"},
     )
     values.update(overrides)
     return facts_from(**values)
@@ -147,7 +146,7 @@ def test_everything_lined_up_means_no_blockers():
     view = preflight.view()
     assert view["ready"] is True
     assert view["count"] == 0
-    assert "Every live check passed" in view["summary"]
+    assert "No order-level check is outstanding" in view["summary"]
     json.dumps(view, default=str)  # the view is audit-safe
 
 

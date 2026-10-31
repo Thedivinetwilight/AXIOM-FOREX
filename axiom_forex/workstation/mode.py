@@ -12,12 +12,18 @@ Two independent ideas are kept apart on purpose:
 
 The rules this module enforces:
 
-* **Paper is immediate.**  Moving to paper needs no preflight, no confirmation,
-  and can never be refused: the safe direction is always open.
-* **Live needs a clean preflight and exactly one explicit confirmation.**  The
-  caller passes the blockers it computed; while any blocker stands, live is
-  refused and every blocker is returned in the refusal.  The operator must
-  type :data:`LIVE_CONFIRMATION_PHRASE` exactly.
+* **Both modes are always offered.**  Nothing about the account, the terminal,
+  the settings, a strategy, or a test done earlier hides or disables either
+  choice: the operator may switch at any time.  Checks belong to the order path,
+  which refuses with a reason; they never take the switch away.
+* **Paper is immediate.**  Moving to paper needs no confirmation and can never be
+  refused: the safe direction is always open.  It ends live authorisation at
+  once and closes no position.
+* **Live needs exactly one explicit confirmation, and names the account.**  The
+  operator types :data:`LIVE_CONFIRMATION_PHRASE` and confirms the signature of
+  the account connected *right now*, so "LIVE" means "LIVE against this
+  account".  A different account in the terminal later refuses the order; it
+  never quietly adopts the new one.
 * **Live never survives a restart unconfirmed.**  The chosen mode is persisted,
   but the in-process confirmation is *not*: a new process that finds ``LIVE`` on
   disk restores it as "requested, not confirmed", so nothing can start trading
@@ -72,6 +78,7 @@ REASON_OPERATOR_PAPER = "operator_switched_to_paper"
 REASON_OPERATOR_LIVE = "operator_enabled_live"
 REASON_BLOCKED = "live_preflight_blocked"
 REASON_CONFIRMATION_MISMATCH = "live_confirmation_mismatch"
+REASON_ACCOUNT_UNCONFIRMED = "live_account_not_confirmed"
 REASON_ALREADY_LIVE = "already_live"
 REASON_STATE_UNREADABLE = "mode_state_unreadable"
 REASON_STATE_UNWRITABLE = "mode_state_not_recorded"
@@ -320,6 +327,12 @@ class ExecutionModeController:
     #: confirmation.  Never restored from disk.
     confirmed: bool = False
     confirmed_at: datetime | None = None
+    #: The account signature the operator confirmed when LIVE was selected.  Held
+    #: in memory only, like ``confirmed``: a new process must confirm again.  An
+    #: empty string means LIVE was selected while no account was connected, which
+    #: authorises nothing until one is confirmed.
+    session_account: str = ""
+    session_account_at: datetime | None = None
     restored: bool = False
     restore_note: str = ""
     last_change: ModeChange | None = None
@@ -356,7 +369,8 @@ class ExecutionModeController:
                 mode=LIVE,
                 note=(
                     "live was selected earlier, but a new process always starts "
-                    "unconfirmed; live execution needs a fresh preflight and confirmation"
+                    "unconfirmed; live execution needs a fresh confirmation naming the "
+                    "connected account"
                 ),
             )
         else:
@@ -391,6 +405,9 @@ class ExecutionModeController:
             "confirmation_required": self.live and not self.confirmed,
             "confirmation_phrase": LIVE_CONFIRMATION_PHRASE,
             "confirmed_at": _timestamp(self.confirmed_at),
+            "session_account": self.session_account,
+            "account_confirmed": bool(self.session_account),
+            "account_confirmed_at": _timestamp(self.session_account_at),
             "changed_at": _timestamp(self.changed_at),
             "sequence": self.sequence,
             "restored": self.restored,
@@ -434,6 +451,8 @@ class ExecutionModeController:
         self.mode = PAPER
         self.confirmed = False
         self.confirmed_at = None
+        self.session_account = ""
+        self.session_account_at = None
         self.changed_at = now
         saved = self._persist()
         change = ModeChange(
@@ -466,18 +485,22 @@ class ExecutionModeController:
     def enable_live(
         self,
         *,
-        blockers: Iterable[Mapping[str, Any]] = (),
         confirmation: str | None = None,
         detail: str = "",
+        account_fingerprint: str = "",
+        account_confirmation: str = "",
     ) -> ModeChange:
-        """Enable live execution: one clean preflight plus one typed phrase.
+        """Select LIVE: one typed phrase and one account confirmation.
 
-        Every refusal returns the blockers it saw, so the caller can show all of
-        them together instead of one at a time.
+        No preflight is consulted here.  AXIOM always offers both modes; what the
+        account, the settings, or a strategy rule out is a reason an *order* is
+        refused later, with the reason shown, not a reason to take the choice
+        away.  What this method will not do is pretend: the phrase must be typed,
+        and when an account is connected its signature must be confirmed exactly,
+        so LIVE is always LIVE-against-a-named-account.
         """
 
         now = (self.clock or _utc_now)()
-        blocker_list = tuple(dict(item) for item in blockers)
         if self.live_effective:
             change = ModeChange(
                 from_mode=LIVE,
@@ -489,31 +512,6 @@ class ExecutionModeController:
                 at=now,
             )
             self.last_change = change
-            return change
-        if blocker_list:
-            change = ModeChange(
-                from_mode=self.mode,
-                to_mode=self.mode,
-                changed=False,
-                reason=REASON_BLOCKED,
-                message=(
-                    f"Live mode was not enabled: {len(blocker_list)} check(s) must pass "
-                    "first. The mode did not change."
-                ),
-                sequence=self.sequence,
-                at=now,
-                blockers=blocker_list,
-            )
-            self.last_change = change
-            self._record(
-                "EXECUTION_MODE_REFUSED",
-                reason=REASON_BLOCKED,
-                detail=detail,
-                blockers=[str(item.get("reason", "")) for item in blocker_list],
-                from_mode=self.mode,
-                sequence=self.sequence,
-                live=False,
-            )
             return change
         if str(confirmation or "") != LIVE_CONFIRMATION_PHRASE:
             change = ModeChange(
@@ -539,12 +537,39 @@ class ExecutionModeController:
                 live=False,
             )
             return change
+        fingerprint = str(account_fingerprint or "").strip()
+        if fingerprint and str(account_confirmation or "").strip().lower() != fingerprint.lower():
+            change = ModeChange(
+                from_mode=self.mode,
+                to_mode=self.mode,
+                changed=False,
+                reason=REASON_ACCOUNT_UNCONFIRMED,
+                message=(
+                    "Live mode was not enabled: the account confirmation did not match the "
+                    "account the terminal is on. Type the signature shown on this page "
+                    "exactly. The mode did not change."
+                ),
+                sequence=self.sequence,
+                at=now,
+            )
+            self.last_change = change
+            self._record(
+                "EXECUTION_MODE_REFUSED",
+                reason=REASON_ACCOUNT_UNCONFIRMED,
+                detail=detail,
+                from_mode=self.mode,
+                sequence=self.sequence,
+                live=False,
+            )
+            return change
 
         previous = self.mode
         self.sequence += 1
         self.mode = LIVE
         self.confirmed = True
         self.confirmed_at = now
+        self.session_account = fingerprint
+        self.session_account_at = now if fingerprint else None
         self.changed_at = now
         saved = self._persist()
         if not saved:
@@ -552,6 +577,8 @@ class ExecutionModeController:
             self.mode = PAPER
             self.confirmed = False
             self.confirmed_at = None
+            self.session_account = ""
+            self.session_account_at = None
             self.sequence -= 1
             change = ModeChange(
                 from_mode=previous,
@@ -582,9 +609,13 @@ class ExecutionModeController:
             changed=True,
             reason=REASON_OPERATOR_LIVE,
             message=(
-                "Live mode is enabled for this session. Orders still require the "
-                "pre-trade gate, an approved active strategy, and arming; nothing is "
-                "sent until a strategy submits an approved order."
+                "Live mode is enabled for this session against the account you "
+                "confirmed. Orders still require the pre-trade gate, an approved "
+                "active strategy, and arming; nothing is sent until a strategy "
+                "submits an approved order."
+                if fingerprint
+                else "Live mode is enabled, but no account is connected, so no order "
+                "can be sent. Connect and confirm the account before arming."
             ),
             sequence=self.sequence,
             at=now,
@@ -600,6 +631,7 @@ class ExecutionModeController:
             confirmation_recorded=True,
             recorded_on_disk=True,
             live=True,
+            account_fingerprint=fingerprint or "",
         )
         return change
 
@@ -623,7 +655,11 @@ class ExecutionModeController:
         return self.set_paper(reason=reason, detail=detail)
 
     def note_blockers(self, blockers: Iterable[Mapping[str, Any]], *, detail: str = "") -> None:
-        """Record a preflight that found blockers without attempting a switch."""
+        """Record what would refuse an order right now, without changing anything.
+
+        These checks never decide a mode: they are recorded here so the operator can
+        see, in the same audit as the switches, what the order path would have said.
+        """
 
         reasons = [str(dict(item).get("reason", "")) for item in blockers]
         self._record(

@@ -1260,16 +1260,19 @@ def _mode_card(ctx: PageContext) -> str:
         )
         tone = "warn"
     elif count:
-        detail = f"Paper is active. {count} check(s) stand between you and live execution."
+        detail = (
+            f"Paper is active. {count} order-level check(s) are outstanding; they "
+            "refuse orders with a reason and never take the mode switch away."
+        )
         tone = "paper"
     else:
-        detail = "Paper is active and live execution is ready to be enabled with one confirmation."
+        detail = "Paper is active. Either mode can be selected at any time from Trading mode."
         tone = "paper"
     actions = (
         action_form("mode-paper", ctx.action_nonce, "Switch to paper now", tone="")
         + "<a class='btn btn-sm' href='/mode'>Trading mode</a>"
         if live
-        else "<a class='btn btn-sm btn--primary' href='/mode'>Review live checks</a>"
+        else "<a class='btn btn-sm btn--primary' href='/mode'>Trading mode</a>"
     )
     return card(
         "Execution mode",
@@ -1278,7 +1281,7 @@ def _mode_card(ctx: PageContext) -> str:
         f"</div><p class='small' style='margin:0;color:var(--text-2)'>{escape(detail)}</p>"
         f"<div class='row'>{actions}</div></div>",
         hint="Decides how an approved order would be executed. It never places one.",
-        right=chip("Paper always available", "muted"),
+        right=chip("Both modes always available", "muted"),
     )
 
 
@@ -1323,40 +1326,66 @@ def render_mode(ctx: PageContext) -> str:
         + "</div></div>"
     )
 
+    account = preflight.get("account", {}) if isinstance(preflight, Mapping) else {}
+    fingerprint = str(
+        account.get("fingerprint")
+        or view.get("session_account")
+        or ""
+    )
+    connected = bool(preflight.get("session_connected"))
+
     if effective:
         live_actions = (
             chip("Live is enabled for this session", "danger", dot=True)
-            + action_form("mode-paper", ctx.action_nonce, "End live mode", tone="danger")
+            + action_form("mode-paper", ctx.action_nonce, "Switch to paper now", tone="primary")
         )
         live_note = (
             "<p class='small muted'>Every order still passes the pre-trade gate and the "
             "session must be armed separately. This switch sends nothing.</p>"
         )
-    elif ready:
+    else:
+        # Both modes are always on offer.  Nothing here is disabled by a check:
+        # selecting LIVE is a confirmation, and what the account or a strategy
+        # rules out is stated as a reason an order would be refused.
+        confirm_field = (
+            "<div class='field'><label for='account_confirmation'>Type the account "
+            "signature to confirm the account for this session</label>"
+            f"<input type='text' id='account_confirmation' name='account_confirmation' "
+            f"value='' placeholder='{escape(fingerprint or 'account signature')}' "
+            "autocomplete='off' spellcheck='false' required></div>"
+            if fingerprint
+            else ""
+        )
         live_actions = (
-            "<form method='post' action='/actions/mode-live' class='stack' style='gap:10px'>"
+            notice(
+                "warn",
+                "Real-money orders may follow from the active strategy",
+                "LIVE routes an order to MetaTrader 5 execution on the account you "
+                "signed in to. It does not place one by itself and it does not arm "
+                "anything: a strategy still has to signal, the plan still has to be "
+                "armed, and every per-order check still applies."
+                + (
+                    ""
+                    if fingerprint
+                    else " No account is connected right now, so no order can be sent "
+                    "until you connect and confirm one."
+                ),
+            )
+            + "<form method='post' action='/actions/mode-live' class='stack' style='gap:10px'>"
             f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
-            "<div class='field'><label for='confirmation'>Type "
+            + confirm_field
+            + "<div class='field'><label for='confirmation'>Type "
             f"<span class='mono'>{escape(str(view.get('confirmation_phrase', '')))}</span> "
             "to confirm</label>"
             "<input type='text' id='confirmation' name='confirmation' value='' "
             "autocomplete='off' spellcheck='false' required></div>"
-            "<div><button class='btn btn--danger' type='submit'>Enable live execution</button></div>"
+            "<div><button class='btn btn--danger' type='submit'>Switch to LIVE</button></div>"
             "</form>"
         )
         live_note = (
-            "<p class='small muted'>One confirmation, and it is recorded. Enabling live "
-            "does not place an order, connect anything, or arm anything.</p>"
-        )
-    else:
-        live_actions = (
-            "<span class='btn btn--danger' aria-disabled='true' role='link' tabindex='-1'>"
-            "Enable live execution</span>"
-            + chip(f"{len(blockers)} check(s) blocking", "warn")
-        )
-        live_note = (
-            "<p class='small muted'>Resolve every check below, then this button turns "
-            "into a confirmation. Nothing here can be skipped or waived.</p>"
+            "<p class='small muted'>One confirmation: the phrase below, plus the "
+            "signature of the account you are connected to. It is recorded, and "
+            "switching to LIVE places no order, connects nothing, and arms nothing.</p>"
         )
 
     live_option = (
@@ -1380,10 +1409,40 @@ def render_mode(ctx: PageContext) -> str:
     else:
         checks_body = notice(
             "ok",
-            "Every live check passed",
+            "No order-level check is outstanding",
             "The account identity, session, settings, and confirmations all line up. "
-            "Enabling live still sends nothing.",
+            "Switching to live still sends nothing.",
         )
+
+    open_positions = [dict(item) for item in (_live_view(ctx).get("positions") or [])]
+    if open_positions:
+        body_positions = card(
+            f"{len(open_positions)} live position(s) remain open at the broker",
+            dl(
+                [
+                    (
+                        escape(str(item.get("symbol", "")) or "position"),
+                        escape(str(item.get("direction", "")) or "")
+                        + " "
+                        + escape(str(item.get("volume", "")) or "")
+                        + " lots · ticket "
+                        + escape(str(item.get("ticket", "")) or "—"),
+                    )
+                    for item in open_positions[:10]
+                ],
+                wide=True,
+            )
+            + notice(
+                "warn",
+                "Changing the mode does not close them",
+                "AXIOM never closes a broker position because the mode changed. These "
+                "stay open in MetaTrader 5 and remain yours to manage: with LIVE off, "
+                "AXIOM will not open anything new and will not manage them for you.",
+            ),
+            hint="Read straight from the terminal's own position list.",
+        )
+    else:
+        body_positions = ""
 
     requirements = tuple(preflight.get("order_requirements", ()) or ())
     requirement_rows = [
@@ -1421,7 +1480,6 @@ def render_mode(ctx: PageContext) -> str:
         ),
     )
 
-    account = preflight.get("account", {}) if isinstance(preflight, Mapping) else {}
     account_line = (
         dl(
             [
@@ -1441,12 +1499,20 @@ def render_mode(ctx: PageContext) -> str:
         + "<div class='mode-grid'>" + paper_option + live_option + "</div>"
         + "<div class='grid grid--two'>"
         + card(
-            "What must pass before live execution",
-            checks_body,
+            "What would stop an order from being sent",
+            checks_body
+            + notice(
+                "ok",
+                "These never take the mode switch away",
+                "Both modes stay selectable whatever this list says. A check that is "
+                "not met refuses the specific order and says why; it does not hide, "
+                "disable, or undo your choice of mode.",
+            ),
             hint="Every genuine blocker, all at once, each with the step that clears it.",
             right=chip("Clear" if ready else f"{len(blockers)} outstanding", "ok" if ready else "warn"),
         )
         + "<div class='grid'>" + card("Selected account", account_line) + "</div></div>"
+        + body_positions
         + card(
             "Still enforced on every order, whichever mode is on",
             requirements_body,
@@ -2504,97 +2570,6 @@ def render_provider_setup(ctx: PageContext) -> str:
 # --------------------------------------------------------------------------
 
 
-def _qualification_section(ctx: PageContext) -> Mapping[str, Any]:
-    return dict((ctx.extra or {}).get("qualification") or {})
-
-
-def qualification_card(section: Mapping[str, Any], *, compact: bool = False) -> str:
-    """The one-day paper test's report, and what it does and does not authorise.
-
-    A passing report makes LIVE *available*.  This card never changes the mode,
-    arms anything, or suggests that a day of paper running proves anything about
-    money: it is an operational check of the pipeline and says so.
-    """
-
-    if not section.get("present"):
-        return notice(
-            "warn",
-            "No one-day paper test has been run here yet",
-            "LIVE is not available until a live-market paper test has passed its "
-            "criteria. Run it from the catalog card, then read its report. "
-            "Whatever the result, it never enables or arms live trading by itself.",
-        )
-
-    report = dict(section.get("report") or {})
-    passed = bool(section.get("passed"))
-    verdict = str(section.get("verdict") or report.get("verdict") or "")
-    rows: list[tuple[str, str]] = [
-        ("Verdict", chip(verdict or "UNKNOWN", "ok" if passed else "warn", dot=True)),
-        (
-            "Counted (healthy) time",
-            "{} h of {} h".format(
-                escape(f"{float(report.get('active_hours') or 0):.2f}"),
-                escape(f"{float(report.get('required_hours') or 0):.2f}"),
-            ),
-        ),
-        (
-            "Paused time",
-            "{} h in {} pause(s)".format(
-                escape(f"{float(report.get('paused_seconds') or 0) / 3600:.2f}"),
-                escape(str(report.get("pause_count", 0))),
-            ),
-        ),
-        ("Criteria met", f"{int(report.get('criteria_met') or 0)} of {int(report.get('criteria_total') or 0)}"),
-    ]
-    reasons = [
-        f"{escape(str(key))}: {escape(f'{float(value) / 3600:.2f}')} h"
-        for key, value in sorted((report.get("pause_seconds_by_reason") or {}).items())
-        if value
-    ]
-    if reasons:
-        rows.append(("Why the clock paused", ", ".join(reasons)))
-    started = str(report.get("started_at") or "")
-    finished = str(report.get("finished_at") or "")
-    if started:
-        rows.append(("Test started", escape(started)))
-    if finished:
-        rows.append(("Test finished", escape(finished)))
-
-    body = dl(rows)
-    criteria = [dict(item) for item in report.get("criteria") or []]
-    if criteria and not compact:
-        body += "<table class='table small'><thead><tr><th>Criterion</th><th>Required</th>"             "<th>Actual</th><th>Met</th></tr></thead><tbody>" + "".join(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                    escape(str(item.get("label", ""))),
-                    escape(str(item.get("required", ""))),
-                    escape(str(item.get("actual", ""))),
-                    chip("yes", "ok") if item.get("met") else chip("no", "warn"),
-                )
-                for item in criteria
-            ) + "</tbody></table>"
-    failures = [dict(item) for item in report.get("failures") or []]
-    if failures:
-        body += "<ul class='list'>" + "".join(
-            "<li><strong class='mono'>{}</strong> {}</li>".format(
-                escape(str(item.get("kind", ""))), escape(str(item.get("detail", "")))
-            )
-            for item in failures[:6]
-        ) + "</ul>"
-    body += notice(
-        "ok" if passed else "warn",
-        "Passing makes LIVE available — nothing more",
-        "A passing report does not change the mode, arm execution, or place an order. "
-        "One day of paper running is an operational check of this pipeline, not proof "
-        "of profitability or safety.",
-    )
-    return card(
-        "The one-day paper test",
-        body,
-        hint=str(section.get("summary") or report.get("summary") or ""),
-        right=chip("PASSED" if passed else "NOT PASSED", "ok" if passed else "warn", dot=True),
-    )
-
-
 def _live_view(ctx: PageContext) -> Mapping[str, Any]:
     return dict((ctx.extra or {}).get("live") or {})
 
@@ -2738,10 +2713,7 @@ def render_live(ctx: PageContext) -> str:
     candidates = [dict(item) for item in view.get("candidates") or []]
     symbols = [str(item) for item in view.get("symbols") or []]
 
-    qualification = _qualification_section(ctx)
-    live_available = bool(qualification.get("passed"))
-
-    body = [live_status_banner(ctx), qualification_card(qualification)]
+    body = [live_status_banner(ctx)]
 
     if not configured:
         body.append(
@@ -2767,6 +2739,17 @@ def render_live(ctx: PageContext) -> str:
     if controls:
         body.append(
             "<div class='row' style='margin:8px 0 12px'>" + "".join(controls) + "</div>"
+        )
+
+    if str(view.get("mode", "")).upper() != "LIVE" and (view.get("positions") or []):
+        body.append(
+            notice(
+                "warn",
+                f"{len(view.get('positions') or [])} live position(s) are still open",
+                "Paper mode is on: AXIOM will not open anything new, and it does not "
+                "close or manage these. They remain open in MetaTrader 5 and require "
+                "your own management.",
+            )
         )
 
     body.append(_live_plan_card(view))
@@ -2820,24 +2803,14 @@ def render_live(ctx: PageContext) -> str:
         "<div class='row'><button class='btn btn--danger' type='submit'>Arm live orders</button></div>"
         "</form>"
     )
-    if not live_available:
-        body.append(
-            notice(
-                "warn",
-                "LIVE is not available yet, so there is nothing to arm",
-                "The one-day paper test above has to pass its own criteria first. "
-                "PAPER trading stays available meanwhile.",
-            )
+    body.append(
+        card(
+            "Choose the terms, then arm",
+            form,
+            hint="Arming writes the plan and authorises the adapter. It sends nothing and starts nothing.",
+            right=chip("armed" if armed else "not armed", "danger" if armed else "muted", dot=True),
         )
-    else:
-        body.append(
-            card(
-                "Choose the terms, then arm",
-                form,
-                hint="Arming writes the plan and authorises the adapter. It sends nothing and starts nothing.",
-                right=chip("armed" if armed else "not armed", "danger" if armed else "muted", dot=True),
-            )
-        )
+    )
 
     # -- account and broker state ----------------------------------------
     account = dict(view.get("account") or {})
@@ -4668,7 +4641,6 @@ def render_catalog_section(ctx: PageContext) -> str:
             "execution mode, and makes no claim that any candidate will make money.",
         )
     )
-    body.append(qualification_card(_qualification_section(ctx), compact=True))
     return card("Catalog and the Monday paper test", "".join(body))
 
 

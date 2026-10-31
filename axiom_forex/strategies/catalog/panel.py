@@ -36,7 +36,6 @@ from axiom_forex.paper_runner.catalog_paper import (
     summarise,
     watches_from_rows,
 )
-from axiom_forex.paper_runner.qualification import QualificationClock
 from axiom_forex.research.engine import CostModel, cost_model_for
 from axiom_forex.research.series import build_series, rows_from_rates
 
@@ -150,9 +149,6 @@ class CatalogPanel:
         self._run = _EvaluationRun()
         self._report: EvaluationReport | None = None
         self._paper: CatalogPaperTest | None = None
-        #: The 24-hour record every paper run here is judged by, and the one the
-        #: live page reads before it offers LIVE.  One file, one truth.
-        self.qualification = QualificationClock(self.data_root, clock=self.clock)
         self._paper_watches: tuple[Any, ...] = ()
         self._lock = threading.RLock()
         self._last_outcome: dict[str, Any] = {}
@@ -256,15 +252,6 @@ class CatalogPanel:
             view["table"] = list(self._report.table(8))
         return view
 
-    def qualification_view(self) -> dict[str, Any]:
-        """The one-day test's report, in the operator's words."""
-
-        try:
-            report = self.qualification.report()
-        except Exception as exc:  # a read model never raises
-            return {"available": False, "reason": type(exc).__name__}
-        return {"available": True, **report}
-
     def paper_view(self) -> dict[str, Any]:
         with self._lock:
             paper = self._paper
@@ -307,7 +294,6 @@ class CatalogPanel:
             "symbols": self.fx_choices(),
             "evaluation": self.evaluation_view(),
             "paper": self.paper_view(),
-            "qualification": self.qualification_view(),
             "claim": (
                 "The catalog is a declared search on historical bars. A candidate that "
                 "passes the screen is a short-list entry, not a profitable strategy and "
@@ -567,7 +553,6 @@ class CatalogPanel:
                 root=self.data_root / "paper",
                 lot=self.lot,
                 clock=self.clock,
-                qualification=self.qualification,
             )
             self._paper_watches = watches
         return self._ok(

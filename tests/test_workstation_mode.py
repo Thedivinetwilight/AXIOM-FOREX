@@ -136,9 +136,7 @@ def windows_report(settings=None):
     )
 
 
-def ready_app(
-    tmp_path: Path, *, settings_path: Path | None = None, qualification=True, **kwargs
-) -> WorkstationApp:
+def ready_app(tmp_path: Path, *, settings_path: Path | None = None, **kwargs) -> WorkstationApp:
     """A workstation whose live preflight is clear but whose mode is paper."""
 
     settings = live_settings()
@@ -151,27 +149,27 @@ def ready_app(
         mode_path=settings_path if settings_path is not None else tmp_path / "mt5_settings.local.json",
         **kwargs,
     )
-    if qualification is not None:
-        # A finished, passing paper test, as the live gate expects.  ``False``
-        # means one that has not passed; ``None`` means no record at all.
-        from axiom_forex.paper_runner.qualification import (
-            QualificationClock,
-            QualificationPolicy,
-        )
-
-        policy = QualificationPolicy(
-            required_active_seconds=0.0 if qualification else 86400.0,
-            required_span_seconds=0.0 if qualification else 86400.0,
-            min_decisions=0 if qualification else 1,
-        )
-        app.qualification = QualificationClock(
-            tmp_path / "catalog", policy=policy
-        )
-        app.qualification.start()
     app.act("connect", {"nonce": [app.nonce]})
     app.act("symbols", {"nonce": [app.nonce], "symbol": ["EURUSD"]})
     app.act("confirm", {"nonce": [app.nonce]})
     return app
+
+
+ACCOUNT = "0123456789ab"  # what FakeTerminalSource reports
+
+
+def bare_app(tmp_path: Path) -> WorkstationApp:
+    """A workstation with nothing connected, configured, or confirmed."""
+
+    return WorkstationApp(
+        wizard=SetupWizard(environment=windows_report(), session=ObservationSession(
+            FakeTerminalSource(settings=None)
+        )),
+        platform=None,
+        settings=None,
+        mode_path=tmp_path / "mt5_settings.local.json",
+        version="0.1.0",
+    )
 
 
 def act(app: WorkstationApp, action: str, **fields) -> tuple[int, str, str]:
@@ -202,41 +200,66 @@ def test_paper_is_immediate_and_needs_no_preflight(tmp_path):
     assert change.changed is False  # already paper: nothing to do, nothing claimed
     assert "Already in paper mode" in change.message
 
-    refused = controller.enable_live(blockers=[BLOCKER], confirmation=PHRASE)
-    assert refused.changed is False
-    assert controller.mode == PAPER
-
-    # Paper is still available, immediately, regardless of the blockers.
-    controller.enable_live(confirmation=PHRASE)  # no blockers this time
+    # Both modes are selectable at any time, and back again, without a preflight.
+    assert controller.enable_live(confirmation=PHRASE).changed is True
     assert controller.live_effective is True
     back = controller.set_paper()
     assert back.changed is True
     assert controller.mode == PAPER
     assert controller.live_effective is False
+    assert controller.enable_live(confirmation=PHRASE).changed is True
+    assert controller.live_effective is True
 
 
-# ---------------------------------------------------------------------------
-# 2. live needs every blocker gone, and returns all of them
-# ---------------------------------------------------------------------------
-
-
-def test_live_returns_every_blocker_at_once_and_does_not_change_the_mode(tmp_path):
+def test_the_mode_switch_takes_no_preflight_argument(tmp_path):
+    # Nothing about the account or a strategy can disable the switch: the only
+    # inputs are the operator's own phrase and account confirmation.
     controller = build_controller(settings_path=tmp_path / "mt5_settings.local.json")
-    blockers = [
-        BLOCKER,
-        {**BLOCKER, "reason": "symbols_not_selected", "title": "No symbols selected"},
-        {**BLOCKER, "reason": "mt5_account_mismatch", "title": "Different account"},
-    ]
-    change = controller.enable_live(blockers=blockers, confirmation=PHRASE)
+    with pytest.raises(TypeError):
+        controller.enable_live(blockers=[BLOCKER], confirmation=PHRASE)  # type: ignore[call-arg]
+    assert controller.mode == PAPER
+
+
+# ---------------------------------------------------------------------------
+# 2. live needs the phrase and the account it names
+# ---------------------------------------------------------------------------
+
+
+def test_live_names_the_account_the_session_confirmed(tmp_path):
+    controller = build_controller(settings_path=tmp_path / "mt5_settings.local.json")
+    change = controller.enable_live(
+        confirmation=PHRASE, account_fingerprint=ACCOUNT, account_confirmation=ACCOUNT
+    )
+    assert change.changed is True
+    assert controller.view()["session_account"] == ACCOUNT
+    assert controller.view()["account_confirmed"] is True
+    # Selecting paper forgets that confirmation: live must be confirmed again.
+    controller.set_paper()
+    assert controller.view()["session_account"] == ""
+
+
+def test_live_refuses_an_account_confirmation_that_names_another_account(tmp_path):
+    controller = build_controller(settings_path=tmp_path / "mt5_settings.local.json")
+    change = controller.enable_live(
+        confirmation=PHRASE, account_fingerprint=ACCOUNT, account_confirmation="ffffffffffff"
+    )
     assert change.changed is False
-    assert change.reason == "live_preflight_blocked"
-    assert [item["reason"] for item in change.blockers] == [
-        "not_connected",
-        "symbols_not_selected",
-        "mt5_account_mismatch",
-    ]
+    assert change.reason == "live_account_not_confirmed"
     assert controller.mode == PAPER
     assert controller.confirmed is False
+
+
+def test_live_is_still_selectable_with_no_account_connected(tmp_path):
+    """Nothing hides the switch.  It is armed with no account and sends nothing."""
+    controller = build_controller(settings_path=tmp_path / "mt5_settings.local.json")
+    change = controller.enable_live(confirmation=PHRASE, account_fingerprint="")
+    assert change.changed is True
+    assert controller.live_effective is True
+    view = controller.view()
+    assert view["session_account"] == ""
+    assert view["account_confirmed"] is False
+    # The message says plainly that no order can be sent until an account is named.
+    assert "no order can be sent" in change.message.lower()
 
 
 def test_live_requires_the_exact_confirmation_phrase(tmp_path):
@@ -289,7 +312,7 @@ def test_a_saved_live_is_never_effective_in_a_new_process(tmp_path):
     assert view["live_effective"] is False  # but not in force
     assert view["confirmation_required"] is True
     assert restarted.confirmed is False
-    assert "fresh preflight" in json.dumps(view["recent"])
+    assert "fresh confirmation naming the connected account" in json.dumps(view["recent"])
     # Confirming again in the new process is what makes it effective.
     assert restarted.enable_live(confirmation=PHRASE).changed is True
     assert restarted.live_effective is True
@@ -344,7 +367,9 @@ def test_a_mode_change_that_cannot_be_written_does_not_happen(tmp_path):
 def test_every_change_and_refusal_is_written_to_the_local_audit(tmp_path):
     settings_path = tmp_path / "mt5_settings.local.json"
     controller = build_controller(settings_path=settings_path)
-    controller.enable_live(blockers=[BLOCKER], confirmation=PHRASE)
+    controller.enable_live(
+        confirmation=PHRASE, account_fingerprint=ACCOUNT, account_confirmation="ffffffffffff"
+    )
     controller.enable_live(confirmation="wrong")
     controller.enable_live(confirmation=PHRASE)
     controller.set_paper(detail="operator changed their mind")
@@ -355,7 +380,7 @@ def test_every_change_and_refusal_is_written_to_the_local_audit(tmp_path):
     assert kinds.count("EXECUTION_MODE_REFUSED") == 2
     assert kinds.count("EXECUTION_MODE_CHANGED") == 2
     reasons = [item.get("reason") for item in events if item["event_type"] == "EXECUTION_MODE_REFUSED"]
-    assert reasons == ["live_preflight_blocked", "live_confirmation_mismatch"]
+    assert reasons == ["live_account_not_confirmed", "live_confirmation_mismatch"]
     # Nothing secret, no account number, no balance: only mode words and codes.
     text = json.dumps(document)
     for forbidden in ("99999999", "password", "ENABLE LIVE TRADING", "balance", "equity"):
@@ -395,12 +420,22 @@ def test_the_mode_page_lists_a_blocker_with_its_resolution(tmp_path):
         mode_path=tmp_path / "mt5_settings.local.json",
     )
     html = app.page("/mode")[1]
-    assert "What must pass before live execution" in html
+    assert "What would stop an order from being sent" in html
     assert "No terminal session is open" in html
     assert "Press Connect on the Setup screen" in html
-    # Nothing can be enabled while a blocker stands: no confirmation field.
-    assert "name='confirmation'" not in html
-    assert "aria-disabled" in html
+    # The switch is still on offer: a blocker refuses orders, not the mode choice.
+    assert "name='confirmation'" in html
+    assert "aria-disabled='true'" not in html
+    assert "Switch to LIVE" in html
+    assert "Real-money orders may follow from the active strategy" in html
+    # No account is connected, so there is nothing to confirm yet.
+    assert "name='account_confirmation'" not in html
+    assert "No account is connected right now" in html
+    assert app.mode_view()["mode"] == PAPER
+    status, _, message = act(app, "mode-live", confirmation=PHRASE)
+    assert status == 303
+    assert app.mode_view()["live_effective"] is True
+    assert "no order can be sent" in message.lower()
 
 
 def test_the_mode_page_offers_exactly_one_confirmation_when_ready(tmp_path):
@@ -408,13 +443,17 @@ def test_the_mode_page_offers_exactly_one_confirmation_when_ready(tmp_path):
     assert app.preflight_view()["ready"] is True
     html = app.page("/mode")[1]
     assert html.count("name='confirmation'") == 1
+    assert html.count("name='account_confirmation'") == 1
     assert PHRASE in html
-    assert "Enable live execution" in html
+    assert "Switch to LIVE" in html
+    assert ACCOUNT in html, "the signature to confirm is shown on the page"
 
 
 def test_enabling_live_through_the_app_records_the_change(tmp_path):
     app = ready_app(tmp_path)
-    status, redirect, message = act(app, "mode-live", confirmation=PHRASE)
+    status, redirect, message = act(
+        app, "mode-live", confirmation=PHRASE, account_confirmation=ACCOUNT
+    )
     assert status == 303
     assert redirect == "/"
     assert "Live mode is enabled" in message
@@ -426,7 +465,9 @@ def test_enabling_live_through_the_app_records_the_change(tmp_path):
     assert [item["event_type"] for item in audit["events"]][-1] == "EXECUTION_MODE_CHANGED"
 
 
-def test_live_is_refused_through_the_app_while_a_blocker_stands(tmp_path):
+def test_live_is_selectable_through_the_app_while_a_blocker_stands(tmp_path):
+    """A blocker refuses orders.  It does not refuse the operator's choice."""
+
     settings = live_settings()
     session = ObservationSession(FakeTerminalSource(settings=settings))
     app = WorkstationApp(
@@ -435,10 +476,15 @@ def test_live_is_refused_through_the_app_while_a_blocker_stands(tmp_path):
         settings=settings,
         mode_path=tmp_path / "mt5_settings.local.json",
     )
-    status, redirect, message = act(app, "mode-live", confirmation=PHRASE)
+    assert app.preflight_view()["ready"] is False
+    status, _, _ = act(app, "mode-live", confirmation=PHRASE)
     assert status == 303
-    assert redirect == "/mode"
-    assert "did not change" in message
+    assert app.mode_view()["mode"] == LIVE
+    assert app.mode_view()["live_effective"] is True
+    # ... and the blocker is still reported, on the page and in the preflight.
+    assert "not_connected" in app.page("/mode")[1]
+    # Switching back is one click, always.
+    act(app, "mode-paper")
     assert app.mode_view()["mode"] == PAPER
 
 
@@ -456,9 +502,9 @@ def test_switching_modes_never_connects_and_never_submits(tmp_path):
     source = app.wizard.session.source
     connects_before = source.connect_calls
 
-    act(app, "mode-live", confirmation=PHRASE)
+    act(app, "mode-live", confirmation=PHRASE, account_confirmation=ACCOUNT)
     act(app, "mode-paper")
-    act(app, "mode-live", confirmation=PHRASE)
+    act(app, "mode-live", confirmation=PHRASE, account_confirmation=ACCOUNT)
     act(app, "mode-paper")
 
     assert source.connect_calls == connects_before
@@ -470,7 +516,7 @@ def test_switching_modes_never_connects_and_never_submits(tmp_path):
 
 def test_explicit_disconnect_returns_live_to_paper(tmp_path):
     app = ready_app(tmp_path)
-    act(app, "mode-live", confirmation=PHRASE)
+    act(app, "mode-live", confirmation=PHRASE, account_confirmation=ACCOUNT)
     assert app.mode_view()["live_effective"] is True
 
     status, _, message = act(app, "disconnect")
@@ -498,16 +544,17 @@ def test_live_without_an_attached_strategy_still_lists_what_every_order_needs(tm
     assert "Still enforced on every order" in app.page("/mode")[1]
 
 
-def test_an_unapproved_attached_strategy_blocks_live(tmp_path):
+def test_an_unapproved_attached_strategy_blocks_the_order_not_the_switch(tmp_path):
     app = ready_app(
         tmp_path,
         strategy=StrategyBinding(strategy_id="strat-x", stage="TESTING", approved_active=False),
     )
     reasons = {item["reason"] for item in app.preflight_view()["blockers"]}
     assert "strategy_not_approved" in reasons
-    status, redirect, _ = act(app, "mode-live", confirmation=PHRASE)
-    assert (status, redirect) == (303, "/mode")
-    assert app.mode_view()["mode"] == PAPER
+    status, _, _ = act(app, "mode-live", confirmation=PHRASE, account_confirmation=ACCOUNT)
+    assert status == 303
+    assert app.mode_view()["mode"] == LIVE
+    assert "strategy_not_approved" in app.page("/mode")[1]
 
 
 def test_an_approved_strategy_binding_clears_that_check(tmp_path):
@@ -589,49 +636,141 @@ def test_an_account_mismatch_is_visible_on_the_pages_and_never_hidden(tmp_path):
     mode_page = app.page("/mode")[1]
     assert "mt5_account_mismatch" in mode_page
     assert "Sign in to the configured account inside MetaTrader 5" in mode_page
-    assert "name='confirmation'" not in mode_page  # still blocked, not confirmable
+    # The account mismatch is shown, and the operator may still choose LIVE:
+    # what it refuses is the order, with that same reason on the page.
+    assert "name='confirmation'" in mode_page
 
     assert app.mode_view()["mode"] == PAPER
-    status, redirect, _ = act(app, "mode-live", confirmation=PHRASE)
-    assert (status, redirect) == (303, "/mode")
-    assert app.mode_view()["mode"] == PAPER
+    status, _, _ = act(app, "mode-live", confirmation=PHRASE)
+    assert status == 303
+    assert app.mode_view()["mode"] == LIVE
+    assert "mt5_account_mismatch" in app.page("/mode")[1]
 
 
 # ---------------------------------------------------------------------------
-# the one-day paper test gates LIVE availability
+# nothing at all stands between the operator and either mode
 # ---------------------------------------------------------------------------
 
 
-def test_live_is_not_available_before_any_paper_test(tmp_path):
-    app = ready_app(tmp_path, qualification=None)
-    reasons = {item["reason"] for item in app.preflight_view()["blockers"]}
-    assert "paper_test_not_passed" in reasons
-    status, redirect, message = act(app, "mode-live", confirmation=PHRASE)
-    assert (status, redirect) == (303, "/mode")
-    assert "did not change" in message
-    assert app.mode_view()["mode"] == PAPER
-    assert app.qualification_view()["present"] is False
+def test_both_modes_can_be_selected_at_any_time_in_any_order(tmp_path):
+    app = ready_app(tmp_path)
+    for action, expected in (
+        ("mode-live", LIVE),
+        ("mode-paper", PAPER),
+        ("mode-live", LIVE),
+        ("mode-paper", PAPER),
+        ("mode-live", LIVE),
+    ):
+        status, _, _ = act(app, action, confirmation=PHRASE, account_confirmation=ACCOUNT)
+        assert status == 303
+        assert app.mode_view()["mode"] == expected
+    assert app.mode_view()["live_effective"] is True
 
 
-def test_an_unfinished_paper_test_keeps_live_closed(tmp_path):
-    app = ready_app(tmp_path, qualification=False)
-    reasons = {item["reason"] for item in app.preflight_view()["blockers"]}
-    assert "paper_test_not_passed" in reasons
-    act(app, "mode-live", confirmation=PHRASE)
-    assert app.mode_view()["mode"] == PAPER
-    report = app.qualification_view()
-    assert report["present"] is True
-    assert report["passed"] is False
+def test_a_fresh_install_with_nothing_configured_still_offers_live(tmp_path):
+    """No connect, no symbols, no confirmation, no strategy, no settings read."""
 
-
-def test_a_passing_paper_test_makes_live_available_and_does_nothing_else(tmp_path):
-    app = ready_app(tmp_path, qualification=True)
-    assert app.qualification_view()["passed"] is True
-    assert app.preflight_view()["ready"] is True
-    # Availability is not activation: the mode has not moved, and nothing is running.
-    assert app.mode_view()["mode"] == PAPER
-    assert app.mode_view()["live_effective"] is False
-    assert app.live is None or getattr(app.live, "armed", False) is False
+    app = bare_app(tmp_path)
+    html = app.page("/mode")[1]
+    assert "Switch to LIVE" in html
+    assert "aria-disabled='true'" not in html
     status, _, _ = act(app, "mode-live", confirmation=PHRASE)
     assert status == 303
     assert app.mode_view()["live_effective"] is True
+    # Paper, immediately, without anything being cleaned up first.
+    act(app, "mode-paper")
+    assert app.mode_view()["mode"] == PAPER
+    assert app.mode_view()["live_effective"] is False
+
+
+def test_the_switch_warns_about_real_money_and_names_no_strategy_it_picked(tmp_path):
+    app = ready_app(tmp_path)
+    html = app.page("/mode")[1]
+    assert "Real-money orders may follow from the active strategy" in html
+    assert "does not place one by itself" in html
+    assert "Routes an approved, gated order" in html
+
+
+def test_live_with_no_connected_account_cannot_reach_an_order(tmp_path):
+    app = bare_app(tmp_path)
+    act(app, "mode-live", confirmation=PHRASE)
+    assert app.mode_view()["live_effective"] is True
+    # Nothing was connected, nothing was armed, and there is no order surface.
+    assert app.wizard.session.connected is False
+    names = set(dir(app)) | set(dir(app.mode))
+    assert not {"order_send", "order_check", "arm_trading", "submit"} & names
+
+
+class _LiveWithPositions:
+    """A live controller holding one open broker position.  Sends nothing."""
+
+    def view(self):
+        return {
+            "configured": True,
+            "armed": False,
+            "connected": True,
+            "live_effective": False,
+            "mode": "PAPER",
+            "account_mode": "REAL",
+            "session_running": False,
+            "next_signal_sends_real_order": False,
+            "plan": {"present": False},
+            "blockers": [],
+            "candidates": [],
+            "symbols": [],
+            "account": {"fingerprint": ACCOUNT},
+            "positions": [
+                {"ticket": 77, "symbol": "EURUSD.pro", "direction": "BUY", "volume": "0.10"}
+            ],
+            "confirmation_phrase": PHRASE,
+        }
+
+    def summary(self):
+        return {
+            "present": True,
+            "armed": False,
+            "next_signal_sends_real_order": False,
+            "sentence": "Paper mode: every fill is simulated locally; no order is sent.",
+        }
+
+
+def test_switching_to_paper_shows_open_positions_and_says_it_will_not_close_them(tmp_path):
+    app = ready_app(tmp_path, live=_LiveWithPositions())
+    html = app.page("/mode")[1]
+    assert "1 live position(s) remain open at the broker" in html
+    assert "Changing the mode does not close them" in html
+    assert "77" in html
+
+    live_html = app.page("/live")[1]
+    assert "live position(s) are still open" in live_html
+    assert "does not close or manage these" in live_html
+
+
+def test_switching_to_paper_stops_the_session_and_never_liquidates(tmp_path):
+    class Recording(_LiveWithPositions):
+        def __init__(self):
+            self.calls = []
+
+        def stop_session(self, **kwargs):
+            self.calls.append(("stop_session", dict(kwargs)))
+            return {"stopped": True}
+
+        def disarm(self, **kwargs):
+            self.calls.append(("disarm", dict(kwargs)))
+            return {"armed": False}
+
+    live = Recording()
+    app = ready_app(tmp_path, live=live)
+    act(app, "mode-live", confirmation=PHRASE, account_confirmation=ACCOUNT)
+    assert app.mode_view()["live_effective"] is True
+    status, _, message = act(app, "mode-paper")
+    assert status == 303
+    assert app.mode_view()["mode"] == PAPER
+    assert [name for name, _ in live.calls] == ["stop_session"]
+    # Nothing on the app object can close a broker position, and nothing asked for.
+    assert not [
+        name
+        for name in dir(app)
+        if name.startswith("close") or "liquidat" in name or name in {"order_send"}
+    ]
+    assert "simulated" in message.lower() or "no order" in message.lower()

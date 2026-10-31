@@ -65,9 +65,10 @@ ARM_REFUSED = "live_arming_refused"
 PLAN_WRITE_FAILED = "live_plan_not_written"
 ALREADY_ARMED = "already_armed"
 ACCOUNT_INVALID = "mt5_account_profile_invalid"
-#: The gate in front of all of it: a finished, passing paper test.
-QUALIFICATION_MISSING = "paper_test_not_started"
-QUALIFICATION_NOT_PASSED = "paper_test_not_passed"
+#: The session's LIVE confirmation named one account.  Orders are refused if the
+#: terminal is on another one, or if LIVE was selected with nothing connected.
+ACCOUNT_NOT_CONFIRMED = "session_account_not_confirmed"
+ACCOUNT_CHANGED = "session_account_changed"
 #: Arming names one account, and the operator must type that account's
 #: fingerprint.  A different account in the terminal is refused, not adopted.
 ACCOUNT_NOT_IDENTIFIED = "account_not_identified"
@@ -150,7 +151,6 @@ class LiveTrading:
         armed_strategy: ArmedStrategy | None = None,
         clock: Callable[[], datetime] | None = None,
         audit_log: Any = None,
-        qualification: Any = None,
     ) -> None:
         self.adapter = adapter
         self.mode = mode
@@ -164,7 +164,6 @@ class LiveTrading:
         self.audit_log = audit_log
         self.session_factory = session_factory
         self.armed_strategy = armed_strategy
-        self.qualification = qualification
         self.session: Any = None
         self.plan: dict[str, Any] = {}
         self.armed_at: datetime | None = None
@@ -274,7 +273,6 @@ class LiveTrading:
             "setup_loaded": setup is not None,
             "confirmation_phrase": ARM_CONFIRMATION_PHRASE,
             "account_fingerprint": self.confirmed_account_fingerprint(),
-            "qualification": self.qualification_verdict(),
             "account": self._account_facts(),
             "symbol": self._symbol_facts(str(values.get("pair", "") or "").strip()),
             "at": self.clock().isoformat(),
@@ -307,7 +305,6 @@ class LiveTrading:
                     "Complete the live confirmation on the Trading mode screen.",
                 )
             )
-        blockers.extend(self.qualification_blockers())
         adapter = self.adapter
         if adapter is None:
             blockers.append(
@@ -345,6 +342,27 @@ class LiveTrading:
                     "Set the execution mode to TRADING_ENABLED in mt5_settings.local.json.",
                 )
             )
+        confirmed_account = str(getattr(self.mode, "session_account", "") or "").strip()
+        if not confirmed_account:
+            blockers.append(
+                Blocker(
+                    ACCOUNT_NOT_CONFIRMED,
+                    "No account was confirmed for this live session.",
+                    "On the Trading mode screen, switch to LIVE and confirm the account "
+                    "signature shown there. Nothing is armed until then.",
+                )
+            )
+        else:
+            current = self.confirmed_account_fingerprint()
+            if current and current != confirmed_account:
+                blockers.append(
+                    Blocker(
+                        ACCOUNT_CHANGED,
+                        "The terminal is on a different account than the one this session confirmed.",
+                        "Switch LIVE off and on again against the account you mean, or sign "
+                        "the other account in inside MetaTrader 5. No order is sent either way.",
+                    )
+                )
         if status.get("unresolved_orders"):
             blockers.append(
                 Blocker(
@@ -355,55 +373,6 @@ class LiveTrading:
             )
         blockers.extend(self._plan_blockers(values, document))
         return tuple(blockers)
-
-    def qualification_verdict(self) -> dict[str, Any]:
-        """The paper test's own words about whether live may be offered at all."""
-
-        qualification = self.qualification
-        if qualification is None:
-            return {"present": False, "passed": False, "verdict": "", "summary": ""}
-        try:
-            return {
-                "present": True,
-                "passed": bool(qualification.live_available()),
-                "verdict": str(qualification.verdict()),
-                "summary": str(qualification.summary_line()),
-            }
-        except Exception as exc:  # a read model never raises, and never assumes pass
-            return {
-                "present": True,
-                "passed": False,
-                "verdict": "UNREADABLE",
-                "summary": f"The paper test record could not be read ({type(exc).__name__}).",
-            }
-
-    def qualification_blockers(self) -> list[Blocker]:
-        """A finished, passing paper test is the price of admission to LIVE.
-
-        It is a gate, not a permission: passing it makes the live page *available*.
-        Arming, starting a session, and sending an order remain separate acts.
-        """
-
-        state = self.qualification_verdict()
-        if not state["present"]:
-            return [
-                Blocker(
-                    QUALIFICATION_MISSING,
-                    "No one-day paper test has been run on this installation.",
-                    "Run the live-market paper test for a continuous 24 hours first; "
-                    "its result is what makes LIVE available. It never enables it.",
-                )
-            ]
-        if state["passed"]:
-            return []
-        return [
-            Blocker(
-                QUALIFICATION_NOT_PASSED,
-                "The paper test has not passed its criteria.",
-                state["summary"]
-                or "Let the paper test run to 24 counted hours and check its report.",
-            )
-        ]
 
     def _plan_blockers(
         self, values: Mapping[str, Any] | None, document: Mapping[str, Any] | None
@@ -903,7 +872,6 @@ class LiveTrading:
             "last_refusal": dict(self.last_refusal),
             "confirmation_phrase": ARM_CONFIRMATION_PHRASE,
             "account_fingerprint": self.confirmed_account_fingerprint(),
-            "qualification": self.qualification_verdict(),
             "candidates": self.candidate_choices(),
             "symbols": self.symbol_choices(),
             "runner": runner_view or session_view,
