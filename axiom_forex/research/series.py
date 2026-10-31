@@ -233,6 +233,33 @@ class Series:
             )
         return bars
 
+    def rate_rows(self) -> tuple[RateRow, ...]:
+        """The series back as plain rate rows, for storage.
+
+        The spread is turned back into points, which is the unit the terminal
+        reported it in; a series built without a point size has no spread to
+        restore and stores zeros with a note.
+        """
+
+        rows: list[RateRow] = []
+        for index in range(len(self)):
+            points = 0
+            if self.point:
+                points = int(round(self.spread[index] / self.point))
+            rows.append(
+                RateRow(
+                    timestamp=self.timestamps[index],
+                    open=self.o[index],
+                    high=self.h[index],
+                    low=self.l[index],
+                    close=self.c[index],
+                    spread_points=points,
+                    tick_volume=int(self.volume[index]) if self.volume else 0,
+                    source=self.source or BID_PLUS_SPREAD,
+                )
+            )
+        return tuple(rows)
+
     def audit_view(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
@@ -422,11 +449,11 @@ def audit_coverage(
         notes=series.notes
         + (
             (
-                f"{weekend_gaps} step(s) of a day or more: market closures, counted but "
-                "not treated as missing data."
+                f"{weekend_gaps} step(s) of a day or more: market closures, counted "
+                "but not treated as missing data.",
             )
             if weekend_gaps
-            else (),
+            else ()
         ),
     )
 
