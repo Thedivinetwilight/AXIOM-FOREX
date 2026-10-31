@@ -319,6 +319,16 @@ class MT5TradingAdapter:
     # -- account mode and redaction -------------------------------------
 
     @property
+    def armed_account_matches_current(self) -> bool:
+        """Would an order go to the account arming was confirmed for?"""
+
+        if not self._armed or not self._armed_fingerprint:
+            return False
+        if self._status is None:
+            return False
+        return self.account_fingerprint() == self._armed_fingerprint
+
+    @property
     def account_mode(self) -> str:
         """The account mode the terminal reports right now, if known."""
 
@@ -567,6 +577,7 @@ class MT5TradingAdapter:
             "settings": self.settings.audit_view(),
             "armed": self._armed,
             "armed_account_fingerprint": self._armed_fingerprint or "",
+            "armed_account_matches_current": self.armed_account_matches_current,
             "account_mode": self.account_mode,
             "account_mode_confirmed": self.account_mode_confirmed,
             "account_is_demo": self.account_is_demo,
@@ -596,18 +607,22 @@ class MT5TradingAdapter:
         confirm: str,
         account_login: int | None = None,
         server: str | None = None,
+        account_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Explicit local authorisation to submit live orders.
 
         Authorisation is the operator's ``TRADING_ENABLED`` setting plus this
-        call; it is **not** bound to one account.  Orders go to whichever account
-        the terminal has selected, and every submission revalidates that
-        account's own terms first.
+        call, **bound to one account**: the fingerprint of the account selected at
+        this moment is recorded, and every later submission must still be looking
+        at that same account.  If the operator switches accounts in the terminal,
+        the arming state is kept (switching is the operator's choice, and AXIOM
+        never disarms behind their back) but no order can be sent until it is
+        armed again against the account actually on screen.
 
-        ``account_login``/``server`` are optional acknowledgements: when given
-        they must name the account the terminal currently has selected, which
-        catches the mistake of arming while looking at a different account.
-        They do not restrict future submissions to that account.
+        ``account_login``/``server``/``account_fingerprint`` are optional
+        acknowledgements: when given they must name the account the terminal
+        currently has selected, which catches the mistake of arming while looking
+        at a different account.
         """
 
         if not self.connected:
@@ -623,6 +638,13 @@ class MT5TradingAdapter:
             self._status.account_server.strip().lower()
         ):
             raise MT5SubmitRefused("mt5_arming_server_mismatch")
+        current_fingerprint = self.account_fingerprint()
+        if account_fingerprint is not None and str(account_fingerprint).strip() != current_fingerprint:
+            # The operator confirmed a different account than the one in front of
+            # them.  Refuse: confirmation is only meaningful for what it names.
+            raise MT5SubmitRefused(
+                "mt5_arming_account_confirmation_mismatch", current_fingerprint
+            )
         phrase = str(confirm).strip().upper()
         accepted = {"ENABLE LIVE TRADING", f"ENABLE LIVE TRADING {self._status.account_login}"}
         if phrase not in accepted:
@@ -1059,6 +1081,13 @@ class MT5TradingAdapter:
         # and if it changed, revalidate *its* currency, leverage, margin mode,
         # symbols, and execution terms before routing anything.
         account_validation = self._ensure_account_current()
+        # Arming was confirmed for one account.  A different one may not receive
+        # the order, however valid it is on its own terms.
+        if self._armed_fingerprint and self.account_fingerprint() != self._armed_fingerprint:
+            raise MT5SubmitRefused(
+                "mt5_account_changed_since_confirmation",
+                self.account_fingerprint() or "unknown",
+            )
         if not account_validation["valid"]:
             raise MT5SubmitRefused(
                 "mt5_account_profile_invalid",

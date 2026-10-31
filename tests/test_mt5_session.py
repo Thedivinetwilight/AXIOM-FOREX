@@ -553,18 +553,18 @@ def test_unknown_outcome_is_marked_unresolved_and_not_resent():
         repository.close()
 
 
-# -- accounting for a switch mid-run ---------------------------------------
+# -- a switch mid-run is refused, not routed ---------------------------------
 
 
-def test_switch_mid_run_routes_to_the_new_account_and_audits_it():
+def test_switch_mid_run_is_refused_because_arming_was_confirmed_for_one_account():
     adapter, fake, repository, audit = build_adapter()
     config = full_configuration()
     original_gate = config["gate"]
 
     def switching_gate(request, context):
         # The operator changes the terminal account between the decision and the
-        # order.  The adapter must notice, revalidate, and route to *that*
-        # account rather than to the one that was selected earlier.
+        # order.  Arming was confirmed against the first account, so this order
+        # must be refused -- the confirmed account is the only one AXIOM may use.
         fake.account_login = 77777777
         fake.trade_mode = 2
         fake.currency = "USD"
@@ -573,17 +573,20 @@ def test_switch_mid_run_routes_to_the_new_account_and_audits_it():
     config["gate"] = SimpleNamespace(evaluate=switching_gate)
     try:
         report = run_session(adapter, policy=SessionPolicy(), **config)
-        assert report.passed, report.blockers
+        blockers = " ".join(report.blockers)
+        assert "submission_refused:mt5_account_changed_since_confirmation" in blockers
+        assert report.orders_sent == 0
+        assert fake.send_requests == []
+        # The switch is audited, and the arming state is kept: AXIOM never disarms
+        # behind the operator's back.  What it does do is refuse to send.
         assert adapter.account_changes
-        change = adapter.account_changes[-1]
-        assert change["to_mode"] == "REAL"
-        assert change["trading_authorisation"] == "kept"
-        stored = repository.get_order("req-1")
-        assert stored["account_fingerprint"] == adapter.account_fingerprint(77777777)
-        assert len(fake.send_requests) == 1
+        assert adapter.account_changes[-1]["to_mode"] == "REAL"
+        assert adapter.account_changes[-1]["trading_authorisation"] == "kept"
         assert audit.find(event_type="MT5_ACCOUNT_CHANGED")
-        # The switch alone did not stop trading; the gates ran on the new account.
-        assert report.orders_sent == 1
+        # The cycle always disarms when it ends, so the flag is down here; the
+        # point is that the *switch* did not do it.  While that cycle was running,
+        # the arming still named the first account.
+        assert adapter.armed_account_matches_current is False
     finally:
         repository.close()
 
@@ -601,8 +604,8 @@ def test_switch_to_an_account_that_fails_validation_blocks_the_order():
     original_gate = config["gate"]
 
     def switching_gate(request, context):
-        # New account with a different currency: its own terms must be
-        # revalidated rather than reusing the previous account's.
+        # New account with a different currency: whatever the reason, it is not
+        # the account the arming named, so nothing may be sent to it.
         fake.account_login = 66666666
         fake.currency = "JPY"
         fake.leverage = 500
@@ -612,7 +615,7 @@ def test_switch_to_an_account_that_fails_validation_blocks_the_order():
     try:
         report = run_session(adapter, policy=SessionPolicy(), **config)
         blockers = " ".join(report.blockers)
-        assert "submission_refused:mt5_account_profile_invalid" in blockers
+        assert "submission_refused:mt5_account_changed_since_confirmation" in blockers
         assert report.orders_sent == 0
         assert fake.send_requests == []
     finally:

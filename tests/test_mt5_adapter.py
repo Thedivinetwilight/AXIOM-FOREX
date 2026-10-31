@@ -1418,3 +1418,60 @@ def test_boundary_with_an_adapter_still_refuses_an_intent(harness):
     )
     with pytest.raises(TradingBlocked, match="requires_gate_decision"):
         boundary.simulate_order_intent(request, None)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# arming is bound to the account the operator confirmed
+# ---------------------------------------------------------------------------
+
+
+def test_arming_refuses_a_fingerprint_that_is_not_the_account_in_front_of_you():
+    harness = build_harness()
+    try:
+        with pytest.raises(MT5SubmitRefused) as caught:
+            harness.adapter.arm_trading(
+                confirm="ENABLE LIVE TRADING",
+                account_fingerprint="000000000000",
+            )
+        assert caught.value.reason == "mt5_arming_account_confirmation_mismatch"
+        assert harness.adapter.armed is False
+        assert harness.fake.send_requests == []
+    finally:
+        harness.repository.close()
+
+
+def test_arming_records_the_confirmed_fingerprint_and_reports_it():
+    harness = build_harness()
+    try:
+        current = harness.adapter.account_fingerprint()
+        harness.adapter.arm_trading(
+            confirm="ENABLE LIVE TRADING", account_fingerprint=current
+        )
+        status = harness.adapter.status()
+        assert status["armed"] is True
+        assert status["armed_account_fingerprint"] == current
+        assert status["armed_account_matches_current"] is True
+    finally:
+        harness.repository.close()
+
+
+def test_a_switch_after_arming_keeps_arming_but_matches_nothing():
+    harness = build_harness()
+    try:
+        confirmed = harness.adapter.account_fingerprint()
+        harness.adapter.arm_trading(
+            confirm="ENABLE LIVE TRADING", account_fingerprint=confirmed
+        )
+        harness.fake.account_login = 99999999
+        harness.fake.trade_mode = 2
+        harness.adapter.refresh_account()
+        # No silent disarm: switching accounts is the operator's own act.
+        assert harness.adapter.armed is True
+        assert harness.adapter.armed_account_matches_current is False
+        # ...and switching back restores the match without re-arming anything.
+        harness.fake.account_login = 55500123
+        harness.fake.trade_mode = 0
+        harness.adapter.refresh_account()
+        assert harness.adapter.armed_account_matches_current is True
+    finally:
+        harness.repository.close()
