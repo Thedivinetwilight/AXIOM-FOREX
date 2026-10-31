@@ -75,6 +75,23 @@ class FakeTerminalSource:
     def connected(self) -> bool:
         return self.connected_flag
 
+    def symbol_records(self):
+        """EURUSD as the terminal would describe it: both currency legs given."""
+
+        if not self.connected_flag:
+            return ()
+        return (
+            {
+                "name": "EURUSD",
+                "currency_base": "EUR",
+                "currency_profit": "USD",
+                "trade_mode": 4,
+                "digits": 5,
+                "point": 0.00001,
+                "trade_contract_size": 100000,
+            },
+        )
+
     def connect(self) -> None:
         self.connect_calls += 1
         self.connected_flag = True

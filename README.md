@@ -225,7 +225,15 @@ observation*, because only then has AXIOM actually read an account.
    how many symbols are available. The login appears only as a short fingerprint; balances and
    equity are never read into the interface.
 5. **Confirm account and symbols** — choose the symbols to observe, then confirm. Nothing is
-   inferred: what you confirm is what the terminal reported.
+   inferred: what you confirm is what the terminal reported. The list is built from the
+   terminal's own Market Watch, and only a symbol it describes with both currency legs is
+   selectable; metals, stock CFDs, and anything whose legs were not reported are listed with a
+   short reason instead of being guessed at from the ticker. **Select all verified forex
+   pairs** takes exactly the verified pairs the broker reports as tradable, **Clear selection**
+   empties the set, and the page always shows how many are selected. Broker names are kept
+   exactly, suffixes included (`EURUSD.a` stays `EURUSD.a`); no name is substituted or
+   canonicalised. Any change to the selection withdraws the confirmation until you confirm
+   again.
 6. **Ready for observation** — shown only for a real terminal, with what was *not* enabled
    listed explicitly (no order entry, no arming, no auto-reconnect) and a pointer to the
    Trading mode page where paper or live is chosen.

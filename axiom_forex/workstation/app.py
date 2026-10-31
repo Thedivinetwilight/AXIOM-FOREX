@@ -60,6 +60,7 @@ from .mode import (
 )
 from .preflight import LivePreflight, StrategyBinding, facts_from
 from .setup import SetupWizard
+from .symbols import build_catalogue
 from .views import render_message, render_page
 
 #: Paths that render a page. Everything else is refused.
@@ -218,6 +219,15 @@ def csp_header(allow_framing: bool = False) -> str:
     if not allow_framing:
         return CSP
     return CSP.replace("frame-ancestors 'self'", "frame-ancestors *")
+
+
+def _name_list(names: "tuple[str, ...]") -> str:
+    """Name a few rejected symbols back to the operator, without a wall of text."""
+
+    shown = ", ".join(names[:10])
+    if len(names) <= 10:
+        return shown
+    return f"{shown} and {len(names) - 10} more"
 
 
 @dataclass
@@ -1043,11 +1053,71 @@ class WorkstationApp:
             wizard.reset_confirmation()
             return HTTPStatus.SEE_OTHER, "/account", "Confirmation withdrawn."
         if action == "symbols":
-            chosen = [value for value in form.get("symbol", []) if value]
-            wizard.choose_symbols(chosen)
-            self._log(f"symbols selected: {len(chosen)}")
-            return HTTPStatus.SEE_OTHER, "/account", f"{len(chosen)} symbol(s) selected."
+            return self._symbols_action(wizard, form)
         return HTTPStatus.NOT_FOUND, "/", "unknown action"
+
+    # -- symbol selection ---------------------------------------------------
+    def _symbols_action(
+        self, wizard: SetupWizard, form: Mapping[str, list[str]]
+    ) -> tuple[int, str, str]:
+        """Save a symbol selection, or one of the two bulk choices.
+
+        The selection is verified against what the terminal reports: a name it did
+        not report is dropped, never substituted.  A symbol is only selectable when
+        the terminal describes it as a currency pair; "Select all" takes exactly the
+        verified pairs the broker reports as tradable.  Nothing is placed, and no
+        connection is opened or closed.
+        """
+
+        try:
+            records = tuple(wizard.session.symbol_records() or ())
+        except Exception:
+            records = ()
+        catalogue = build_catalogue(records)
+        bulk = str((form.get("bulk") or [""])[0] or "").strip()
+        unknown: tuple[str, ...] = ()
+        unverified: tuple[str, ...] = ()
+        if bulk == "all":
+            if not catalogue.select_all_available:
+                self._log("select all refused: no verified tradable forex pair")
+                return (
+                    HTTPStatus.SEE_OTHER,
+                    "/account",
+                    "Select all was not applied: the terminal reported no verified, "
+                    "tradable currency pair.",
+                )
+            chosen = list(catalogue.select_all)
+            message = f"All {len(chosen)} verified forex pair(s) selected."
+        elif bulk == "clear":
+            chosen = []
+            message = "Symbol selection cleared."
+        else:
+            wanted = [value for value in form.get("symbol", []) if value]
+            if catalogue.available:
+                kept, unknown, unverified = catalogue.split_selectable(wanted)
+                chosen = list(kept)
+            else:
+                # Nothing was reported to check against (a source that cannot
+                # describe its symbols).  The names are kept exactly as posted,
+                # and confirmation still requires a real terminal and account.
+                chosen = wanted
+            message = f"{len(chosen)} symbol(s) selected."
+        was_confirmed = bool(wizard.choices.confirmed)
+        wizard.choose_symbols(chosen)
+        self._log(f"symbols selected: {len(chosen)}")
+        if unknown:
+            message += (
+                f" Ignored {len(unknown)} name(s) the terminal did not report: "
+                f"{_name_list(unknown)}."
+            )
+        if unverified:
+            message += (
+                f" Ignored {len(unverified)} symbol(s) that are not a verified, "
+                f"tradable currency pair: {_name_list(unverified)}."
+            )
+        if was_confirmed and not wizard.choices.confirmed:
+            message += " The configuration is unconfirmed until you confirm it again."
+        return HTTPStatus.SEE_OTHER, "/account", message
 
     # -- live execution -----------------------------------------------------
     def _live_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:

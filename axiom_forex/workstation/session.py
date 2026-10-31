@@ -109,6 +109,8 @@ class ObservationSource(Protocol):
 
     def snapshot(self) -> dict[str, Any]: ...
 
+    def symbol_records(self) -> Sequence[dict[str, Any]]: ...
+
 
 @dataclass
 class MT5ObservationSource:
@@ -175,6 +177,21 @@ class MT5ObservationSource:
         if self._terminal is None or not self._terminal.connected:
             return None
         return self._terminal
+
+    def symbol_records(self) -> Sequence[dict[str, Any]]:
+        """The terminal's symbols, with the specification fields it reports.
+
+        Read-only, and never filled in: a symbol the terminal returns without a
+        specification comes back with just its name, so the page can say it could
+        not be verified instead of guessing what it is.  Broker names are kept
+        byte for byte, suffixes included.
+        """
+
+        if self._terminal is None or not self._terminal.connected:
+            return ()
+        from .symbols import records_from_terminal
+
+        return records_from_terminal(self._terminal, MAX_SYMBOLS)
 
     def market_data(self, freshness: Any) -> Any:
         """The terminal's quote surface, wrapped for paper execution.
@@ -326,6 +343,14 @@ class SimulatedObservationSource:
             "observed_at": clock(),
         }
 
+    def symbol_records(self) -> Sequence[dict[str, Any]]:
+        """Sample symbols only.  They carry no specification, so none of them can
+        be verified as a currency pair -- and none of them pretends to be one."""
+
+        if not self._connected:
+            return ()
+        return tuple(dict(item) for item in SIMULATED_SYMBOLS)
+
 
 @dataclass
 class ObservationSession:
@@ -475,6 +500,24 @@ class ObservationSession:
 
     def symbols(self) -> Sequence[Mapping[str, Any]]:
         return self.snapshot_data.get("symbols", ()) if self.connected else ()
+
+    def symbol_records(self) -> Sequence[Mapping[str, Any]]:
+        """What the connected source reports for each symbol, for verification.
+
+        Falls back to the snapshot's names when a source cannot describe its
+        symbols; a name on its own is not enough to verify anything, so those
+        records stay unverified rather than being assumed to be a pair.
+        """
+
+        if not self.connected:
+            return ()
+        reader = getattr(self.source, "symbol_records", None)
+        if reader is not None:
+            try:
+                return tuple(reader())
+            except Exception:
+                return ()
+        return tuple(dict(item) for item in self.symbols())
 
     def view(self) -> dict[str, Any]:
         return {

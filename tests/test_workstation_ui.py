@@ -30,7 +30,7 @@ import json
 import re
 import threading
 from contextlib import redirect_stderr
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -116,6 +116,33 @@ def windows_environment():
     )
 
 
+def fake_symbol_specs() -> tuple[dict, ...]:
+    """Two pairs, as a test double would report them: both currency legs given."""
+
+    return (
+        {
+            "name": "EURUSD",
+            "currency_base": "EUR",
+            "currency_profit": "USD",
+            "trade_mode": 4,
+            "digits": 5,
+            "point": 0.00001,
+            "trade_contract_size": 100000,
+            "description": "Euro vs US Dollar",
+        },
+        {
+            "name": "GBPUSD",
+            "currency_base": "GBP",
+            "currency_profit": "USD",
+            "trade_mode": 4,
+            "digits": 5,
+            "point": 0.00001,
+            "trade_contract_size": 100000,
+            "description": "Pound vs US Dollar",
+        },
+    )
+
+
 @dataclass
 class FakeLiveTerminalSource:
     """A *test double* for the real terminal: it contacts nothing.
@@ -131,6 +158,21 @@ class FakeLiveTerminalSource:
     kind: str = "LIVE_TERMINAL"
     label: str = "Fake terminal (test double)"
     connect_calls: int = 0
+    specs: tuple[dict, ...] = field(default_factory=fake_symbol_specs)
+
+    def symbol_names(self):
+        return [str(item.get("name", "")) for item in self.specs]
+
+    def symbol_info(self, name):
+        for item in self.specs:
+            if item.get("name") == name:
+                return dict(item)
+        return None
+
+    def symbol_records(self):
+        if not self.connected_flag:
+            return ()
+        return tuple(dict(item) for item in self.specs)
 
     @property
     def connected(self) -> bool:

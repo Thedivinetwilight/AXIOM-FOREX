@@ -52,8 +52,16 @@ class SetupChoices:
     configured_at: datetime | None = None
 
     def with_symbols(self, names: Sequence[str]) -> "SetupChoices":
+        """Replace the selection, withdrawing any confirmation.
+
+        The confirmation is a statement about *this* symbol set, so a different
+        set withdraws it. Re-saving the same set changes nothing and leaves an
+        existing confirmation standing.
+        """
+
         cleaned = tuple(sorted({str(name).strip() for name in names if str(name).strip()}))
-        return replace(self, selected_symbols=cleaned, confirmed=False)
+        unchanged = cleaned == tuple(self.selected_symbols)
+        return replace(self, selected_symbols=cleaned, confirmed=self.confirmed if unchanged else False)
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,7 @@ from html import escape
 from typing import Any, Iterable, Mapping, Sequence
 
 from .context import PageContext, data_class_label
+from .symbols import build_catalogue, catalogue_message
 
 APP_NAME = "AXIOM"
 APP_SUBTITLE = "FOREX"
@@ -302,6 +303,8 @@ pre.template{
 .symbol{display:flex;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;font-size:13px}
 .symbol:hover{background:rgba(255,255,255,.04)}
 .symbol input{width:15px;height:15px;accent-color:var(--accent-2)}
+.symbol--off{opacity:.7}
+.symbol--off input{cursor:not-allowed}
 .field{display:flex;flex-direction:column;gap:6px;max-width:640px}
 .field label{font-size:12.5px;color:var(--text-2);font-weight:600}
 .field .help{font-size:12px;color:var(--text-3)}
@@ -1648,6 +1651,149 @@ def render_setup(ctx: PageContext) -> str:
     return render_shell(ctx, body)
 
 
+def _symbol_records(session: Any) -> tuple[Mapping[str, Any], ...]:
+    """The connected source's symbols, specification included.
+
+    Read on the page that needs it, so no other page pays for a symbol walk, and
+    never raises into the page: a source that cannot describe its symbols simply
+    yields no records, and nothing is then treated as verified.
+    """
+
+    reader = getattr(session, "symbol_records", None)
+    if not callable(reader):
+        return ()
+    try:
+        return tuple(reader() or ())
+    except Exception:
+        return ()
+
+
+def _symbol_picker(
+    ctx: PageContext, catalogue: Any, selected: Sequence[str], *, sample: bool
+) -> str:
+    """The Account page's symbol controls.
+
+    *Select all* means every pair the terminal verified **and** the broker reports
+    as tradable; anything else is listed with its reason rather than selected.
+    *Clear* posts an empty selection.  Both post the same action the checkbox form
+    uses, so a saved selection always goes through one code path.
+    """
+
+    chosen = tuple(str(name) for name in selected if str(name))
+    counts = catalogue.counts
+    header = (
+        "<div class='spread' style='margin-bottom:10px'>"
+        f"<span class='small muted'>{escape(catalogue_message(catalogue))}</span>"
+        f"{chip(f'{len(chosen)} selected', 'ok' if chosen else 'warn')}</div>"
+    )
+    if sample:
+        header += (
+            "<p class='small muted' style='margin:0 0 10px'>Sample symbols from the offline "
+            "simulator. They carry no specification, so none of them can be verified as a "
+            "currency pair, and none of them describes a real broker's symbol.</p>"
+        )
+    if not catalogue.available:
+        return header + empty_state(
+            "No symbols yet",
+            "Symbols are listed once the terminal is connected and reports its Market Watch.",
+        )
+
+    chosen_set = set(chosen)
+    tiles: list[str] = []
+    for choice in catalogue.pairs:
+        name = choice.broker_symbol
+        if choice.usable:
+            tiles.append(
+                f"<label class='symbol'><input type='checkbox' name='symbol' "
+                f"value='{escape(name)}'{' checked' if name in chosen_set else ''}>"
+                f"<span>{escape(choice.label)}</span></label>"
+            )
+        else:
+            tiles.append(
+                "<label class='symbol symbol--off'>"
+                "<input type='checkbox' disabled aria-disabled='true'>"
+                f"<span>{escape(choice.label)}</span>"
+                f"<span class='small muted'>{escape(choice.reason)}</span></label>"
+            )
+
+    body = header
+    if tiles:
+        body += (
+            f"<form method='post' action='/actions/symbols'>"
+            f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+            f"<div class='symbol-grid' role='group' aria-label='Verified forex pairs'>{''.join(tiles)}</div>"
+            "<div class='step-actions'><button class='btn btn--primary' type='submit'>"
+            "Save selection</button></div></form>"
+        )
+    else:
+        body += (
+            "<p class='small muted' style='margin:0'>No symbol reported by the terminal could "
+            "be verified as a currency pair, so nothing here can be selected.</p>"
+        )
+
+    bulk = (
+        "<form method='post' action='/actions/symbols' class='step-actions' "
+        "style='margin-top:10px'>"
+        f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+        "<button class='btn' type='submit' name='bulk' value='all'"
+        + ("" if catalogue.select_all_available else " disabled aria-disabled='true'")
+        + ">Select all verified forex pairs</button>"
+        "<button class='btn' type='submit' name='bulk' value='clear'"
+        + ("" if chosen else " disabled aria-disabled='true'")
+        + ">Clear selection</button></form>"
+    )
+    body += bulk
+    if catalogue.select_all_available:
+        body += (
+            "<p class='small muted' style='margin:6px 0 0'>Select all takes "
+            f"{counts['selectable_for_all']} verified forex pair(s) this account can trade. "
+            "Names are the broker's own and are never rewritten.</p>"
+        )
+    elif catalogue.pairs:
+        body += (
+            "<p class='small muted' style='margin:6px 0 0'>Select all is unavailable: no "
+            "verified pair is reported as tradable with a full specification.</p>"
+        )
+    if catalogue.skipped_by_select_all:
+        body += (
+            "<p class='small muted' style='margin:6px 0 0'>Left out of Select all:</p>"
+            + _symbol_reason_list(
+                [
+                    (item["broker_symbol"], item["reason"])
+                    for item in catalogue.skipped_by_select_all
+                ]
+            )
+        )
+
+    if catalogue.excluded:
+        body += (
+            "<details style='margin-top:10px'><summary class='small muted'>"
+            f"{len(catalogue.excluded)} reported symbol(s) not selectable — why</summary>"
+            + _symbol_reason_list(
+                [(item["broker_symbol"], item["reason"]) for item in catalogue.excluded]
+            )
+            + "</details>"
+        )
+
+    if sample:
+        body += (
+            "<p class='small muted' style='margin:10px 0 0'>The selection is kept in memory "
+            "for this session only, and a simulator preview cannot be confirmed.</p>"
+        )
+    return body
+
+
+def _symbol_reason_list(rows: Sequence[tuple[str, str]]) -> str:
+    items = "".join(
+        f"<li><span class='mono'>{escape(str(name))}</span> — {escape(str(reason))}</li>"
+        for name, reason in rows
+    )
+    return (
+        "<ul class='small muted' style='margin:4px 0 0;padding-left:18px'>"
+        f"{items}</ul>"
+    )
+
+
 def render_account(ctx: PageContext) -> str:
     wizard = ctx.wizard
     terminal = ctx.terminal
@@ -1720,41 +1866,9 @@ def render_account(ctx: PageContext) -> str:
             + "</p>"
         )
 
-    symbols = terminal.symbols if terminal.connected else ()
-    selected = set(view["symbols_selected"])
-    if symbols:
-        options = "".join(
-            f"<label class='symbol'><input type='checkbox' name='symbol' value='{escape(str(item.get('name', '')))}'"
-            f"{' checked' if str(item.get('name', '')) in selected else ''}>"
-            f"<span>{escape(str(item.get('name', '')))}</span></label>"
-            for item in symbols
-        )
-        source_note = (
-            "sample symbols from the simulator"
-            if sample
-            else "symbols reported by the terminal"
-        )
-        symbol_body = (
-            "<div class='spread' style='margin-bottom:10px'>"
-            f"<span class='small muted'>{len(symbols)} {source_note}</span>"
-            f"{chip(f'{len(selected)} selected', 'ok' if selected else 'warn')}</div>"
-            f"<form method='post' action='/actions/symbols'>"
-            f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
-            f"<div class='symbol-grid' role='group' aria-label='Symbols to observe'>{options}</div>"
-            "<div class='step-actions'><button class='btn btn--primary' type='submit'>Save selection</button></div>"
-            "</form>"
-            + (
-                "<p class='small muted' style='margin-top:10px'>The selection is kept in memory "
-                "for this session only.</p>"
-                if sample
-                else ""
-            )
-        )
-    else:
-        symbol_body = empty_state(
-            "No symbols yet",
-            "Symbols are listed once the terminal is connected and reports its Market Watch.",
-        )
+    catalogue = build_catalogue(_symbol_records(ctx.wizard.session), sample=sample)
+    selected = tuple(view["symbols_selected"])
+    symbol_body = _symbol_picker(ctx, catalogue, selected, sample=sample)
 
     if not terminal.connected:
         confirm_body = empty_state(
@@ -1828,7 +1942,11 @@ def render_account(ctx: PageContext) -> str:
         + card(
             "Symbols to observe",
             symbol_body,
-            hint="From the terminal's Market Watch; nothing is invented.",
+            hint=(
+                "Only a symbol the terminal describes with both currency legs can be "
+                "selected: its own name, kept exactly, suffixes included. Changing the "
+                "selection withdraws the confirmation below until you confirm again."
+            ),
         )
         + card("Confirm configuration", confirm_body, hint="Step 5 of setup.")
         + "</div></div>"
