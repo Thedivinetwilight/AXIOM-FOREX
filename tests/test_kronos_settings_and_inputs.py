@@ -326,3 +326,95 @@ def test_the_page_can_describe_the_mapping_without_running_anything():
     # Every OHLC column states the same, non-tradable basis.
     for column in ("open", "high", "low", "close"):
         assert rows[column]["label"] == MID
+
+
+# ---------------------------------------------------------------------------
+# where the files come from
+# ---------------------------------------------------------------------------
+
+
+def _model_folder(root, name: str = "model", *, config: bool = True):
+    folder = root / name
+    folder.mkdir()
+    if config:
+        (folder / "config.json").write_text("{}", encoding="utf-8")
+    (folder / "model.safetensors").write_text("weights", encoding="utf-8")
+    return folder
+
+
+def test_a_local_model_folder_is_preferred_and_needs_no_revision(tmp_path):
+    from axiom_forex.kronos.forecast import _resolve_files
+
+    folder = _model_folder(tmp_path)
+    model_file, tokenizer_file = _resolve_files(
+        KronosSettings(model_key="kronos-small", symbol="EURUSD", model_path=str(folder))
+    )
+    # One folder holding both is accepted, so a converted layout needs one path.
+    assert model_file == str(folder)
+    assert tokenizer_file == str(folder)
+
+
+def test_the_tokenizer_can_live_in_its_own_folder(tmp_path):
+    from axiom_forex.kronos.forecast import _resolve_files
+
+    model = _model_folder(tmp_path, "model")
+    tokenizer = _model_folder(tmp_path, "tokenizer")
+    settings = KronosSettings(
+        model_key="kronos-small",
+        symbol="EURUSD",
+        model_path=str(model),
+        tokenizer_path=str(tokenizer),
+    )
+    assert _resolve_files(settings) == (str(model), str(tokenizer))
+    # The tokenizer folder travels with the settings and the fingerprint.
+    assert settings.to_payload()["tokenizer_path"] == str(tokenizer)
+    assert KronosSettings.from_payload(settings.to_payload()) == settings
+    assert settings.fingerprint() != KronosSettings(
+        model_key="kronos-small",
+        symbol="EURUSD",
+        model_path=str(model),
+        tokenizer_path=str(_model_folder(tmp_path, "other")),
+    ).fingerprint()
+
+
+def test_a_tokenizer_folder_without_a_config_is_refused_before_loading(tmp_path):
+    from axiom_forex.kronos.forecast import KronosUnavailable, _resolve_files
+
+    model = _model_folder(tmp_path, "model")
+    tokenizer = _model_folder(tmp_path, "tokenizer", config=False)
+    settings = KronosSettings(
+        model_key="kronos-small", symbol="EURUSD", model_path=str(model)
+    )
+    problems = KronosSettings(
+        model_key="kronos-small",
+        symbol="EURUSD",
+        model_path=str(model),
+        tokenizer_path=str(tokenizer),
+    ).validate()
+    assert any(item.path == "kronos.tokenizer_path" for item in problems)
+    with pytest.raises(KronosUnavailable) as caught:
+        _resolve_files(
+            replace_settings(settings, tokenizer_path=str(tokenizer))
+        )
+    assert caught.value.reason == "tokenizer_path_incomplete"
+
+
+def test_a_hub_reference_still_needs_a_pinned_revision():
+    from axiom_forex.kronos.forecast import KronosUnavailable, _resolve_files
+
+    with pytest.raises(KronosUnavailable) as caught:
+        _resolve_files(KronosSettings(model_key="kronos-small", symbol="EURUSD"))
+    assert caught.value.reason == "revision_unpinned"
+
+    model_file, tokenizer_file = _resolve_files(
+        KronosSettings(model_key="kronos-small", symbol="EURUSD", revision="67b630e")
+    )
+    assert model_file.startswith("NeoQuasar/")
+    assert tokenizer_file.startswith("NeoQuasar/")
+    assert model_file != tokenizer_file
+
+
+def replace_settings(settings, **changes):
+    from dataclasses import replace
+
+    return replace(settings, **changes)

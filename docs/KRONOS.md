@@ -50,7 +50,11 @@ AXIOM never downloads code, weights, or packages, and never installs software.
    are needed to forecast; `matplotlib` and `tqdm` are reported as optional.
 3. On `/kronos`, set **Official code checkout** to the repository folder (it must
    contain `model/kronos.py`) and **Model file location** to the weights folder (a
-   `config.json` plus a `.safetensors`/`.bin`/`.pth`/`.pt` file).
+   `config.json` plus a `.safetensors`/`.bin`/`.pth`/`.pt` file). The official
+   tokenizer is published as **its own repository**, so a fully offline install
+   usually also needs **Tokenizer file location** pointing at that second folder;
+   leave it blank when one folder holds both. Both paths are checked before any
+   file is loaded.
 4. Press **Inspect and hash the model files**. This runs locally, prints each
    file's size and SHA-256, and records them in `kronos_weights.local.json` so you
    can compare them with the publisher's own values. The state stays
@@ -67,7 +71,7 @@ Every control maps to a real Kronos argument or to an AXIOM-side scheduling
 choice. The context limit comes from the selected variant's published length, never
 from a guess.
 
-**Basic** — model variant, model file location, device (`auto` resolves to
+**Basic** — model variant, model file location, tokenizer file location, device (`auto` resolves to
 `cuda:0`, then `mps`, then `cpu`, exactly as the predictor does), input symbol,
 input timeframe (1m/5m/15m/30m/1h/4h/1d), context length in bars, forecast horizon
 in bars, forecast rollouts.

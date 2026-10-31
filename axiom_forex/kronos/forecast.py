@@ -495,23 +495,31 @@ def _import_model_package(settings: KronosSettings) -> Any:
 
 
 def _resolve_files(settings: KronosSettings) -> tuple[str, str]:
-    """Where the weights come from, refusing anything the operator did not pin.
+    """Where the weights and the tokenizer come from, refusing unpinned references.
 
     A **local directory** is preferred: the operator chose those files, so there is
     no network call and no moving reference.  A **Hub id** is accepted only with a
     pinned revision (a commit sha or tag), and even then the load is a *read* of
     cached-or-downloaded files under that exact revision -- the explicit download
     action is what records the SHA-256, and a forecast never starts a download.
+
+    The official tokenizer is published as a **separate repository**, so a local
+    model folder does not necessarily contain one.  The tokenizer folder is therefore
+    resolved on its own; when it is blank and the model folder is local, the model
+    folder is used, which covers a converted single-folder layout.  Both files are
+    resolved before anything is loaded, so a bad path fails cheaply.
     """
 
     reference = settings.model_reference
     if not reference:
         raise KronosUnavailable("model_path_missing")
     candidate = Path(reference).expanduser()
+
     if candidate.is_dir():
         files = sorted(item.name for item in candidate.iterdir())
-        has_weights = any(name.endswith((".safetensors", ".bin", ".pth", ".pt")) for name in files)
-        if not has_weights:
+        if not any(
+            name.endswith((".safetensors", ".bin", ".pth", ".pt")) for name in files
+        ):
             raise KronosUnavailable(
                 "model_path_incomplete",
                 "the folder holds no weight file (.safetensors/.bin/.pth/.pt)",
@@ -520,18 +528,50 @@ def _resolve_files(settings: KronosSettings) -> tuple[str, str]:
             raise KronosUnavailable(
                 "model_path_incomplete", "the folder holds no config.json"
             )
-        return str(candidate), str(candidate)
-    if not reference.startswith("NeoQuasar/"):
+        model_file = str(candidate)
+    else:
+        if not reference.startswith("NeoQuasar/"):
+            raise KronosUnavailable(
+                "model_reference_unverified",
+                "a Hub reference must be one of the official NeoQuasar ids, or a "
+                "local folder",
+            )
+        if not settings.revision.strip():
+            raise KronosUnavailable(
+                "revision_unpinned",
+                "a Hub reference needs a pinned revision; a moving branch is never "
+                "loaded",
+            )
+        model_file = reference
+
+    tokenizer_reference = settings.tokenizer_reference
+    tokenizer_local = Path(tokenizer_reference).expanduser() if tokenizer_reference else None
+    if tokenizer_local is not None and tokenizer_local.is_dir():
+        if not (tokenizer_local / "config.json").exists():
+            raise KronosUnavailable(
+                "tokenizer_path_incomplete",
+                "the tokenizer folder holds no config.json",
+            )
+        tokenizer_file = str(tokenizer_local)
+    elif tokenizer_local is not None and settings.tokenizer_path.strip():
         raise KronosUnavailable(
-            "model_reference_unverified",
-            "a Hub reference must be one of the official NeoQuasar ids, or a local folder",
+            "tokenizer_path_incomplete",
+            "the configured tokenizer folder is not a directory",
         )
-    if not settings.revision.strip():
-        raise KronosUnavailable(
-            "revision_unpinned",
-            "a Hub reference needs a pinned revision; a moving branch is never loaded",
-        )
-    return reference, reference
+    elif candidate.is_dir():
+        # A converted single-folder layout: model and tokenizer together.
+        tokenizer_file = model_file
+    elif tokenizer_reference.startswith("NeoQuasar/"):
+        if not settings.revision.strip():
+            raise KronosUnavailable(
+                "revision_unpinned",
+                "a Hub reference needs a pinned revision; a moving branch is never "
+                "loaded",
+            )
+        tokenizer_file = tokenizer_reference
+    else:
+        raise KronosUnavailable("tokenizer_missing", "no tokenizer reference")
+    return model_file, tokenizer_file
 
 
 def _default_predictor_factory(settings: KronosSettings) -> Any:

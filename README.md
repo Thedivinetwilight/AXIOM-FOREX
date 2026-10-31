@@ -329,7 +329,8 @@ an execution mode, and a forecast is labelled `FORECAST_ONLY_NOT_A_SIGNAL`
 everywhere it is stored or shown.
 
 AXIOM never downloads code, weights, or packages. You install the official runtime
-and point the page at the official code checkout and the model folder; the page
+and point the page at the official code checkout, the model folder, and — when it
+is separate, as the official layout ships it — the tokenizer folder; the page
 lists every dependency with its requirement and shows an estimated weight/size cost
 before anything is loaded. **Inspect and hash the model files** prints each file's
 SHA-256 locally so you can compare it with the publisher's own values — the state

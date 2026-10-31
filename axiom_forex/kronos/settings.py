@@ -94,6 +94,11 @@ class KronosSettings:
     #: A local directory, or a Hub id (``NeoQuasar/Kronos-small``).  Empty means
     #: "use the official id from the registry".
     model_path: str = ""
+    #: A local tokenizer directory.  The official tokenizer is published as its own
+    #: repository, so a fully offline install usually needs a second folder.  Empty
+    #: means "the official tokenizer id", or the model folder when that is local and
+    #: holds both.
+    tokenizer_path: str = ""
     #: Pinned revision for a Hub download; required for a download, optional for
     #: a local directory.
     revision: str = ""
@@ -139,7 +144,8 @@ class KronosSettings:
     @property
     def tokenizer_reference(self) -> str:
         item = self.spec
-        return item.tokenizer_id if item else ""
+        official = item.tokenizer_id if item else ""
+        return self.tokenizer_path.strip() or official
 
     @property
     def bar_seconds(self) -> int:
@@ -153,6 +159,7 @@ class KronosSettings:
         payload = {
             "model_key": self.model_key,
             "model_reference": self.model_reference,
+            "tokenizer_reference": self.tokenizer_reference,
             "revision": self.revision,
             "code_path": self.code_path,
             "device": self.device,
@@ -204,6 +211,25 @@ class KronosSettings:
                     "official download source",
                 )
             )
+
+        tokenizer_path = self.tokenizer_path.strip()
+        if tokenizer_path:
+            folder = Path(tokenizer_path).expanduser()
+            if not folder.is_dir():
+                problems.append(
+                    SettingProblem(
+                        "kronos.tokenizer_path",
+                        "the tokenizer location must be a local directory",
+                    )
+                )
+            elif not (folder / "config.json").exists():
+                problems.append(
+                    SettingProblem(
+                        "kronos.tokenizer_path",
+                        "that folder holds no config.json; point it at the official "
+                        "tokenizer download",
+                    )
+                )
 
         if self.code_path.strip():
             checkout = Path(self.code_path.strip()).expanduser()
@@ -362,6 +388,7 @@ class KronosSettings:
         return {
             "model_key": self.model_key,
             "model_path": self.model_path,
+            "tokenizer_path": self.tokenizer_path,
             "revision": self.revision,
             "code_path": self.code_path,
             "device": self.device,
@@ -399,6 +426,7 @@ class KronosSettings:
         return cls(
             model_key=str(get("model_key") or base.model_key),
             model_path=str(get("model_path") or ""),
+            tokenizer_path=str(get("tokenizer_path") or ""),
             revision=str(get("revision") or ""),
             code_path=str(get("code_path") or ""),
             device=str(get("device") or base.device),
@@ -438,6 +466,7 @@ class KronosSettings:
             {
                 "model_key": one("model_key") or base.model_key,
                 "model_path": one("model_path"),
+                "tokenizer_path": one("tokenizer_path"),
                 "revision": one("revision"),
                 "code_path": one("code_path"),
                 "device": one("device") or base.device,
@@ -471,6 +500,12 @@ class KronosSettings:
             _control("Basic", "model_path", "Model file location", "text", self.model_path,
                      help="A local directory containing the model, or blank to use the "
                           "official Hub id. Downloads are a separate, explicit action."),
+            _control("Basic", "tokenizer_path", "Tokenizer file location", "text",
+                     self.tokenizer_path,
+                     help="Optional local directory for the tokenizer. The official "
+                          "tokenizer is published as its own repository, so a fully "
+                          "offline install usually needs it. Blank uses the official id, "
+                          "or the model folder when that folder is local."),
             _control("Basic", "device", "Device", "select", self.device, options=list(DEVICES),
                      help="auto resolves to cuda:0, then mps, then cpu, exactly as the "
                           "predictor does."),
