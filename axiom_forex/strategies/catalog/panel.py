@@ -277,6 +277,10 @@ class CatalogPanel:
             blockers = blockers + [
                 dict(item) for item in record.blockers(max_age_seconds=self.max_record_age_seconds)
             ]
+        # While it is running, "already running" is not a blocker; the status says so.
+        blockers = [
+            item for item in blockers if item.get("reason") != "paper_test_already_running"
+        ]
         return {
             "available": paper is not None,
             "built": paper is not None,
@@ -565,13 +569,21 @@ class CatalogPanel:
 
     def _paper_start(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
+            current = self._paper
+        if current is not None and current.running:
+            return self._refuse(
+                "paper_test_already_running",
+                "A live-market paper test is already running. Stop it before starting "
+                "another one; the running test is untouched.",
+            )
+        # Rebuild on every start, so a newer evaluation is picked up and the watch
+        # list is re-checked against what the terminal offers right now.  Open paper
+        # positions come back from the state file.
+        built = self.build_paper_test()
+        if not built.get("ok"):
+            return built
+        with self._lock:
             paper = self._paper
-        if paper is None:
-            built = self.build_paper_test()
-            if not built.get("ok"):
-                return built
-            with self._lock:
-                paper = self._paper
         if paper is None:  # pragma: no cover - build_paper_test sets it
             return self._refuse("paper_test_not_built", "The paper test could not be built.")
         result = paper.start()

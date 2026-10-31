@@ -285,3 +285,27 @@ def test_the_panel_view_is_json_friendly_and_says_what_it_cannot_do(tmp_path):
     assert "not a profitable strategy" in view["claim"]
     assert panel.act("catalog-not-a-thing", {})["ok"] is False
     panel.stop()
+
+
+def test_a_restart_picks_up_a_newer_evaluation(tmp_path):
+    panel = _panel(tmp_path)
+    first = catalog()[0]
+    second = catalog()[1]
+    _write_record(panel, candidate_id=first.candidate_id)
+    assert panel.act(ACTION_PAPER_START, {})["ok"] is True
+    panel.act(ACTION_PAPER_STOP, {})
+    assert panel.paper_view()["watches"][0]["candidate_id"] == first.candidate_id
+    _write_record(panel, candidate_id=second.candidate_id)
+    assert panel.act(ACTION_PAPER_START, {})["ok"] is True
+    assert panel.paper_view()["watches"][0]["candidate_id"] == second.candidate_id
+    panel.act(ACTION_PAPER_STOP, {})
+
+
+def test_a_running_test_does_not_show_start_as_its_own_blocker(tmp_path):
+    panel = _panel(tmp_path)
+    candidate = catalog()[0]
+    _write_record(panel, candidate_id=candidate.candidate_id)
+    assert panel.act(ACTION_PAPER_START, {})["ok"] is True
+    reasons = {item["reason"] for item in panel.paper_view()["blockers"]}
+    assert "paper_test_already_running" not in reasons
+    panel.act(ACTION_PAPER_STOP, {})
