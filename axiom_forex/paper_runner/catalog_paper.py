@@ -49,11 +49,14 @@ from ..strategies.catalog.indicators import IndicatorCache
 from ..strategies.catalog.primitives import HigherTimeframe
 from ..strategies.catalog.simulate import context_for, signals_for
 from .qualification import (
+    FAILED,
     FAILURE_CYCLE,
+    NOT_STARTED,
     PASSED,
     PAUSE_CYCLE_ERROR,
     PAUSE_OPERATOR,
     PAUSE_STALE,
+    STOPPED,
     QualificationClock,
 )
 
@@ -524,17 +527,29 @@ class CatalogPaperTest:
         if qualification is None:
             return
         status = qualification.state().get("status")
-        if status == RUNNING:
-            # The process came back with a test already under way: the dark
-            # period is booked as a pause, never credited.
-            qualification.recover()
-            return
-        if status == PASSED:
+        verdict = qualification.verdict()
+        if verdict == PASSED:
             # A completed pass is not thrown away by starting another run.
             return
+        if verdict != FAILED:
+            if status == RUNNING:
+                # The process came back with a test already under way: the dark
+                # period is booked as a pause, never credited.
+                qualification.recover()
+                return
+            if status == STOPPED:
+                # A stop is a pause.  Half a day of counted time survives it, and
+                # the stopped period is booked as exactly that.
+                qualification.resume()
+                return
         qualification.start(
             symbols=sorted({watch.symbol for watch in self._watches}),
             candidates=[watch.key for watch in self._watches],
+            note=(
+                f"replacing a {verdict} record"
+                if verdict not in ("", NOT_STARTED)
+                else ""
+            ),
         )
 
     def _heartbeat_from_cycle(self) -> None:

@@ -443,3 +443,42 @@ def test_a_full_day_of_healthy_cycles_qualifies_and_changes_no_execution_state(t
     for key in ("armed", "execution_mode", "mode", "account"):
         assert key not in snapshot
     assert snapshot["simulated"] is True
+
+
+def test_stopping_and_starting_again_resumes_the_same_day(tmp_path):
+    test, qualification, clock = _qualified(tmp_path, FakeQuotes(age_seconds=2.0))
+    test._open_qualification()
+    clock.advance(60)
+    test._cycle()
+    test.stop()
+    counted = qualification.state()["active_seconds"]
+    assert counted == 60
+
+    clock.advance(1800)  # the operator paused the test for half an hour
+    revived, revived_qualification, revived_clock = _qualified(
+        tmp_path, FakeQuotes(age_seconds=2.0), clock=clock
+    )
+    revived._open_qualification()
+    report = revived_qualification.report()
+    assert report["status"] == "RUNNING"
+    assert report["active_seconds"] == counted
+    assert report["pause_seconds_by_reason"]["runner_stopped"] >= 1800
+    revived_clock.advance(60)
+    revived._cycle()
+    assert revived_qualification.report()["active_seconds"] == counted + 60
+
+
+def test_a_new_test_after_a_failed_one_says_what_it_replaced(tmp_path):
+    test, qualification, clock = _qualified(tmp_path, FakeQuotes(age_seconds=2.0))
+    test._open_qualification()
+    qualification.record_failure("cycle_error", detail="RuntimeError")
+    clock.advance(60)
+    test._cycle()
+    test.stop()
+    assert qualification.verdict() == "FAILED"
+
+    again, again_qualification, _clock = _qualified(tmp_path, FakeQuotes(age_seconds=2.0))
+    again._open_qualification()
+    events = again_qualification.state()["events"]
+    assert events[0]["kind"] == "started"
+    assert "replacing a FAILED record" in events[0]["note"]

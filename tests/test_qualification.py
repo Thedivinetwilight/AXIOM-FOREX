@@ -287,3 +287,29 @@ def test_pausing_an_unhealthy_tick_with_no_reason_is_still_a_pause(tmp_path):
     report = qualification.report()
     assert report["active_seconds"] == 0
     assert report["pause_seconds_by_reason"]["unhealthy_unknown"] == 60
+
+
+def test_a_stop_is_a_pause_and_the_counted_time_survives_it(tmp_path):
+    qualification, clock = _fresh(tmp_path)
+    qualification.start()
+    run_healthy(clock, qualification, seconds=3600)
+    qualification.stop()
+    stopped = qualification.state()["active_seconds"]
+    clock.advance(2 * 3600)
+    assert qualification.resume()["status"] == RUNNING
+    report = qualification.report()
+    assert report["active_seconds"] == stopped
+    assert report["pause_seconds_by_reason"]["runner_stopped"] >= 2 * 3600
+    assert report["verdict"] == RUNNING
+    run_healthy(clock, qualification, seconds=600)
+    assert qualification.report()["active_seconds"] == stopped + 600
+
+
+def test_a_failed_record_is_never_reopened(tmp_path):
+    qualification, clock = _fresh(tmp_path)
+    qualification.start()
+    run_healthy(clock, qualification, seconds=60)
+    qualification.stop(failed=True)
+    assert qualification.resume()["status"] == FAILED
+    assert qualification.verdict() == FAILED
+    assert qualification.live_available() is False

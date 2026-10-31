@@ -852,3 +852,20 @@ def test_switching_to_paper_stops_new_entries_and_does_not_close_positions(live,
     assert live.adapter.armed is False
     # Nothing was liquidated: a mode switch ends authorisation, not positions.
     assert fake.send_requests == []
+
+
+def test_live_sizing_and_limits_start_empty_and_are_never_the_paper_numbers(live):
+    blanks = live.blank_values()
+    assert blanks["quantity"] == ""
+    assert blanks["max_open_positions"] == ""
+    assert blanks["max_daily_loss_account"] == ""
+    values_before = dict(blanks)
+    # Asking what the form holds changes nothing, and arming with them is refused.
+    assert live.blank_values() == values_before
+    result = live.arm(
+        blanks, confirmation=PHRASE, reviewed=True,
+        account_confirmation=live.confirmed_account_fingerprint(),
+    )
+    assert result.armed is False
+    reasons = {item.reason for item in result.blockers}
+    assert "live_plan_invalid" in reasons or "quantity_not_tradable" in reasons

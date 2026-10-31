@@ -362,6 +362,44 @@ class QualificationClock:
                 self._write()
             return self.state()
 
+    def resume(self, *, reason: str = PAUSE_RUNNER_STOPPED) -> dict[str, Any]:
+        """Reopen a stopped test without crediting the stopped period.
+
+        A stop is a pause, not a verdict: the operator stopped the runner, or it
+        ended itself, and half a day of counted time is not thrown away because of
+        it.  The interval between the stop and this moment is booked under
+        ``reason`` and counts for nothing.  A *failed* record is never reopened --
+        it has to be run again from the start, and the new test says what it
+        replaced.
+        """
+
+        with self._lock:
+            self._load()
+            status = self._document.get("status")
+            if status != STOPPED or self.verdict() == FAILED:
+                return self.state()
+            now = self._clock()
+            last = (
+                _parse(self._document.get("last_tick_at"))
+                or _parse(self._document.get("finished_at"))
+                or _parse(self._document.get("started_at"))
+            )
+            gap = 0.0 if last is None else max(0.0, (now - last).total_seconds())
+            if gap > 0:
+                self._add_pause(last, now, reason, gap)
+            self._document["status"] = RUNNING
+            self._document["finished_at"] = ""
+            self._document["last_tick_at"] = _iso(now)
+            self._document["events"].append(
+                {
+                    "at": _iso(now),
+                    "kind": "resumed",
+                    "note": f"reopened after {gap:.0f}s stopped; that time is not counted",
+                }
+            )
+            self._write()
+            return self.state()
+
     # -- the heartbeat -----------------------------------------------------
 
     def tick(
