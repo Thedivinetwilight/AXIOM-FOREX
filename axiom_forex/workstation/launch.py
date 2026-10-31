@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import sys
 import webbrowser
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -438,10 +439,28 @@ def _wire_catalog(app, args, settings_path: Path):
             return None
 
     def bars_provider(symbol: str, timeframe: str, count: int):
-        leg = getattr(app, "live", None)
-        if leg is None:
-            raise RuntimeError("no live leg is attached, so there are no broker bars")
-        return leg.bars(symbol, timeframe, count=count)
+        """Historical bars, straight from the read-only terminal.
+
+        Deliberately *not* the live leg: the paper path must not depend on the
+        advanced broker-terms document, and this reads the same rate history the
+        terminal already exposes without touching any execution object.
+        """
+
+        terminal = terminal_provider()
+        if terminal is None:
+            raise RuntimeError("terminal_not_connected")
+        seconds = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400}.get(
+            timeframe, 0
+        )
+        if not seconds:
+            raise RuntimeError("unsupported_timeframe")
+        end = datetime.now(timezone.utc)
+        # Ask for a generous window: sessions and weekends make a calendar span
+        # longer than bars x bar_seconds, and the caller trims to ``count``.
+        start = end - timedelta(seconds=int(seconds * max(1, count) * 1.8))
+        rows = terminal.rates(symbol, timeframe, start=start, end=end)
+        rows = list(rows)
+        return rows[-int(count) :] if count else rows
 
     return CatalogPanel(
         root=_repo_root(),

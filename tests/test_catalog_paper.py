@@ -225,3 +225,32 @@ def test_the_test_cannot_reach_an_order_surface():
         assert forbidden not in source
     snapshot = _test(Path("/tmp") / "catalog-paper-check", FakeQuotes()).snapshot()
     assert "no order" in snapshot["claim"].lower() or "No order" in snapshot["claim"]
+
+
+def test_symbol_facts_are_read_from_the_terminal_shaped_record_list(tmp_path):
+    """The real terminal answers with a sequence of raw records; so does this."""
+
+    from decimal import Decimal
+
+    class ListQuotes(FakeQuotes):
+        def symbol_info(self, symbol):
+            return [
+                {
+                    "name": symbol,
+                    "currency_base": "EUR",
+                    "currency_profit": "USD",
+                    "digits": 5,
+                    "point": Decimal("0.00001"),
+                    "trade_contract_size": Decimal("100000"),
+                    "trade_mode": 4,
+                    "trade_allowed": True,
+                    "spread": 4,
+                }
+            ]
+
+    quotes = ListQuotes(age_seconds=1.0)
+    test = _test(tmp_path, quotes)
+    test._cycle()
+    positions = test.snapshot()["positions"]
+    assert positions, "the terminal-shaped record must still price a real fill"
+    assert positions[0]["lots"] == 0.1

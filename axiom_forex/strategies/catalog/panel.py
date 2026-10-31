@@ -157,6 +157,9 @@ class CatalogPanel:
         self._paper_watches: tuple[Any, ...] = ()
         self._lock = threading.RLock()
         self._last_outcome: dict[str, Any] = {}
+        #: The evaluation record is a few megabytes once a thousand rows are in it,
+        #: and every page render asks for it twice.  One parse per file change.
+        self._record_cache: tuple[tuple[int, int], Any] | None = None
 
     # -- what the page shows ----------------------------------------------
 
@@ -199,8 +202,24 @@ class CatalogPanel:
             "default_bars": DEFAULT_BARS,
         }
 
+    def _record(self) -> Any:
+        """The stored evaluation, parsed once per file change."""
+
+        path = self.store.path
+        try:
+            stat = path.stat()
+        except OSError:
+            self._record_cache = None
+            return None
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        if self._record_cache is not None and self._record_cache[0] == stamp:
+            return self._record_cache[1]
+        loaded = self.store.load()
+        self._record_cache = (stamp, loaded)
+        return loaded
+
     def evaluation_view(self) -> dict[str, Any]:
-        record = self.store.load()
+        record = self._record()
         counts = summary_counts()
         view: dict[str, Any] = {
             "catalog": counts,
@@ -245,7 +264,7 @@ class CatalogPanel:
             paper = self._paper
             watches = self._paper_watches
         snapshot = paper.snapshot() if paper is not None else {}
-        record = self.store.load()
+        record = self._record()
         blockers = (
             list(paper.blockers())
             if paper is not None
@@ -377,6 +396,7 @@ class CatalogPanel:
             return
         try:
             self.store.save(report)
+            self._record_cache = None
         except OSError:
             with self._lock:
                 run.reason = "record_not_written"
@@ -492,7 +512,7 @@ class CatalogPanel:
     def build_paper_test(self, *, limit: int = 12) -> dict[str, Any]:
         """Build the live-market paper test from the stored evaluation."""
 
-        record = self.store.load()
+        record = self._record()
         if record is None:
             return self._refuse(
                 "no_evaluation_on_record",

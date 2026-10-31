@@ -26,6 +26,8 @@ data/cache/
 data/history/
 data/universe/
 data/datasets/
+# The catalog's evaluation record and the paper test's ledger/state.
+data/catalog/
 results/*
 !results/.gitkeep
 

@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from axiom_forex.config.terminal_facts import symbol_facts
 from axiom_forex.research.engine import cost_model_for
 from axiom_forex.research.series import build_series, rows_from_rates
 
@@ -831,10 +832,34 @@ class CatalogPaperTest:
     # -- inputs -----------------------------------------------------------
 
     def _facts(self, symbol: str) -> Any:
+        """One symbol's facts, however this quote source reports them.
+
+        The terminal returns a *sequence of raw records*; a test double may return
+        one object.  Both are normalised here, and a record that does not carry the
+        fields a cost model needs stays unknown rather than being defaulted.
+        """
+
         try:
-            return self._quotes.symbol_info(symbol)
+            raw = self._quotes.symbol_info(symbol)
         except Exception:  # a missing fact is reported, never guessed
             return None
+        entries = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+        for entry in entries:
+            if entry is None:
+                continue
+            if getattr(entry, "point", None) is not None and getattr(
+                entry, "contract_size", None
+            ) is not None and not isinstance(entry, Mapping):
+                return entry
+            captured = symbol_facts(entry)
+            if captured is None:
+                continue
+            if not captured.broker_symbol:
+                captured = replace(captured, broker_symbol=symbol)
+            if captured.point is None or captured.contract_size is None:
+                return None
+            return captured
+        return None
 
     def _cost_for(self, symbol: str) -> Any:
         facts = self._facts(symbol)
