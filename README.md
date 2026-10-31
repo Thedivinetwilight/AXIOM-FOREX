@@ -253,13 +253,37 @@ from the offline paper platform, not from your broker. Session-time values come 
 declared calendar and are marked indicative until your broker's sessions, holidays, and DST
 rules are confirmed.
 
-The interface contains exactly ten form actions: `connect`, `disconnect`,
-`acknowledge-sign-in`, `confirm`, `unconfirm`, `symbols`, the two execution-mode actions
-`mode-paper` and `mode-live`, and the paper runner's `runner-start` / `runner-stop`. There is no
-endpoint that can place an order, arm trading, switch accounts, or change broker settings; the
-mode actions never connect, submit, or arm anything, the runner actions only start and stop
-*simulated* cycles, and all of them are refused without the page's per-process nonce. There is
-no JSON API.
+### Start here: the guided paper session
+
+The home page (`/`) is **Start paper trading**: one summary, five steps, one obvious next
+action. Work down the list and the page moves with you.
+
+| Step | What it does | The button |
+| --- | --- | --- |
+| 1 | Connects to the MetaTrader 5 terminal you already have open and signed in | **Connect (read-only)** |
+| 2 | Chooses the forex symbols, verified from the terminal's own currency legs | **Select all verified forex pairs** (or *Choose individually*) |
+| 3 | Reads the terminal's own bars for those symbols and shows what it got, with a reason for anything unusable | the check runs on page load; **Re-check** refreshes it |
+| 4 | Evaluates the declared strategy catalog on that history | **Evaluate the strategies** |
+| 5 | Starts the live-market paper session on the screened rows you tick | **Start PAPER trading** |
+
+Above the steps, one status block states the connection, the paper session (not started,
+running, stopped or blocked), the selected symbols and strategy, the newest market data and
+whether it is fresh, the last signal, the last simulated order or fill, the open paper
+positions, and the exact reason trading has not started. The highlighted step's button is the
+primary action, and the same button sits in the top block.
+
+Everything else — Account & symbols, Data & evaluation, Strategy library, Quick setup,
+broker terms, the trading mode page, the LIVE workflow, Kronos, System health — is under a
+collapsed **Advanced** disclosure and in the sidebar's *Advanced* group. None of it is needed
+for the five steps above.
+
+The guided page adds no new kind of action: it posts `connect`, `symbols`,
+`catalog-evaluate`, `catalog-paper-start` and `catalog-paper-stop`, all of which already
+existed and all of which refuse without the page's per-process nonce. The whole set of state
+changes is declared in `POST_ACTIONS` in `axiom_forex/workstation/app.py` and pinned by the
+test suite. There is no endpoint that can place an order, arm trading, switch accounts, or
+change broker settings; the mode actions never connect, submit, or arm anything, the paper
+actions only simulate fills, and there is no JSON API.
 
 ## Paper strategy runner (real-time, paper fills only)
 

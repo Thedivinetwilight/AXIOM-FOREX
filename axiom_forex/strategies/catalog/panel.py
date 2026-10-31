@@ -152,6 +152,9 @@ class CatalogPanel:
         self._paper_watches: tuple[Any, ...] = ()
         self._lock = threading.RLock()
         self._last_outcome: dict[str, Any] = {}
+        #: The last history check, with the instant it was made: a page render
+        #: reuses it for a few seconds instead of re-reading the terminal.
+        self._data_check: tuple[tuple[tuple[str, ...], str], datetime, dict[str, Any]] | None = None
         #: The evaluation record is a few megabytes once a thousand rows are in it,
         #: and every page render asks for it twice.  One parse per file change.
         self._record_cache: tuple[tuple[int, int], Any] | None = None
@@ -196,6 +199,117 @@ class CatalogPanel:
             "default_timeframe": DEFAULT_EVAL_TIMEFRAME,
             "default_bars": DEFAULT_BARS,
         }
+
+    def data_check(
+        self,
+        *,
+        symbols: Sequence[str],
+        timeframe: str = DEFAULT_EVAL_TIMEFRAME,
+        ttl_seconds: float = 20.0,
+    ) -> dict[str, Any]:
+        """Read the terminal's own bars and say whether they can be evaluated.
+
+        This is the check the guided start page shows as step 3: it asks the same
+        bar reader the evaluation uses, builds the same series, and reports per
+        symbol how many bars arrived, when the last one is, and -- when it cannot
+        be used -- the reason.  Nothing is written, nothing is substituted, and a
+        symbol the terminal cannot supply is never filled with sample data.
+
+        The read is bounded (``MAX_EVAL_SYMBOLS`` symbols) and cached for a few
+        seconds, so a page render cannot turn into a terminal poll.
+        """
+
+        names = [str(name).strip() for name in symbols if str(name).strip()][:MAX_EVAL_SYMBOLS]
+        chosen = timeframe if timeframe in EVAL_TIMEFRAMES else DEFAULT_EVAL_TIMEFRAME
+        now = self.clock()
+        key = (tuple(names), chosen)
+        with self._lock:
+            cached = self._data_check
+            if cached is not None and cached[0] == key:
+                age = (now - cached[1]).total_seconds()
+                if 0 <= age < ttl_seconds:
+                    return dict(cached[2])
+        view: dict[str, Any] = {
+            "available": True,
+            "timeframe": chosen,
+            "checked_at": now.isoformat(),
+            "bars_requested": DEFAULT_BARS,
+            "requested": len(names),
+            "rows": [],
+            "usable": 0,
+            "reason": "",
+            "message": "",
+        }
+        if self._terminal() is None:
+            view.update(
+                available=False,
+                reason="no_terminal",
+                message=(
+                    "Connect the terminal first: the bars come from its own rate "
+                    "history, and there is no other price source."
+                ),
+            )
+        elif not names:
+            view.update(
+                reason="no_symbols_selected",
+                message="Choose the forex symbols to use before checking history.",
+            )
+        else:
+            slots, skipped = self._build_slots(names, chosen)
+            rows: list[dict[str, Any]] = []
+            for slot in slots:
+                stamps = list(getattr(slot.series, "timestamps", ()) or ())
+                last = stamps[-1] if stamps else None
+                age_seconds = None
+                if last is not None:
+                    try:
+                        age_seconds = max(0.0, (now - last).total_seconds())
+                    except TypeError:
+                        age_seconds = None
+                rows.append(
+                    {
+                        "symbol": slot.symbol,
+                        "timeframe": slot.timeframe,
+                        "usable": True,
+                        "bars": len(slot.series),
+                        "first": stamps[0].isoformat() if stamps else "",
+                        "last": last.isoformat() if last is not None else "",
+                        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+                        "origin": slot.origin,
+                        "reason": "",
+                    }
+                )
+            for item in skipped:
+                rows.append(
+                    {
+                        "symbol": str(item.get("symbol") or ""),
+                        "timeframe": str(item.get("timeframe") or chosen),
+                        "usable": False,
+                        "bars": 0,
+                        "first": "",
+                        "last": "",
+                        "age_seconds": None,
+                        "origin": "",
+                        "reason": str(item.get("reason") or "no usable history"),
+                    }
+                )
+            view["rows"] = rows
+            view["usable"] = len(slots)
+            view["message"] = (
+                f"{len(slots)} of {len(names)} symbol(s) returned usable "
+                f"{chosen} history."
+                if slots
+                else "No selected symbol returned usable history."
+            )
+            if not slots:
+                view["reason"] = "no_usable_history"
+        if view["available"]:
+            # Only a read that actually reached the terminal is cached: after a
+            # connect the page must not keep saying "no terminal" for a few more
+            # seconds.
+            with self._lock:
+                self._data_check = (key, now, dict(view))
+        return view
 
     def _record(self) -> Any:
         """The stored evaluation, parsed once per file change."""
@@ -506,8 +620,16 @@ class CatalogPanel:
 
     # -- the paper test ----------------------------------------------------
 
-    def build_paper_test(self, *, limit: int = 12) -> dict[str, Any]:
-        """Build the live-market paper test from the stored evaluation."""
+    def build_paper_test(
+        self, *, limit: int = 12, keys: Sequence[str] | None = None
+    ) -> dict[str, Any]:
+        """Build the live-market paper test from the stored evaluation.
+
+        ``keys`` narrows the test to the rows the operator ticked on the start
+        page.  An empty or absent selection means every screened row, which is
+        what the older page has always done; a selection that matches nothing is
+        refused rather than quietly widened back to everything.
+        """
 
         record = self._record()
         if record is None:
@@ -527,6 +649,17 @@ class CatalogPanel:
                 "No candidate passed the screen on the data that was evaluated, so "
                 "there is nothing to paper trade yet.",
             )
+        wanted = {str(key) for key in (keys or ()) if str(key)}
+        if wanted:
+            chosen = [row for row in rows if paper_row_key(row) in wanted]
+            if not chosen:
+                return self._refuse(
+                    "none_of_the_chosen_candidates",
+                    "None of the candidates you ticked is in the screened set on "
+                    "record. Re-run the evaluation, or tick one of the rows it "
+                    "lists; nothing was widened back to all of them.",
+                )
+            rows = chosen
         terminal = self._terminal()
         if terminal is None:
             return self._refuse(
@@ -574,7 +707,7 @@ class CatalogPanel:
         # Rebuild on every start, so a newer evaluation is picked up and the watch
         # list is re-checked against what the terminal offers right now.  Open paper
         # positions come back from the state file.
-        built = self.build_paper_test()
+        built = self.build_paper_test(keys=_as_list(payload.get("paper")))
         if not built.get("ok"):
             return built
         with self._lock:
@@ -676,6 +809,19 @@ def _point(facts: SymbolFacts | None) -> float | None:
     return float(facts.point)
 
 
+def paper_row_key(row: Mapping[str, Any]) -> str:
+    """The stable name of one screened row: symbol, timeframe, candidate.
+
+    It is what the start page's tick boxes carry, and it is derived from the
+    record rather than from the page, so a row that is no longer on record simply
+    does not match.
+    """
+
+    return "|".join(
+        str(row.get(field) or "") for field in ("symbol", "timeframe", "candidate_id")
+    )
+
+
 def _as_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -697,4 +843,5 @@ __all__ = [
     "EVAL_TIMEFRAMES",
     "MAX_EVAL_SYMBOLS",
     "MAX_RECORD_AGE_SECONDS",
+    "paper_row_key",
 ]

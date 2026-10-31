@@ -65,7 +65,9 @@ from .views import render_message, render_page
 
 #: Paths that render a page. Everything else is refused.
 GET_ROUTES: dict[str, tuple[str, str]] = {
-    "/": ("overview", "Overview"),
+    # The guided start page is the home page: five steps from a cold start to a
+    # PAPER session.  The classic overview stays reachable at /overview.
+    "/": ("start", "Start paper trading"),
     "/overview": ("overview", "Overview"),
     "/setup": ("setup", "Setup"),
     "/account": ("account", "Account & symbols"),
@@ -660,7 +662,12 @@ class WorkstationApp:
                     self.strategies_view(query=query) if page == "strategies" else {}
                 ),
                 "research": self.research_view() if page == "quick-setup" else {},
-                "catalog": self.catalog_view() if page == "quick-setup" else {},
+                "catalog": (
+                    self.catalog_view() if page in {"quick-setup", "start"} else {}
+                ),
+                # The guided page's step 3: the terminal's own bars, read once and
+                # cached by the panel.  Nothing is written and nothing is stored.
+                "data_check": self.data_check_view() if page == "start" else {},
                 "live_summary": self.live_summary(),
             },
         )
@@ -718,6 +725,27 @@ class WorkstationApp:
             view["result"] = dict(self.catalog_result)
             self.catalog_result = {}
         return view
+
+    def data_check_view(self) -> dict[str, Any]:
+        """Whether the terminal can supply bars for the selected symbols.
+
+        Read-only, bounded, and cached by the panel: it asks the same bar reader
+        the evaluation uses, so step 3 and step 4 cannot disagree about history.
+        A failure is reported as a state with a reason, never as a traceback.
+        """
+
+        if self.catalog is None:
+            return {"available": False, "reason": "no_catalog_panel"}
+        symbols = list(getattr(self.wizard.choices, "selected_symbols", ()) or ())
+        try:
+            return dict(self.catalog.data_check(symbols=symbols))
+        except Exception as exc:  # a read model never raises into the page
+            self._log(f"history check failed: {type(exc).__name__}")
+            return {
+                "available": False,
+                "reason": "history_check_failed",
+                "message": "The history check could not run. Nothing was changed.",
+            }
 
     def research_view(self) -> dict[str, Any]:
         """The short-setup panel's own view, or an honest "not wired" state."""
@@ -783,9 +811,13 @@ class WorkstationApp:
             )
         payload: dict[str, Any] = {}
         for name, values in form.items():
-            if name == "nonce":
+            if name in {"nonce", "return_to"}:
                 continue
             payload[name] = values if len(values) > 1 else (values[0] if values else "")
+        # The guided page and the full catalog page share these actions; the form
+        # says which one it came from, and only those two are accepted.
+        return_to = str((form.get("return_to") or [""])[0])
+        back = return_to if return_to in {"/", "/quick-setup"} else "/quick-setup"
         try:
             outcome = dict(self.catalog.act(action, payload))
         except Exception as exc:  # the panel promises not to raise; this is the wall
@@ -805,8 +837,8 @@ class WorkstationApp:
             + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused"))
         )
         if outcome.get("ok"):
-            return HTTPStatus.SEE_OTHER, str(outcome.get("path") or "/quick-setup"), ""
-        return HTTPStatus.CONFLICT, "/quick-setup", str(outcome.get("message") or "")
+            return HTTPStatus.SEE_OTHER, back, ""
+        return HTTPStatus.CONFLICT, back, str(outcome.get("message") or "")
 
     def _strategies_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         if self.strategies is None:
@@ -1081,6 +1113,10 @@ class WorkstationApp:
         except Exception:
             records = ()
         catalogue = build_catalogue(records)
+        # The guided start page and the symbol page share this action; the form
+        # says which page to return to, and only those two are accepted.
+        return_to = str((form.get("return_to") or [""])[0])
+        back = return_to if return_to in {"/", "/account"} else "/account"
         bulk = str((form.get("bulk") or [""])[0] or "").strip()
         unknown: tuple[str, ...] = ()
         unverified: tuple[str, ...] = ()
@@ -1089,7 +1125,7 @@ class WorkstationApp:
                 self._log("select all refused: no verified tradable forex pair")
                 return (
                     HTTPStatus.SEE_OTHER,
-                    "/account",
+                    back,
                     "Select all was not applied: the terminal reported no verified, "
                     "tradable currency pair.",
                 )
@@ -1124,7 +1160,7 @@ class WorkstationApp:
             )
         if was_confirmed and not wizard.choices.confirmed:
             message += " The configuration is unconfirmed until you confirm it again."
-        return HTTPStatus.SEE_OTHER, "/account", message
+        return HTTPStatus.SEE_OTHER, back, message
 
     # -- live execution -----------------------------------------------------
     def _live_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:

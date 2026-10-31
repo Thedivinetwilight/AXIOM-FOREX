@@ -23,6 +23,7 @@ from __future__ import annotations
 from html import escape
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import guide
 from .context import PageContext, data_class_label
 from .symbols import build_catalogue, catalogue_message
 
@@ -30,26 +31,51 @@ APP_NAME = "AXIOM"
 APP_SUBTITLE = "FOREX"
 
 #: Navigation, in order.  ``icon`` is an inline SVG path (no icon font).
+#: The whole navigation, in the order the sidebar shows it.  The guided start
+#: page comes first because it is the only page a new operator needs; everything
+#: else is a detail page that the guide links to when it is the next thing to do.
 NAV: tuple[tuple[str, str, str], ...] = (
-    ("overview", "/", "Overview"),
-    ("quick-setup", "/quick-setup", "Quick setup"),
-    ("mode", "/mode", "Trading mode"),
-    ("live", "/live", "Live execution"),
-    ("setup", "/setup", "Setup"),
+    ("start", "/", "Start paper trading"),
+    ("positions", "/positions", "Paper positions"),
+    ("activity", "/activity", "Activity"),
     ("account", "/account", "Account & symbols"),
-    ("positions", "/positions", "Positions"),
     ("data", "/data", "Data & evaluation"),
-    ("kronos", "/kronos", "Kronos forecast"),
     ("strategies", "/strategies", "Strategy library"),
+    ("quick-setup", "/quick-setup", "Quick setup"),
     # Kept, and kept later: live execution still needs this document. The short
     # setup above is what the normal flow now uses.
     ("provider-setup", "/provider-setup", "Broker terms (advanced)"),
-    ("activity", "/activity", "Activity"),
+    ("mode", "/mode", "Trading mode"),
+    ("live", "/live", "Live execution"),
+    ("setup", "/setup", "Setup steps"),
+    ("kronos", "/kronos", "Kronos forecast"),
+    ("overview", "/overview", "Overview (classic)"),
     ("health", "/health", "System health"),
+)
+
+#: How the sidebar groups the same links: the guided path first, then the pages
+#: the guide opens, then everything an experienced operator may still need.
+NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Start here", ("start", "positions", "activity")),
+    ("Steps in detail", ("account", "data", "strategies")),
+    (
+        "Advanced",
+        (
+            "quick-setup",
+            "provider-setup",
+            "mode",
+            "live",
+            "setup",
+            "kronos",
+            "overview",
+            "health",
+        ),
+    ),
 )
 
 ICONS: dict[str, str] = {
     "overview": "M3 12h4l3 7 4-14 3 7h4",
+    "start": "M5 4l14 8-14 8z",
     "mode": "M4 7h10l-3-3M20 17H10l3 3M14 7h6v6M10 17H4v-6",
     "live": "M12 3v3M12 18v3M3 12h3M18 12h3M6.3 6.3l2.1 2.1M15.6 15.6l2.1 2.1M17.7 6.3l-2.1 2.1M8.4 15.6l-2.1 2.1M12 9a3 3 0 100 6 3 3 0 000-6z",
     "setup": "M4 6h10M4 12h16M4 18h7M18 4v4M16 18h4M20 16v4",
@@ -218,6 +244,43 @@ details.disclosure{margin-top:12px;border:1px solid var(--line);border-radius:va
 details.disclosure>summary{cursor:pointer;color:var(--text-2);font-size:12.5px;font-weight:600}
 details.disclosure[open]>summary{margin-bottom:6px}
 .scroll-list{max-height:220px;overflow:auto;padding-right:6px}
+.nav-group{display:flex;flex-direction:column;gap:2px}
+.nav-group + .nav-group{margin-top:var(--s3)}
+.hero{display:grid;gap:var(--s3)}
+.hero h2{margin:0;font-size:20px;letter-spacing:-.01em}
+.hero p{margin:0;color:var(--text-2);max-width:72ch}
+/* The guided start page has its own step styling: the setup checklist keeps the
+   .step class it has always had, and the two must not collide. */
+.guide-steps{display:flex;flex-direction:column;gap:var(--s3);margin:0;padding:0;list-style:none}
+.guide-step{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4) var(--s5);background:var(--panel)}
+.guide-step--next{border-color:rgba(94,200,255,.5);box-shadow:0 0 0 1px rgba(94,200,255,.16) inset}
+.guide-step--blocked{border-color:rgba(255,192,97,.32)}
+.guide-step--unavailable{opacity:.75}
+.guide-head{display:flex;align-items:flex-start;gap:var(--s3)}
+.guide-num{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:13.5px;background:var(--panel-2);border:1px solid var(--line);flex:0 0 auto}
+.guide-step--done .guide-num{background:rgba(69,217,154,.16);color:var(--ok);border-color:rgba(69,217,154,.42)}
+.guide-step--running .guide-num{background:rgba(201,167,255,.18);color:var(--paper);border-color:rgba(201,167,255,.42)}
+.guide-step--next .guide-num{background:var(--accent-2);color:var(--accent-ink);border-color:transparent}
+.guide-step h3{margin:0;font-size:15.5px;font-weight:640}
+.guide-why{margin:4px 0 0;font-size:13px;color:var(--text-3);max-width:88ch}
+.guide-detail{margin:var(--s2) 0 0;font-size:13.5px;color:var(--text)}
+.guide-status{margin-left:auto;flex:0 0 auto}
+.guide-blockers{margin:var(--s2) 0 0;padding-left:18px;font-size:12.5px;color:var(--warn)}
+.guide-step .step-actions{margin-top:var(--s3);display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
+.tile-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--s3)}
+.tile{border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius);padding:12px var(--s4);background:var(--panel-2);min-width:0}
+.tile--ok{border-left-color:var(--ok)}
+.tile--warn{border-left-color:var(--warn)}
+.tile--paper{border-left-color:var(--paper)}
+.tile--muted{border-left-color:var(--text-3)}
+.tile .tile-label{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-3)}
+.tile .tile-value{font-size:16px;font-weight:640;margin-top:2px;word-break:break-word}
+.tile .tile-detail{font-size:12.5px;color:var(--text-2);margin-top:4px;word-break:break-word}
+.candidate-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:6px;max-height:220px;overflow:auto;margin-top:var(--s2);border:1px solid var(--line);border-radius:var(--radius);padding:var(--s2);background:rgba(0,0,0,.16)}
+.candidate{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-radius:8px;font-size:13px}
+.candidate:hover{background:rgba(255,255,255,.04)}
+.candidate input{width:15px;height:15px;margin-top:2px;accent-color:var(--accent-2)}
+.candidate .cand-meta{display:block;font-size:11.5px;color:var(--text-3)}
 
 /* ---------- states ---------- */
 .empty{
@@ -567,15 +630,23 @@ def connect_label(ctx: PageContext, *, long: bool = True) -> str:
 
 
 def _nav(ctx: PageContext) -> str:
-    items = []
-    for key, href, label in NAV:
-        current = " aria-current='page'" if key == ctx.page else ""
-        badge = ctx.nav_badge(key)
-        badge_html = f"<span class='nav-badge'>{escape(badge)}</span>" if badge else ""
-        items.append(
-            f"<a href='{href}'{current}>{icon(key)}<span>{escape(label)}</span>{badge_html}</a>"
+    by_key = {key: (href, label) for key, href, label in NAV}
+    groups = []
+    for title, keys in NAV_GROUPS:
+        items = []
+        for key in keys:
+            href, label = by_key[key]
+            current = " aria-current='page'" if key == ctx.page else ""
+            badge = ctx.nav_badge(key)
+            badge_html = f"<span class='nav-badge'>{escape(badge)}</span>" if badge else ""
+            items.append(
+                f"<a href='{href}'{current}>{icon(key)}<span>{escape(label)}</span>{badge_html}</a>"
+            )
+        groups.append(
+            f"<div class='nav-group'><span class='nav-label'>{escape(title)}</span>"
+            f"{''.join(items)}</div>"
         )
-    return f"<nav class='nav' aria-label='Main'><span class='nav-label'>Workspace</span>{''.join(items)}</nav>"
+    return f"<nav class='nav' aria-label='Main'>{''.join(groups)}</nav>"
 
 
 def _sidebar(ctx: PageContext) -> str:
@@ -1552,6 +1623,256 @@ def render_mode(ctx: PageContext) -> str:
             hint="The mode switch never replaces, relaxes, or skips any of these.",
         )
         + audit_body
+    )
+    return render_shell(ctx, body)
+
+
+# --------------------------------------------------------------------------
+# the guided start page
+# --------------------------------------------------------------------------
+
+#: One chip tone per step state.  The border and the number badge do the rest.
+_STEP_TONES = {
+    guide.DONE: "ok",
+    guide.RUNNING: "paper",
+    guide.NEXT: "warn",
+    guide.BLOCKED: "warn",
+    guide.UNAVAILABLE: "muted",
+}
+
+
+def _symbol_facts_for_start(ctx: PageContext, catalog: Mapping[str, Any]) -> dict[str, Any]:
+    """How many symbols the terminal offers, using the view that already read them.
+
+    The catalog panel reads the terminal's symbol catalogue for the pages that
+    show it, so the guided page reuses that instead of walking the terminal a
+    second time.  When there is no panel, the picker's own catalogue is used --
+    which costs nothing while disconnected, because there is nothing to walk.
+    """
+
+    reported_view = dict((catalog.get("symbols") or {}) if catalog else {})
+    if reported_view.get("available"):
+        counts = dict(reported_view.get("counts") or {})
+        return {
+            "available": True,
+            "reported": int(counts.get("reported") or 0),
+            "select_all": int(counts.get("usable") or 0),
+            "source": "catalog",
+        }
+    catalogue = build_catalogue(_symbol_records(ctx.wizard.session), sample=ctx.terminal.simulated)
+    return {
+        "available": bool(catalogue.available),
+        "reported": int(catalogue.counts.get("reported") or 0),
+        "select_all": len(catalogue.select_all),
+        "source": "picker",
+    }
+
+
+def _start_tile(tile: Mapping[str, Any]) -> str:
+    return (
+        f"<div class='tile tile--{escape(str(tile.get('tone') or 'muted'))}'>"
+        f"<div class='tile-label'>{escape(str(tile.get('label') or ''))}</div>"
+        f"<div class='tile-value'>{escape(str(tile.get('value') or ''))}</div>"
+        f"<div class='tile-detail'>{escape(str(tile.get('detail') or ''))}</div></div>"
+    )
+
+
+def _start_action(ctx: PageContext, step: Mapping[str, Any], *, primary: bool, candidates: Sequence[Mapping[str, Any]] = ()) -> str:
+    """The one button for a step: an existing action, or a link to its page."""
+
+    label = str(step.get("action_label") or "")
+    if not label:
+        return ""
+    tone = "primary" if primary else ""
+    klass = "btn btn--primary" if primary else "btn"
+    if step.get("action_kind") == "link":
+        return f"<a class='{klass}' href='{escape(str(step.get('action_target') or '/'))}'>{escape(label)}</a>"
+    if step.get("action_kind") != "form":
+        return ""
+    fields = "".join(
+        f"<input type='hidden' name='{escape(str(name))}' value='{escape(str(value))}'>"
+        for name, value in (step.get("fields") or ())
+    )
+    choices = ""
+    if candidates:
+        boxes = "".join(
+            "<label class='candidate'"
+            f" title='{escape(str(item.get('candidate') or ''))}'>"
+            f"<input type='checkbox' name='paper' value='{escape(str(item.get('key') or ''))}' checked>"
+            f"<span><strong>{escape(str(item.get('symbol') or ''))}</strong>"
+            f" · {escape(str(item.get('timeframe') or ''))}"
+            f" · {escape(str(item.get('family') or item.get('candidate') or ''))}"
+            f"<span class='cand-meta'>"
+            + escape(str(item.get("summary") or item.get("candidate") or ""))
+            + "</span></span></label>"
+            for item in candidates
+        )
+        choices = (
+            "<div class='candidate-list' role='group' "
+            "aria-label='Screened candidates to paper trade'>"
+            f"{boxes}</div>"
+        )
+    return (
+        f"<form method='post' action='/actions/{escape(str(step.get('action_target') or ''))}'>"
+        f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>{fields}"
+        f"{choices}<div class='step-actions'><button class='{klass}' type='submit'>"
+        f"{escape(label)}</button></div></form>"
+    )
+
+
+def _start_step(
+    ctx: PageContext, step: Mapping[str, Any], *, next_key: str, candidates: Sequence[Mapping[str, Any]]
+) -> str:
+    state = str(step.get("state") or "")
+    blocked = [str(item) for item in (step.get("blockers") or ())][:4]
+    more = len(step.get("blockers") or ()) - len(blocked)
+    blocker_html = ""
+    if blocked:
+        blocker_html = (
+            "<ul class='guide-blockers'>"
+            + "".join(f"<li>{escape(item)}</li>" for item in blocked)
+            + (f"<li>and {more} more…</li>" if more > 0 else "")
+            + "</ul>"
+        )
+    links = "".join(
+        f"<a class='btn btn-sm btn--ghost' href='{escape(str(href))}'>{escape(str(label))}</a>"
+        for label, href in (step.get("links") or ())
+    )
+    return (
+        f"<li class='guide-step guide-step--{escape(state)}' id='step-{escape(str(step.get('key') or ''))}'>"
+        "<div class='guide-head'>"
+        f"<span class='guide-num' aria-hidden='true'>{escape(str(step.get('number') or ''))}</span>"
+        f"<div><h3>{escape(str(step.get('title') or ''))}"
+        f"<span class='visually-hidden'> — step {escape(str(step.get('number') or ''))}</span></h3>"
+        f"<p class='guide-why'>{escape(guide.STEP_WHY.get(str(step.get('key')), ''))}</p></div>"
+        f"<span class='guide-status'>{chip(str(step.get('status') or ''), _STEP_TONES.get(state, 'muted'))}</span>"
+        "</div>"
+        + (f"<p class='guide-detail'>{escape(str(step.get('detail') or ''))}</p>" if step.get("detail") else "")
+        + blocker_html
+        + (
+            "<div class='step-actions'>"
+            + _start_action(ctx, step, primary=str(step.get("key")) == next_key, candidates=candidates)
+            + links
+            + "</div>"
+            if step.get("action_label") or links
+            else ""
+        )
+        + "</li>"
+    )
+
+
+def render_start(ctx: PageContext) -> str:
+    """The guided start page: five steps, one summary, one obvious next click.
+
+    It reads the same views the detail pages read -- the terminal, the setup
+    wizard, the catalog panel's evaluation and paper test, and the panel's own
+    history check -- and it names only actions the workstation already allows.
+    Nothing here can connect on its own, change the mode, or send an order.
+    """
+
+    catalog = dict((ctx.extra or {}).get("catalog") or {})
+    model = guide.build(
+        terminal=ctx.terminal,
+        wizard_view=ctx.wizard.view(),
+        symbols=_symbol_facts_for_start(ctx, catalog),
+        catalog=catalog,
+        data_check=dict((ctx.extra or {}).get("data_check") or {}),
+        runner=dict(ctx.runner or {}),
+    )
+    summary = dict(model["summary"])
+    next_key = str(summary.get("next_key") or "")
+
+    if summary.get("ready"):
+        headline = notice(
+            "ok",
+            "Paper trading is running",
+            "Live terminal quotes price the entries and exits; the fills are simulated "
+            "locally and no order is sent. Every figure below is PAPER.",
+        )
+    else:
+        headline = notice(
+            "warn",
+            "Not trading yet",
+            str(summary.get("reason") or ""),
+        )
+    hero = (
+        "<section class='card'><div class='hero'>"
+        "<div class='row' style='justify-content:space-between'>"
+        "<h2>Start paper trading</h2>"
+        f"<span class='row'>{execution_mode_chip(ctx)}{connection_chip(ctx)}</span></div>"
+        "<p>Five short steps, in order. PAPER only: quotes come from MetaTrader 5, fills "
+        "are simulated on this machine, and no order is ever sent. LIVE is never started "
+        "here.</p>"
+        + (
+            notice(
+                "warn",
+                "The execution mode is LIVE",
+                "This guided flow starts the PAPER session, which is unrelated to the "
+                "LIVE mode and never sends an order. Arming and starting LIVE has its "
+                "own review on the Live execution page, and nothing here can do it.",
+            )
+            if ctx.live_mode
+            else ""
+        )
+        + f"{headline}"
+        + (
+            "<div class='step-actions'>"
+            + (
+                # The last step's choice lives with its list: an anchor, not a
+                # second start form, so a tick made below is never ignored.
+                "<a class='btn btn--primary' href='#step-paper'>"
+                "Choose the candidates below</a>"
+                if model["next_step"].key == "paper"
+                else _start_action(ctx, model["next_step"].audit_view(), primary=True)
+            )
+            + "</div>"
+            if model.get("next_step") is not None
+            else ""
+        )
+        + f"<p class='small muted'>{summary.get('steps_done', 0)} of "
+        f"{summary.get('steps_total', 5)} steps complete.</p>"
+        "</div></section>"
+    )
+
+    tiles = "<div class='tile-grid'>" + "".join(_start_tile(tile) for tile in summary.get("tiles") or []) + "</div>"
+    candidates = tuple(model.get("candidates") or ())
+    steps = (
+        "<ol class='guide-steps'>"
+        + "".join(
+            _start_step(ctx, step.audit_view(), next_key=next_key, candidates=candidates)
+            for step in model["steps"]
+        )
+        + "</ol>"
+    )
+    advanced = (
+        "<details class='advanced'>"
+        "<summary>Advanced — every other page</summary>"
+        "<p class='small muted'>These pages are not needed for the five steps. They hold "
+        "the same facts in more detail, and the LIVE workflow with its own safeguards.</p>"
+        "<div class='tile-grid'>"
+        + "".join(
+            f"<a class='btn' href='{escape(str(href))}'>{escape(str(label))}"
+            f"<span class='visually-hidden'> — {escape(str(hint))}</span></a>"
+            for label, href, hint in model.get("advanced") or ()
+        )
+        + "</div></details>"
+    )
+
+    body = (
+        hero
+        + card(
+            "Where things stand",
+            tiles,
+            hint="One summary of the terminal, the paper session, the selected symbols and "
+            "strategy, the market data, and what the session has done so far.",
+        )
+        + card(
+            "What to do next",
+            steps,
+            hint="Work down the list. The highlighted step is the next one to finish; "
+            "every button posts an action this workstation already allows.",
+        )
+        + advanced
     )
     return render_shell(ctx, body)
 
@@ -5390,6 +5711,7 @@ def render_connecting(ctx: PageContext) -> str:
 
 
 PAGES = {
+    "start": render_start,
     "overview": render_overview,
     "mode": render_mode,
     "setup": render_setup,
@@ -5433,4 +5755,5 @@ __all__ = [
     "render_positions",
     "render_setup",
     "render_shell",
+    "render_start",
 ]

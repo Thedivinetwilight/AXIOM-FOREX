@@ -336,7 +336,7 @@ def test_the_session_never_connects_on_its_own():
 
 def test_startup_pages_say_disconnected_before_any_click():
     app = app_for(simulated_wizard())
-    page = parse(render(app, "/"))
+    page = parse(render(app, "/overview"))
     assert "Simulator · not started" in page.text_content
     assert "No account mode" in page.text_content
     assert "Preview stopped" in page.text_content
@@ -414,7 +414,7 @@ def test_a_running_simulator_never_claims_to_be_connected_to_mt5():
     app = connected_simulator_app()
     assert app.wizard.session.view()["connected"] is True  # the preview is running
 
-    page = parse(render(app, "/"))
+    page = parse(render(app, "/overview"))
     text = page.text_content
     assert "Simulator · not MT5" in text
     assert "Preview running" in text
@@ -435,7 +435,7 @@ def test_simulated_values_are_labelled_sample_not_detected():
     for label in ("Sample Broker / server", "Sample Currency", "Sample Leverage"):
         assert label in account_html, label
 
-    overview = render(app, "/")
+    overview = render(app, "/overview")
     assert "Sample mode: DEMO" in overview
     assert "Sample value — no account was read" in overview.replace("\n", " ")
 
@@ -453,7 +453,7 @@ def test_setup_step_four_is_labelled_as_sample_and_not_complete():
 
 def test_a_live_terminal_is_labelled_real_broker_not_sample():
     app = confirmed_live_app()
-    overview = render(app, "/")
+    overview = render(app, "/overview")
     assert "REAL BROKER" in parse(overview).text_content
     assert "SIMULATED / SAMPLE DATA" not in overview
     account = render(app, "/account")
@@ -994,7 +994,7 @@ def test_paper_snapshot_failure_degrades_instead_of_raising():
             raise RuntimeError("boom")
 
     app = WorkstationApp(wizard=simulated_wizard(), platform=Broken())
-    assert parse(render(app, "/")).has_text("Paper platform unavailable")
+    assert parse(render(app, "/overview")).has_text("Paper platform unavailable")
 
 
 def test_the_confirm_refusal_messages_are_operator_readable():
@@ -1257,7 +1257,7 @@ def _page_text(app: WorkstationApp, path: str) -> str:
 def test_the_runner_panel_shows_its_state_and_offers_one_action():
     app = app_for(simulated_wizard())
     app.runner = FakeRunnerHost()
-    for path in ("/", "/positions", "/activity"):
+    for path in ("/positions", "/activity"):
         text = _page_text(app, path)
         assert "Paper strategy runner" in text, path
         assert "STOPPED" in text, path
@@ -1302,7 +1302,7 @@ def test_a_refused_start_reports_the_reason_and_trades_nothing():
 
 def test_without_a_configured_runner_the_ui_says_so_and_refuses():
     app = app_for(simulated_wizard())
-    text = _page_text(app, "/")
+    text = _page_text(app, "/positions")
     assert "Paper strategy runner" in text
     assert "No runner configured" in text
     status, _, message = app.act("runner-start", {"nonce": [app.nonce]})
@@ -1313,7 +1313,7 @@ def test_without_a_configured_runner_the_ui_says_so_and_refuses():
 def test_the_runner_panel_is_never_green_unless_the_runner_says_running():
     app = app_for(simulated_wizard())
     app.runner = FakeRunnerHost()
-    html = app.page("/")[1]
+    html = app.page("/positions")[1]
     assert "RUNNING (PAPER)" not in html
     assert "STOPPED" in html
 
@@ -1356,7 +1356,7 @@ class LiveRunnerHost(FakeRunnerHost):
 def test_the_runner_panel_shows_whether_a_live_path_exists_and_whether_it_is_ready():
     app = app_for(simulated_wizard())
     app.runner = LiveRunnerHost()
-    text = _page_text(app, "/")
+    text = _page_text(app, "/positions")
     assert "Live path" in text
     assert "blocked" in text.lower()
     assert "mode_not_live" in text
@@ -1367,7 +1367,7 @@ def test_the_runner_panel_shows_whether_a_live_path_exists_and_whether_it_is_rea
 def test_a_ready_live_path_is_reported_as_ready_and_not_as_green_by_default():
     app = app_for(simulated_wizard())
     app.runner = LiveRunnerHost(ready=True)
-    text = _page_text(app, "/")
+    text = _page_text(app, "/positions")
     assert "Live path" in text
     assert "ready" in text.lower()
     # The *runner* is still stopped: a ready path is not a running strategy.
