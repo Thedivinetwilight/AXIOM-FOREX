@@ -9,6 +9,8 @@ that the two bulk controls go through the same save path as the checkboxes.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from axiom_forex.workstation.setup import SetupChoices
@@ -18,6 +20,7 @@ from axiom_forex.workstation.symbols import (
     build_catalogue,
     records_from_terminal,
 )
+from axiom_forex.workstation.views import STYLES
 from tests.test_workstation_ui import (
     app_for,
     live_session,
@@ -328,3 +331,139 @@ def test_with_symbols_never_leaves_a_changed_set_confirmed(names):
         assert updated.confirmed is True
     else:
         assert updated.confirmed is False
+
+
+# ---------------------------------------------------------------------------
+# 3. layout: three full-width sections, and nothing in a narrow side column
+# ---------------------------------------------------------------------------
+#
+# The page used to be a two-column grid: the account card alone on the left and
+# the tall picker stacked in a narrow right column.  On a desktop that wasted most
+# of the width.  These tests hold the replacement: the account is a compact strip
+# across the top, the pair grid gets the full page, and the confirmation closes it.
+
+
+def many_excluded_app(excluded: int = 113):
+    """Two verified pairs and a broker-sized pile of instruments that are not."""
+
+    specs = [spec("EURUSD.a", "EUR", "USD"), spec("GBPUSD", "GBP", "USD")]
+    specs += [spec(f"SYNTH{i:03d}") for i in range(excluded)]
+    session = live_session(specs=tuple(specs))
+    app = app_for(live_wizard(session=session))
+    app.act("connect", {"nonce": [app.nonce]})
+    return app
+
+
+def _content(html: str) -> str:
+    return html.split("<div class='content'>", 1)[1]
+
+
+def _style_block(marker: str) -> str:
+    """The body of one CSS rule or at-rule, braces balanced."""
+
+    start = STYLES.index(marker)
+    opening = STYLES.index("{", start)
+    depth = 0
+    for index in range(opening, len(STYLES)):
+        if STYLES[index] == "{":
+            depth += 1
+        elif STYLES[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return STYLES[opening + 1 : index]
+    raise AssertionError(f"unbalanced stylesheet at {marker}")
+
+
+def test_the_account_page_is_three_full_width_sections_in_order():
+    body = _content(render(many_excluded_app(), "/account"))
+
+    titles = re.findall(r"<h2>([^<]*)</h2>", body)
+    assert titles == ["Detected account", "Symbols to observe", "Confirm configuration"]
+    # One card per section, each a direct child of the page: no two-column wrapper
+    # and no side column for the picker to be squeezed into.
+    assert body.count("<section class='card") == 3
+    assert "grid--two" not in body
+
+
+def test_the_detected_account_summary_is_a_wrapping_tile_grid():
+    html = render(rich_live_app(), "/account")
+    body = _content(html)
+
+    assert "<div class='summary-grid'>" in body
+    assert body.count("<div class='summary'>") == 8
+    # Long single lines would defeat a full-width card; the tiles wrap instead.
+    rule = _style_block(".summary-grid{")
+    assert "repeat(auto-fit,minmax(190px,1fr))" in rule
+    assert "grid-template-columns:minmax(0,1fr) minmax(0,1fr)" not in rule
+
+
+def test_the_pair_grid_is_left_to_span_the_page():
+    body = _content(render(many_excluded_app(), "/account"))
+
+    grid = body.split("<div class='symbol-grid'", 1)[1]
+    # The grid's own container is the only thing wrapping it: it is not nested
+    # inside a narrower column or a second card.
+    assert grid.index("</section>") > grid.index("EURUSD.a")
+    rule = _style_block(".symbol-grid{")
+    assert "repeat(auto-fill,minmax(200px,1fr))" in rule
+    assert "max-height:360px" in rule
+
+
+def test_the_excluded_symbols_are_collapsed_and_scroll_inside_a_bounded_box():
+    html = render(many_excluded_app(), "/account")
+    page = parse(html)
+
+    disclosure = [
+        attrs for attrs in page.by_tag("details") if "disclosure" in attrs.get("class", "")
+    ]
+    assert len(disclosure) == 1
+    assert "open" not in disclosure[0]  # collapsed until the operator asks
+    assert page.has_text("113 reported symbol(s) not selectable")
+
+    # When it is opened the list scrolls on its own: a hundred rows must not
+    # stretch the page and push the confirmation out of reach.
+    assert "<div class='scroll-list' tabindex='0'" in html
+    rule = _style_block(".scroll-list{")
+    assert "max-height:220px" in rule
+    assert "overflow:auto" in rule
+
+
+def test_a_narrow_viewport_stacks_every_section_instead_of_squeezing_it():
+    narrow = _style_block("@media (max-width:1120px){")
+
+    assert ".split{grid-template-columns:minmax(0,1fr)}" in narrow
+    # The tile grid needs no breakpoint of its own: auto-fit drops to one column
+    # when the viewport cannot fit two tiles.
+    assert "repeat(auto-fit,minmax(190px,1fr))" in _style_block(".summary-grid{")
+    assert "repeat(auto-fill,minmax(200px,1fr))" in _style_block(".symbol-grid{")
+
+
+def test_the_layout_change_adds_no_post_target_or_field():
+    body = _content(render(many_excluded_app(), "/account"))
+    actions = set(re.findall(r"<form method='post' action='([^']+)'", body))
+    forms = re.findall(r"<form\b[^>]*>.*?</form>", body, re.S)
+
+    # The same two targets as before the redesign: the save form and the
+    # confirmation (plus disconnect, which lives in the top bar outside this body).
+    assert actions == {"/actions/symbols", "/actions/confirm"}
+    assert len(forms) == 3  # checkbox form, bulk controls, confirm
+    assert all("name='nonce'" in form for form in forms)
+    assert "name='symbol'" in body
+
+
+def test_reading_the_new_layout_changes_nothing():
+    app = rich_live_app()
+    app.act("symbols", {"nonce": [app.nonce], "symbol": ["GBPUSD"]})
+    app.act("confirm", {"nonce": [app.nonce]})
+    before = app.wizard.view()
+    connects = app.wizard.session.connect_count
+    mode = app.mode_view()["mode"]
+
+    render(app, "/account")
+    render(app, "/account")
+
+    after = app.wizard.view()
+    assert list(after["symbols_selected"]) == list(before["symbols_selected"]) == ["GBPUSD"]
+    assert after["confirmed"] is True
+    assert app.wizard.session.connect_count == connects
+    assert app.mode_view()["mode"] == mode

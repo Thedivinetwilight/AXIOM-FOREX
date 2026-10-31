@@ -209,6 +209,15 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .dl dt{color:var(--text-3)}
 .dl dd{margin:0;color:var(--text);font-weight:520;word-break:break-word}
 .dl--wide{grid-template-columns:minmax(180px,auto) 1fr}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--s3) var(--s4);margin-top:var(--s3)}
+.summary{min-width:0}
+.summary .label{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-3)}
+.summary .value{margin-top:3px;font-size:13.5px;font-weight:540;color:var(--text);word-break:break-word;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.split{display:grid;gap:var(--s5);grid-template-columns:minmax(0,1.4fr) minmax(280px,1fr);align-items:start}
+details.disclosure{margin-top:12px;border:1px solid var(--line);border-radius:var(--radius);background:rgba(0,0,0,.14);padding:10px var(--s4)}
+details.disclosure>summary{cursor:pointer;color:var(--text-2);font-size:12.5px;font-weight:600}
+details.disclosure[open]>summary{margin-bottom:6px}
+.scroll-list{max-height:220px;overflow:auto;padding-right:6px}
 
 /* ---------- states ---------- */
 .empty{
@@ -299,7 +308,7 @@ pre.template{
 .check-ico{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:800;margin-top:2px}
 .check-ico--ok{background:rgba(69,217,154,.18);color:var(--ok)}
 .check-ico--bad{background:rgba(255,138,138,.18);color:var(--danger)}
-.symbol-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px;max-height:320px;overflow:auto;padding:var(--s2);border:1px solid var(--line);border-radius:var(--radius);background:rgba(0,0,0,.16)}
+.symbol-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px;max-height:360px;overflow:auto;padding:var(--s2);border:1px solid var(--line);border-radius:var(--radius);background:rgba(0,0,0,.16)}
 .symbol{display:flex;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;font-size:13px}
 .symbol:hover{background:rgba(255,255,255,.04)}
 .symbol input{width:15px;height:15px;accent-color:var(--accent-2)}
@@ -345,6 +354,7 @@ select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;
 /* ---------- responsive ---------- */
 @media (max-width:1120px){
   .grid--two{grid-template-columns:minmax(0,1fr)}
+  .split{grid-template-columns:minmax(0,1fr)}
   .content{padding:var(--s5)}
   .topbar{padding:var(--s4) var(--s5)}
 }
@@ -461,6 +471,22 @@ def dl(pairs: Iterable[tuple[str, str]], *, wide: bool = False) -> str:
         f"<dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in pairs
     )
     return f"<dl class='dl{' dl--wide' if wide else ''}'>{rows}</dl>"
+
+
+def summary_grid(facts: Iterable[tuple[str, str]]) -> str:
+    """Labelled facts as small tiles that wrap across the page.
+
+    A full-width card shows these in several columns instead of one long list, so
+    the page does not grow tall just because it is wide.  Each value is already
+    escaped or built from a helper.
+    """
+
+    cells = "".join(
+        f"<div class='summary'><div class='label'>{escape(label)}</div>"
+        f"<div class='value'>{value}</div></div>"
+        for label, value in facts
+    )
+    return f"<div class='summary-grid'>{cells}</div>"
 
 
 def action_form(action: str, nonce: str, label: str, *, tone: str = "", extra: str = "", confirm: str = "") -> str:
@@ -1770,13 +1796,18 @@ def _symbol_picker(
         )
 
     if catalogue.excluded:
+        # Collapsed by default, and the list scrolls inside its own box once open:
+        # a broker can report a hundred instruments that are not forex pairs, and
+        # none of them should push the confirmation off the page.
         body += (
-            "<details style='margin-top:10px'><summary class='small muted'>"
+            "<details class='disclosure'><summary>"
             f"{len(catalogue.excluded)} reported symbol(s) not selectable — why</summary>"
+            "<div class='scroll-list' tabindex='0' role='group' "
+            "aria-label='Reported symbols that cannot be selected, with the reason'>"
             + _symbol_reason_list(
                 [(item["broker_symbol"], item["reason"]) for item in catalogue.excluded]
             )
-            + "</details>"
+            + "</div></details>"
         )
 
     if sample:
@@ -1836,7 +1867,7 @@ def render_account(ctx: PageContext) -> str:
             f"<strong>{escape(heading)}</strong>"
             f"<p>{escape(note)}</p></div>"
             f"{chip(mode['detected'], 'simulated' if sample else ('ok' if mode['is_demo'] else 'warn'), dot=True)}</div>"
-            + dl(
+            + summary_grid(
                 [
                     (
                         f"{prefix}Account fingerprint",
@@ -1857,8 +1888,7 @@ def render_account(ctx: PageContext) -> str:
                         f"{prefix}Terminal trading permission",
                         escape("allowed" if terminal.trade_allowed else "not allowed"),
                     ),
-                ],
-                wide=True,
+                ]
             )
             + "<p class='small muted' style='margin-top:12px'>Balances, equity, and profit are never read "
             "into this interface, and the account number is shown only as a fingerprint."
@@ -1900,7 +1930,8 @@ def render_account(ctx: PageContext) -> str:
         )
     else:
         confirm_body = (
-            "<div class='stack'>"
+            "<div class='split'>"
+            "<div>"
             + dl(
                 [
                     (
@@ -1913,6 +1944,7 @@ def render_account(ctx: PageContext) -> str:
                 ],
                 wide=True,
             )
+            + "</div><div class='stack'>"
             + (
                 notice(
                     "ok",
@@ -1932,17 +1964,22 @@ def render_account(ctx: PageContext) -> str:
                 if view["confirmed"]
                 else action_form("confirm", ctx.action_nonce, "Confirm configuration", tone="primary")
             )
-            + "</div></div>"
+            + "</div></div></div>"
         )
 
+    # Full width, top to bottom: the account is a summary strip, the pair grid is
+    # the part that needs the room, and the confirmation closes the page.  Nothing
+    # sits in a narrow side column, so nothing is squeezed.
     body = (
-        "<div class='grid grid--two'>"
-        + card(
+        card(
             "Detected account",
             account_body,
             right=mode_chip(ctx) if terminal.connected else chip("Not connected", "muted"),
+            hint=(
+                "What the terminal already has selected. AXIOM reads it; it never "
+                "switches account, logs in, or changes the mode."
+            ),
         )
-        + "<div class='grid'>"
         + card(
             "Symbols to observe",
             symbol_body,
@@ -1953,7 +1990,6 @@ def render_account(ctx: PageContext) -> str:
             ),
         )
         + card("Confirm configuration", confirm_body, hint="Step 5 of setup.")
-        + "</div></div>"
     )
     return render_shell(ctx, body)
 
