@@ -195,6 +195,13 @@ class MT5SymbolInfo:
     ask: Decimal | None
     time: datetime | None
     raw_keys: tuple[str, ...] = ()
+    #: Overnight financing, exactly as the terminal reports it.  ``swap_mode``
+    #: says how to read the two numbers; ``None`` means the terminal did not
+    #: publish them, which is recorded rather than defaulted to zero.
+    swap_long: Decimal | None = None
+    swap_short: Decimal | None = None
+    swap_mode: int | None = None
+    swap_rollover3days: int | None = None
 
     @property
     def tradable(self) -> bool:
@@ -218,6 +225,10 @@ class MT5SymbolInfo:
             "filling_mask": self.filling_mask,
             "stops_level": self.stops_level,
             "freeze_level": self.freeze_level,
+            "swap_long": str(self.swap_long) if self.swap_long is not None else "",
+            "swap_short": str(self.swap_short) if self.swap_short is not None else "",
+            "swap_mode": self.swap_mode,
+            "swap_rollover3days": self.swap_rollover3days,
             "source": "mt5_symbol_info",
         }
 
@@ -532,6 +543,16 @@ class MT5Terminal:
             ask=_decimal(_field(info, "ask")),
             time=_utc(_field(info, "time")),
             raw_keys=raw_keys,
+            swap_long=_decimal(_field(info, "swap_long")),
+            swap_short=_decimal(_field(info, "swap_short")),
+            swap_mode=(
+                None if _field(info, "swap_mode") is None else int(_field(info, "swap_mode"))
+            ),
+            swap_rollover3days=(
+                None
+                if _field(info, "swap_rollover3days") is None
+                else int(_field(info, "swap_rollover3days"))
+            ),
         )
 
     def resolve_symbol(self, spec: CurrencyPairSpec) -> str:
