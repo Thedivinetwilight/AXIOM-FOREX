@@ -4146,6 +4146,9 @@ def render_quick_setup(ctx: PageContext) -> str:
         )
     )
 
+    if _catalog_view(ctx).get("available"):
+        body.append(render_catalog_section(ctx))
+
     body.append(
         notice(
             "ok",
@@ -4156,6 +4159,375 @@ def render_quick_setup(ctx: PageContext) -> str:
         )
     )
     return render_shell(ctx, body)
+
+
+def _catalog_view(ctx: PageContext) -> Mapping[str, Any]:
+    return dict((ctx.extra or {}).get("catalog") or {})
+
+
+def _chip_row(items: Sequence[Mapping[str, Any]]) -> str:
+    if not items:
+        return "<p class='small muted'>none</p>"
+    parts = []
+    for item in items:
+        label = str(item.get("broker_symbol") or item.get("key") or item.get("symbol") or "")
+        pair = str(item.get("pair") or "")
+        reason = str(item.get("reason") or "")
+        text = f"{label} · {pair}" if pair else label
+        parts.append(chip(text, "warn" if reason else "ok"))
+    return " ".join(parts)
+
+
+def render_catalog_section(ctx: PageContext) -> str:
+    """The Monday test: forex-only symbols, one evaluation, one paper start.
+
+    Every sentence here is either a number from a file or a refusal with a reason.
+    Nothing is described as profitable, and nothing on this card can place an order.
+    """
+
+    view = _catalog_view(ctx)
+    if not view.get("available"):
+        return card(
+            "Catalog and live-market paper test",
+            notice(
+                "warn",
+                "The catalog panel is not wired into this workstation",
+                "This process has no catalog panel, so there is nothing to evaluate or "
+                "paper trade here. Nothing else is affected.",
+            ),
+        )
+
+    nonce = escape(ctx.action_nonce)
+    symbols = dict(view.get("symbols") or {})
+    evaluation = dict(view.get("evaluation") or {})
+    paper = dict(view.get("paper") or {})
+    counts = dict(evaluation.get("catalog") or {})
+    result = dict(view.get("result") or {})
+    body: list[str] = []
+
+    if result.get("message"):
+        body.append(
+            notice(
+                "ok" if result.get("ok") else "warn",
+                "The last catalog action",
+                str(result.get("message")),
+            )
+        )
+        for row in result.get("rows") or []:
+            if isinstance(row, Mapping) and row.get("usable") is False:
+                body.append(
+                    notice(
+                        "warn",
+                        f"{row.get('symbol', '')} {row.get('timeframe', '')}",
+                        str(row.get("reason") or "no usable history"),
+                    )
+                )
+
+    # 1. what the catalog is
+    body.append(
+        "<div class='data-grid'>"
+        + kpi("Candidates", str(counts.get("candidates", 0)), foot="declared, reproducible")
+        + kpi(
+            "Distinct rule structures",
+            str(counts.get("distinct_rule_structures", 0)),
+            foot="logic, before parameters",
+        )
+        + kpi(
+            "Families",
+            str(len(counts.get("families") or {})),
+            foot="trend, momentum, reversion, breakout, volatility, multi-timeframe",
+        )
+        + "</div>"
+    )
+
+    # 2. the forex-only symbol offer
+    if symbols.get("available"):
+        counted = dict(symbols.get("counts") or {})
+        body.append(
+            notice(
+                "ok",
+                "Forex symbols from your terminal",
+                f"{counted.get('forex_pairs', 0)} currency pair(s) of "
+                f"{counted.get('reported', 0)} reported symbol(s); "
+                f"{counted.get('excluded', 0)} excluded as not a pair (metals, share "
+                "CFDs, indices). Majors first: "
+                + ", ".join(symbols.get("majors") or ())
+                + ".",
+            )
+        )
+        choices = [dict(item) for item in symbols.get("choices") or []]
+        body.append(
+            "<p class='small'>Recommended now: "
+            + (_chip_row([{"broker_symbol": name} for name in (symbols.get("recommended") or [])]))
+            + "</p>"
+        )
+        if choices:
+            rows = [
+                (
+                    item.get("broker_symbol", ""),
+                    item.get("pair", ""),
+                    "yes" if item.get("major") else "no",
+                    "yes" if item.get("usable") else "no",
+                    item.get("reason", ""),
+                )
+                for item in choices[:12]
+            ]
+            body.append(
+                table(
+                    "Forex symbols the terminal reports",
+                    (
+                        ("broker_symbol", "Symbol"),
+                        ("pair", "Pair"),
+                        ("major", "Major"),
+                        ("usable", "Usable"),
+                        ("reason", "If not usable, why"),
+                    ),
+                    rows,
+                )
+            )
+        excluded = [dict(item) for item in symbols.get("excluded") or []]
+        if excluded:
+            body.append(
+                "<p class='small muted'>Not offered as forex: "
+                + " ".join(
+                    f"{escape(str(item.get('broker_symbol', '')))}"
+                    f" ({escape(str(item.get('kind', '')))})"
+                    for item in excluded[:10]
+                )
+                + "</p>"
+            )
+    else:
+        body.append(
+            notice(
+                "warn",
+                "No forex symbols to choose yet",
+                str(symbols.get("message") or "Connect the terminal first."),
+            )
+        )
+
+    # 3. the evaluation
+    if evaluation.get("running"):
+        body.append(
+            notice(
+                "ok",
+                "Evaluation running",
+                f"Started {evaluation.get('started_at', '')}. It runs in the background on "
+                "the terminal's own bars; reload this page for the result.",
+            )
+        )
+    if evaluation.get("on_record"):
+        recorded = dict(evaluation.get("counts") or {})
+        screen = dict(recorded.get("screen") or {})
+        body.append(
+            notice(
+                "ok",
+                "Evaluation on record",
+                f"{recorded.get('tested', 0)} row(s) tested, {recorded.get('skipped', 0)} "
+                f"skipped, {recorded.get('failed', 0)} failed; "
+                f"{screen.get('PASSED_SCREEN', 0)} passed the screen. Data origin: "
+                f"{evaluation.get('data_origin', 'unknown')}. Paper set: "
+                f"{evaluation.get('paper_set_summary', 'none')}.",
+            )
+        )
+        for line in evaluation.get("table") or ():
+            body.append(f"<pre class='small'>{escape(str(line))}</pre>")
+    elif evaluation.get("message"):
+        body.append(notice("warn", "The last evaluation", str(evaluation.get("message"))))
+
+    blockers = [dict(item) for item in evaluation.get("blockers") or []]
+    if blockers:
+        body.append(_blocker_list(blockers))
+
+    timeframes = [str(item) for item in symbols.get("timeframes") or ["1h"]]
+    options = "".join(
+        f"<option value='{escape(name)}'"
+        + (" selected" if name == symbols.get("default_timeframe") else "")
+        + f">{escape(name)}</option>"
+        for name in timeframes
+    )
+    symbol_options = "".join(
+        "<option value='{0}'{1}>{2}</option>".format(
+            escape(str(item.get("broker_symbol") or "")),
+            " selected" if item.get("recommended") else "",
+            escape(str(item.get("label") or item.get("broker_symbol") or "")),
+        )
+        for item in (symbols.get("choices") or [])
+        if item.get("usable")
+    )
+    evaluate_form = (
+        "<form method='post' action='/actions/catalog-evaluate' class='stack'>"
+        f"<input type='hidden' name='nonce' value='{nonce}'>"
+        "<label class='small'>Symbols (Ctrl/Cmd-click for more than one)"
+        f"<select name='symbols' multiple size='5'>{symbol_options}</select></label>"
+        f"<label class='small'>Timeframe<select name='timeframe'>{options}</select></label>"
+        "<button class='btn' type='submit'>Evaluate the catalog on this history</button>"
+        "</form>"
+    )
+    body.append(
+        card(
+            "1 · Evaluate the catalog",
+            evaluate_form,
+            hint="Uses the terminal's own historical bars and its own symbol specs. "
+            "Skipped rows are listed with a reason; nothing is replaced with sample data.",
+        )
+    )
+
+    # 4. the paper test
+    snapshot = dict(paper.get("snapshot") or {})
+    paper_blockers = [dict(item) for item in paper.get("blockers") or []]
+    status = str(snapshot.get("status") or "IDLE")
+    body.append(
+        "<div class='data-grid'>"
+        + kpi("Paper test", status, foot="locally simulated fills")
+        + kpi(
+            "Open paper positions",
+            str(len(snapshot.get("positions") or ())),
+            foot="priced from broker ticks",
+        )
+        + kpi(
+            "Simulated closes",
+            str(len(snapshot.get("fills") or ())),
+            foot="ledger on disk",
+        )
+        + "</div>"
+    )
+    quotes = [dict(item) for item in snapshot.get("quotes") or []]
+    if quotes:
+        body.append(
+            "<p class='small'>Quote freshness: "
+            + " ".join(
+                f"{escape(str(item.get('symbol', '')))} "
+                f"{escape(str(item.get('state', '')))}"
+                + (
+                    f" ({escape(str(item.get('age_seconds')))}s)"
+                    if item.get("age_seconds") is not None
+                    else ""
+                )
+                for item in quotes[:8]
+            )
+            + f" · allowed age {escape(str(snapshot.get('max_quote_age_seconds', '')))}s</p>"
+        )
+    active = ", ".join(snapshot.get("active_symbols") or ()) or "none"
+    body.append(f"<p class='small muted'>Active symbols: {escape(active)}</p>")
+    watch_rows = [
+        (
+            item.get("symbol", ""),
+            item.get("timeframe", ""),
+            item.get("family", ""),
+            item.get("trades_in_evaluation", 0),
+            item.get("folds_positive", 0),
+            item.get("summary", ""),
+        )
+        for item in paper.get("watches") or []
+    ]
+    if watch_rows:
+        body.append(
+            table(
+                "The evaluated rows this test follows",
+                (
+                    ("symbol", "Symbol"),
+                    ("timeframe", "TF"),
+                    ("family", "Family"),
+                    ("trades", "Trades in evaluation"),
+                    ("folds", "Positive folds"),
+                    ("summary", "Logic"),
+                ),
+                watch_rows,
+            )
+        )
+    positions = [dict(item) for item in snapshot.get("positions") or []]
+    if positions:
+        body.append(
+            table(
+                "Open paper positions",
+                (
+                    ("key", "Row"),
+                    ("direction", "Side"),
+                    ("entry_price", "Entry"),
+                    ("stop", "Stop"),
+                    ("entry_at", "Opened"),
+                ),
+                [
+                    (
+                        item.get("candidate_id", ""),
+                        item.get("direction", ""),
+                        item.get("entry_price", ""),
+                        item.get("stop", ""),
+                        item.get("entry_at", ""),
+                    )
+                    for item in positions
+                ],
+            )
+        )
+    signals = [dict(item) for item in snapshot.get("signals") or []]
+    if signals:
+        signal_rows = [
+            (
+                item.get("key", ""),
+                item.get("action", ""),
+                item.get("reason", ""),
+                item.get("at", ""),
+            )
+            for item in signals[:12]
+        ]
+        body.append(
+            table(
+                "Latest decision per row",
+                (
+                    ("key", "Row"),
+                    ("action", "Decision"),
+                    ("reason", "Reason"),
+                    ("at", "At"),
+                ),
+                signal_rows,
+            )
+        )
+    orders = [dict(item) for item in snapshot.get("orders") or []]
+    if orders:
+        body.append(
+            table(
+                "Simulated orders and fills",
+                (
+                    ("key", "Row"),
+                    ("direction", "Side"),
+                    ("price", "Filled at"),
+                    ("at", "At"),
+                    ("priced_from", "Priced from"),
+                ),
+                [
+                    (
+                        item.get("candidate_id", ""),
+                        item.get("direction", ""),
+                        item.get("price", ""),
+                        item.get("at", ""),
+                        item.get("priced_from", ""),
+                    )
+                    for item in orders[-10:]
+                ],
+            )
+        )
+    if paper_blockers:
+        body.append(_blocker_list(paper_blockers))
+    body.append(
+        "<div class='step-actions'>"
+        + action_form("catalog-paper-start", ctx.action_nonce, "Start live-market paper test", tone="primary")
+        + action_form("catalog-paper-stop", ctx.action_nonce, "Stop the paper test")
+        + action_form("catalog-paper-flat", ctx.action_nonce, "Simulate closing open positions")
+        + "</div>"
+    )
+    body.append(
+        f"<p class='small muted'>{escape(str(snapshot.get('claim') or paper.get('headline') or ''))}</p>"
+    )
+    body.append(
+        notice(
+            "ok",
+            "What this test is, and is not",
+            "Real terminal quotes, locally simulated fills, a ledger file on this machine. "
+            "It does not send an order, does not arm live trading, does not change the "
+            "execution mode, and makes no claim that any candidate will make money.",
+        )
+    )
+    return card("Catalog and the Monday paper test", "".join(body))
 
 
 def render_strategies(ctx: PageContext) -> str:

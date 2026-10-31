@@ -661,6 +661,13 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "strategy-select",
         "strategy-deselect",
         "strategy-monitor",
+        # The catalog: one evaluation on the terminal's own bars, then the
+        # live-market paper test. Fills are simulated locally; no order surface is
+        # reachable from any of these four actions, and none changes a mode.
+        "catalog-evaluate",
+        "catalog-paper-start",
+        "catalog-paper-stop",
+        "catalog-paper-flat",
     }
 
 

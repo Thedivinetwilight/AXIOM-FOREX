@@ -153,6 +153,13 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "strategy-select",
         "strategy-deselect",
         "strategy-monitor",
+        # The catalog: one evaluation on the terminal's own bars, then the
+        # live-market paper test. Paper fills only; no order surface is reachable
+        # from any of these four actions.
+        "catalog-evaluate",
+        "catalog-paper-start",
+        "catalog-paper-stop",
+        "catalog-paper-flat",
         # The live workflow: plan, review, arm, start, stop.
         "live-arm",
         "live-disarm",
@@ -274,6 +281,14 @@ class WorkstationApp:
     research: Any = None
     #: The last research action's result, shown once on the next render.
     research_result: dict[str, Any] = field(default_factory=dict)
+
+    #: The large strategy catalog, its evaluation, and the live-market paper test.
+    #: ``None`` means this process has no catalog panel and the page says so. It is
+    #: handed a read-only terminal and a bar provider; it cannot connect, arm, size
+    #: or send anything.
+    catalog: Any = None
+    #: The last catalog action's result, shown once on the next render.
+    catalog_result: dict[str, Any] = field(default_factory=dict)
 
     #: The optional Kronos forecasting panel. ``None`` means this deployment has
     #: no forecasting component, which is the default and leaves every other page
@@ -601,6 +616,7 @@ class WorkstationApp:
                     self.strategies_view(query=query) if page == "strategies" else {}
                 ),
                 "research": self.research_view() if page == "quick-setup" else {},
+                "catalog": self.catalog_view() if page == "quick-setup" else {},
                 "live_summary": self.live_summary(),
             },
         )
@@ -637,6 +653,26 @@ class WorkstationApp:
         if self.strategies_result:
             view["result"] = dict(self.strategies_result)
             self.strategies_result = {}
+        return view
+
+    def catalog_view(self) -> dict[str, Any]:
+        """The catalog panel's own view, or an honest "not wired" state."""
+
+        if self.catalog is None:
+            return {"available": False}
+        try:
+            view = dict(self.catalog.view())
+        except Exception as exc:  # a read model never raises into the page
+            self._log(f"catalog view failed: {type(exc).__name__}")
+            return {
+                "available": False,
+                "error": type(exc).__name__,
+                "message": "The catalog panel could not be read. Nothing was run.",
+            }
+        view.setdefault("available", True)
+        if self.catalog_result:
+            view["result"] = dict(self.catalog_result)
+            self.catalog_result = {}
         return view
 
     def research_view(self) -> dict[str, Any]:
@@ -688,6 +724,40 @@ class WorkstationApp:
         self.research_result = dict(outcome)
         self._log(
             f"research action {action}: "
+            + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused"))
+        )
+        if outcome.get("ok"):
+            return HTTPStatus.SEE_OTHER, str(outcome.get("path") or "/quick-setup"), ""
+        return HTTPStatus.CONFLICT, "/quick-setup", str(outcome.get("message") or "")
+
+    def _catalog_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        if self.catalog is None:
+            return (
+                HTTPStatus.CONFLICT,
+                "/quick-setup",
+                "This workstation has no catalog panel, so there is nothing to run.",
+            )
+        payload: dict[str, Any] = {}
+        for name, values in form.items():
+            if name == "nonce":
+                continue
+            payload[name] = values if len(values) > 1 else (values[0] if values else "")
+        try:
+            outcome = dict(self.catalog.act(action, payload))
+        except Exception as exc:  # the panel promises not to raise; this is the wall
+            self._log(f"catalog action {action} raised: {type(exc).__name__}")
+            outcome = {
+                "ok": False,
+                "reason": type(exc).__name__,
+                "message": (
+                    "That step could not be completed. Nothing was traded, no mode "
+                    "changed, and no paper fill was invented."
+                ),
+                "path": "/quick-setup",
+            }
+        self.catalog_result = dict(outcome)
+        self._log(
+            f"catalog action {action}: "
             + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused"))
         )
         if outcome.get("ok"):
@@ -758,6 +828,8 @@ class WorkstationApp:
         wizard = self.wizard
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
+        if action.startswith("catalog-"):
+            return self._catalog_action(action, form)
         if action.startswith("strategy-"):
             return self._strategies_action(action, form)
         if action.startswith("research-") or action == "quick-setup-save":

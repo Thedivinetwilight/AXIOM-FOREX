@@ -415,6 +415,42 @@ def _wire_strategies(app, args, settings_path: Path):
     )
 
 
+def _wire_catalog(app, args, settings_path: Path):
+    """The large catalog, its evaluation, and the Monday live-market paper test.
+
+    The panel is handed two read-only things: the terminal, through the same
+    ``read_only_terminal`` helper the runner uses (symbols, specs, ticks, bars --
+    no order surface), and the live leg's bar reader.  Everything it writes is a
+    local record, a local ledger and a local state file under ``data/catalog``.
+    It cannot connect, change a mode, arm, size, or send anything, and its paper
+    fills are simulated from the terminal's own quotes.
+    """
+
+    try:
+        from axiom_forex.strategies.catalog.panel import CatalogPanel
+    except Exception:  # pragma: no cover - the module ships with the repo
+        return None
+
+    def terminal_provider():
+        try:
+            return read_only_terminal(app.wizard.session)
+        except Exception:
+            return None
+
+    def bars_provider(symbol: str, timeframe: str, count: int):
+        leg = getattr(app, "live", None)
+        if leg is None:
+            raise RuntimeError("no live leg is attached, so there are no broker bars")
+        return leg.bars(symbol, timeframe, count=count)
+
+    return CatalogPanel(
+        root=_repo_root(),
+        terminal_provider=terminal_provider,
+        bars_provider=bars_provider,
+        budget_seconds=float(getattr(args, "research_budget_seconds", 540.0)),
+    )
+
+
 def read_only_terminal(session):
     """The session's read-only terminal surface, or a typed refusal.
 
@@ -896,6 +932,10 @@ def main(argv: list[str] | None = None) -> int:
     # The strategy library is built before the live leg so the live plan can list
     # any variant the operator had already selected when this process started.
     app.strategies = _wire_strategies(app, args, settings_path)
+
+    # The catalog and the live-market paper test. Built here, runs nothing until
+    # the operator presses a button on /quick-setup.
+    app.catalog = _wire_catalog(app, args, settings_path)
     # The short setup and the research path.  Building this connects nothing and
     # reads nothing: the terminal is asked only when a page needs it.
     app.research = _wire_research(app, args, settings_path)
