@@ -110,12 +110,45 @@ catalog on a normal laptop; the worker thread is bounded by a wall-clock budget.
 The paper test also refuses to run without a terminal at all: its only price
 source is the broker's own quote, and a missing quote is never replaced.
 
+### The 24-hour qualification clock
+
+The run feeds a qualification record one heartbeat per cycle, and that record is
+what decides whether LIVE becomes available afterwards. It counts a heartbeat only
+when the cycle was genuinely healthy: the terminal answered, the quote was fresh,
+and a decision was actually evaluated. Anything else pauses the clock and books a
+reason — `stale_quote`, `terminal_disconnected`, `runner_stopped`, `runner_restarted`,
+`runner_unresponsive` (a gap longer than five minutes), `market_closed`,
+`cycle_error`. A cycle that raised is also recorded as a failure, which fails the
+test outright under the default criteria.
+
+The default criteria (fixed when the test starts, stored with the record):
+
+| Criterion | Default |
+| --- | --- |
+| Counted healthy time | at least 24 h |
+| Wall-clock span | at least 24 h (a jumped clock cannot compress the day) |
+| Share of the span paused | at most 30% |
+| Share of heartbeats with a stale quote | at most 25% |
+| Decisions evaluated | at least 1 |
+| Recorded failures | 0 |
+| Runner restarts | at most 5 |
+
+Stopping the runner pauses the record; starting again reopens it and the stopped
+period is booked as `runner_stopped`, so counted hours survive a pause. A record
+that failed a criterion is never reopened: a new test starts and says which verdict
+it replaced. A passing report makes LIVE *available* — nothing more. There is no
+code path from this runner to an order, and passing does not change the mode or arm
+anything.
+
 ### Where it writes
 
 * `data/catalog/catalog-evaluation.json` — the evaluation record: counts, cost
   labels, data origin, per-row results, and the paper set.
 * `data/catalog/paper/catalog-paper-ledger.jsonl` — one line per event and fill.
 * `data/catalog/paper/catalog-paper-state.json` — status, watches, open positions.
+* `data/catalog/qualification.json` — the 24-hour record: counted and paused
+  seconds by reason, heartbeat and stale counts, decisions, failures, restarts,
+  the fixed policy, and the verdict.
 
 All three are local, Git-ignored, and contain no credential, no account number and
 no balance.
@@ -130,4 +163,6 @@ no balance.
   not a track record, and not evidence of live readiness.
 * Live execution is a separate mode with its own gates. The paper test does not
   arm it, does not change the mode, does not touch the account, and cannot reach an
-  order surface at all.
+  order surface at all. Passing its 24-hour criteria only makes the live page
+  available; one day of paper running is an operational check of the pipeline, not
+  proof of profitability or safety.
