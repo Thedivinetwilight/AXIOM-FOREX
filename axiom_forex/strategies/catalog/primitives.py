@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import timezone
 from typing import Any, Callable, Mapping, Sequence
 
-from .indicators import IndicatorCache, Number
+from .indicators import IndicatorCache, Number, sma
 
 #: Parameter values are numbers only, so a signature is stable and comparable.
 Params = Mapping[str, float]
@@ -305,11 +305,9 @@ def _entry_bollinger_break(ctx: Context, params: Params) -> tuple[list[bool], li
     squeeze_bars = int(_p(params, "squeeze_bars")) if "squeeze_bars" in params else 0
     allowed = [True] * bars
     if squeeze_bars > 0:
-        from .indicators import sma as _sma
-
         # A real squeeze gate: today's band width against its own longer mean.
         dense = [value if value is not None else 0.0 for value in deviation]
-        baseline = _sma(dense, squeeze_bars)
+        baseline = sma(dense, squeeze_bars)
         allowed = [
             bool(
                 deviation[index] is not None

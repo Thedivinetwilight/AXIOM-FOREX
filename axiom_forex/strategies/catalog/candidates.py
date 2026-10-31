@@ -25,14 +25,13 @@ from __future__ import annotations
 
 import hashlib
 import itertools
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from typing import Any, Iterable, Sequence
 
 from .primitives import (
     ENTRIES,
     EXITS,
     FILTERS,
-    Context,
     ExitKind,
     FilterKind,
     Kind,

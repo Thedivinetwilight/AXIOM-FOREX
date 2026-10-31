@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 RECORD_VERSION = 1
 RECORD_NAME = "catalog-evaluation.json"

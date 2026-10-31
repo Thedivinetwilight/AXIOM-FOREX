@@ -31,11 +31,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from axiom_forex.research.engine import (
     DEFAULT_BUDGET_SECONDS,
-    MIN_TRADES_TO_RANK,
     SPLIT,
     CostModel,
     SegmentStats,

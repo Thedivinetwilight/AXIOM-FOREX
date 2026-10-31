@@ -29,12 +29,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import dataclasses
 
-from axiom_forex.config.fx_symbols import (
-    MAJOR_PAIRS,
-    UNCLASSIFIED,
-    forex_symbols,
-    recommended,
-)
+from axiom_forex.config.fx_symbols import MAJOR_PAIRS, forex_symbols, recommended
 from axiom_forex.config.terminal_facts import SymbolFacts, symbol_facts
 from axiom_forex.paper_runner.catalog_paper import (
     CatalogPaperTest,
@@ -44,7 +39,7 @@ from axiom_forex.paper_runner.catalog_paper import (
 from axiom_forex.research.engine import CostModel, cost_model_for
 from axiom_forex.research.series import build_series, rows_from_rates
 
-from .candidates import catalog, summary_counts, timeframes_for
+from .candidates import catalog, summary_counts
 from .evaluate import EvaluationPlan, EvaluationReport, SeriesSlot, evaluate
 from .store import RECORD_NAME, CatalogStore, summarise_paper_set
 
