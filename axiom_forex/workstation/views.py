@@ -3652,6 +3652,12 @@ def render_quick_setup(ctx: PageContext) -> str:
                     )
                 )
 
+    # The Monday path first: the catalog card is self-contained and needs nothing
+    # from the rest of this page, so it is not buried under the longer research
+    # flow.  The remaining cards are the same as before.
+    if _catalog_view(ctx).get("available"):
+        body.append(render_catalog_section(ctx))
+
     body.append(
         notice(
             "ok",
@@ -4145,9 +4151,6 @@ def render_quick_setup(ctx: PageContext) -> str:
             hint=str(paper.get("note", "")),
         )
     )
-
-    if _catalog_view(ctx).get("available"):
-        body.append(render_catalog_section(ctx))
 
     body.append(
         notice(

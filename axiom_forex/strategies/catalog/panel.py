@@ -245,10 +245,8 @@ class CatalogPanel:
             view["paper_set_summary"] = summarise_paper_set(record.paper_set)
             view["claim"] = str(record.payload.get("claim") or "")
             view["blockers"] = [
-                blocker
+                dict(blocker)
                 for blocker in record.blockers(max_age_seconds=self.max_record_age_seconds)
-                if blocker.get("reason") != "no_screened_candidate_in_the_record"
-                or True
             ]
         else:
             view["blockers"] = list(
