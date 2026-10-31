@@ -39,6 +39,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("data", "/data", "Data & evaluation"),
     ("provider-setup", "/provider-setup", "Provider setup"),
     ("kronos", "/kronos", "Kronos forecast"),
+    ("strategies", "/strategies", "Strategy library"),
     ("activity", "/activity", "Activity"),
     ("health", "/health", "System health"),
 )
@@ -57,6 +58,7 @@ ICONS: dict[str, str] = {
     "connection": "M5 12a7 7 0 0114 0M8 12a4 4 0 018 0M12 12v0",
     "shield": "M12 3l7 3v6c0 5-3.5 8-7 9-3.5-1-7-4-7-9V6l7-3z",
     "kronos": "M3 17l4-6 3 4 3-8 3 6 2-3 3 7M3 21h18",
+    "strategies": "M4 6h16M4 12h10M4 18h7M17 15l2 2 3-4",
 }
 
 STYLES = """
@@ -3446,6 +3448,421 @@ def render_kronos(ctx: PageContext) -> str:
     return render_shell(ctx, "".join(body))
 
 
+# --------------------------------------------------------------------------
+# Strategy library
+# --------------------------------------------------------------------------
+
+
+def _strategies_view(ctx: PageContext) -> Mapping[str, Any]:
+    return dict((ctx.extra or {}).get("strategies") or {})
+
+
+def _strategy_status_chip(status: str) -> str:
+    name = str(status or "TEMPLATE")
+    if name == "SELECTED_BY_OPERATOR":
+        return chip("selected by operator", "warn", dot=True)
+    if name == "ELIGIBLE_VARIANT":
+        return chip("eligible variant recorded", "ok", dot=True)
+    if name == "ATTEMPTED":
+        return chip("attempted · not eligible", "muted", dot=True)
+    if name == "UNAVAILABLE":
+        return chip("not evaluable here", "muted")
+    return chip("template · untested", "paper")
+
+
+def _strategy_card(item: Mapping[str, Any], ctx: PageContext, variants: Sequence[Mapping[str, Any]]) -> str:
+    card_id = str(item.get("card_id", ""))
+    availability = dict(item.get("availability") or {})
+    source = dict(item.get("source") or {})
+    parameters = [dict(entry) for entry in item.get("parameters") or []]
+    requires = [str(entry) for entry in item.get("requires") or []]
+
+    body = [
+        f"<p class='small muted'>{escape(str(item.get('summary', '')))}</p>",
+        "<h3 class='small muted'>Rules</h3><ol class='list'>",
+        "".join(f"<li>{escape(str(rule))}</li>" for rule in item.get("rules") or []),
+        "</ol>",
+        "<h3 class='small muted'>Parameters</h3>",
+        table(
+            "The card's declared parameters and the predeclared grid",
+            [("Name", "mono"), ("Kind", ""), ("Default", "num"), ("Grid", "mono"), ("Notes", "")],
+            [
+                [
+                    escape(str(entry.get("name", ""))),
+                    escape(str(entry.get("kind", ""))),
+                    escape(str(entry.get("default", ""))),
+                    escape(", ".join(entry.get("grid") or []) or "—"),
+                    escape(str(entry.get("description", ""))),
+                ]
+                for entry in parameters
+            ],
+        ),
+        "<h3 class='small muted'>Where it applies</h3>",
+        dl(
+            [
+                ("Declared timeframes", escape(", ".join(item.get("timeframes") or []))),
+                ("Intended horizon", escape(f"{item.get('horizon_bars', '')} bar(s)")),
+                ("Minimum bars", escape(str(item.get("min_bars", "")))),
+                ("Data required", escape(", ".join(requires))),
+                ("Licence", chip(str(item.get("licence", "")), "muted")),
+                ("Source", escape(str(source.get("citation", "")))),
+                ("Source kind", escape(str(source.get("kind", "")))),
+            ]
+        ),
+        (
+            f"<p class='small muted' style='margin-top:8px'>{escape(str(source.get('note', '')))}</p>"
+            if source.get("note")
+            else ""
+        ),
+        "<h3 class='small muted'>Assumptions</h3><ul class='list'>",
+        "".join(f"<li>{escape(str(note))}</li>" for note in item.get("assumptions") or []),
+        "</ul><h3 class='small muted'>Limitations</h3><ul class='list'>",
+        "".join(f"<li>{escape(str(note))}</li>" for note in item.get("limitations") or []),
+        "</ul>",
+    ]
+    if not availability.get("evaluable"):
+        body.append(
+            notice(
+                "warn",
+                "Not evaluable in this deployment",
+                str(availability.get("reason", "")),
+            )
+        )
+    if variants:
+        rows = []
+        for variant in variants:
+            attempt = dict(variant.get("attempt") or {})
+            status = str(variant.get("status", "NOT_ATTEMPTED"))
+            rows.append(
+                [
+                    f"<span class='mono'>{escape(str(variant.get('variant_id', '')))}</span>",
+                    escape(", ".join(f"{k}={v}" for k, v in (variant.get("parameters") or {}).items())),
+                    _strategy_status_chip(status),
+                    escape(str(attempt.get("reason", "")) or "—"),
+                    escape(str(attempt.get("q_value", "")) or "—"),
+                    escape(str(attempt.get("reality_check", "")) or "—"),
+                ]
+            )
+        body.append(
+            "<details style='margin-top:12px'><summary class='small muted'>"
+            f"{len(variants)} predeclared variant(s) — every attempt is recorded"
+            "</summary>"
+            + table(
+                "Variants of this template, and what the ledger says about each",
+                [("Variant", "mono"), ("Parameters", ""), ("Status", ""), ("Reason", ""), ("q", "num"), ("RC p", "num")],
+                rows,
+            )
+            + (
+                f"<form method='post' action='/actions/strategy-select' class='stack' "
+                "style='margin-top:12px'>"
+                f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+                "<label class='field'><span>Variant to select (only an eligible attempt can be chosen)</span>"
+                "<select name='variant_id'>"
+                + "".join(
+                    f"<option value='{escape(str(entry.get('variant_id', '')))}'>"
+                    f"{escape(str(entry.get('variant_id', '')))}</option>"
+                    for entry in variants
+                    if str(entry.get("status")) == "ELIGIBLE"
+                )
+                + "</select></label>"
+                "<label class='field field--check'><input type='checkbox' name='confirmed' value='yes'>"
+                "<span>This is my own choice, and I understand it is a historical "
+                "result, not a promise.</span></label>"
+                "<div class='row'><button class='btn' type='submit'>Record my selection</button></div>"
+                "</form>"
+                if any(str(entry.get("status")) == "ELIGIBLE" for entry in variants)
+                else "<p class='small muted' style='margin-top:10px'>No variant of this "
+                "template has an eligible attempt on record, so nothing here can be "
+                "selected.</p>"
+            )
+            + "</details>"
+        )
+    return card(
+        str(item.get("name", "")),
+        "".join(body),
+        hint=f"{item.get('family_label', '')} · {item.get('variants', 0)} variant(s) · "
+        f"{item.get('attempted', 0)} attempted",
+        right=_strategy_status_chip(str(item.get("status", ""))),
+    )
+
+
+def render_strategies(ctx: PageContext) -> str:
+    view = _strategies_view(ctx)
+    nonce = ctx.action_nonce
+    if not view.get("available"):
+        return render_shell(
+            ctx,
+            notice(
+                "warn",
+                "The strategy library is not wired into this workstation",
+                "This process has no library page data. Nothing is lost: the library "
+                "is a research index and is not required for trading.",
+            ),
+        )
+    result = dict(view.get("result") or {})
+    catalogue = [dict(item) for item in view.get("catalogue") or []]
+    counts = dict(view.get("counts") or {})
+    library = dict(view.get("library") or {})
+    query = dict(view.get("query") or {})
+    criteria = dict(view.get("criteria") or {})
+    coverage_rows = [dict(item) for item in view.get("coverage") or []]
+    selections = [dict(item) for item in view.get("selections") or []]
+    body: list[str] = []
+
+    if result.get("message"):
+        body.append(
+            notice(
+                "ok" if result.get("ok") else "warn",
+                "The last library action",
+                str(result.get("message")),
+            )
+        )
+
+    body.append(
+        notice(
+            "ok",
+            "A research index, not an order screen",
+            "These are documented templates and their parameter variants. Nothing here "
+            "selects a strategy for you, sizes a position, sets a stop, arms live "
+            "execution, or changes an execution mode. A selected strategy still goes "
+            "through the live plan's review, the confirmation phrase, the risk gate, "
+            "and the protective-stop rule.",
+        )
+    )
+
+    # -- honest counts ---------------------------------------------------
+    body.append(
+        card(
+            "What is in the library",
+            "<div class='data-grid'>"
+            + kpi("Templates", escape(str(library.get("templates", 0))), foot="documented shapes")
+            + kpi("Families", escape(str(library.get("families", 0))), foot="trend, breakout, mean reversion, carry, volatility, session")
+            + kpi("Evaluable here", escape(str(library.get("evaluable_templates", 0))), foot="the rest name the missing data")
+            + kpi("Variants", escape(str(library.get("variants", 0))), foot="predeclared parameter combinations")
+            + kpi("Attempts recorded", escape(str(counts.get("attempts", 0))), foot="including every failure")
+            + kpi("Selected", escape(str(counts.get("selected", 0))), foot="operator choices")
+            + "</div>",
+            hint=str(library.get("note", "")),
+            right=chip(f"grid {view.get('grid_version', '')}", "muted"),
+        )
+    )
+
+    # -- search ----------------------------------------------------------
+    family_options = "".join(
+        f"<option value='{escape(str(item.get('key', '')))}'"
+        f"{' selected' if str(item.get('key')) == query.get('family') else ''}>"
+        f"{escape(str(item.get('label', '')))}</option>"
+        for item in view.get("families") or []
+    )
+    body.append(
+        card(
+            "Search",
+            f"<form method='get' action='/strategies' class='stack'>"
+            "<div class='data-grid'>"
+            f"<label class='field'><span>Words</span><input type='text' name='q' "
+            f"value='{escape(str(query.get('text', '')))}' autocomplete='off' "
+            "placeholder='e.g. breakout, momentum, Bollinger'></label>"
+            "<label class='field'><span>Family</span><select name='family'>"
+            f"<option value=''>All families</option>{family_options}</select></label>"
+            "</div>"
+            "<div class='row'><button class='btn' type='submit'>Filter</button>"
+            "<a class='btn btn--ghost' href='/strategies'>Clear</a></div></form>",
+            hint="Search runs over names, summaries, rules, timeframes and sources. It "
+            "does not rank by anything resembling performance.",
+        )
+    )
+
+    # -- selections ------------------------------------------------------
+    if selections:
+        body.append(
+            card(
+                "Your selections",
+                table(
+                    "Variants you selected, and the attempt each came from",
+                    [("Variant", "mono"), ("Symbol", ""), ("Timeframe", ""), ("Dataset", "mono"), ("Selected", "")],
+                    [
+                        [
+                            escape(str(item.get("variant_id", ""))),
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("timeframe", ""))),
+                            escape(str(item.get("dataset_id", ""))),
+                            escape(str(item.get("selected_at", ""))),
+                        ]
+                        for item in selections
+                    ],
+                )
+                + "".join(
+                    f"<form method='post' action='/actions/strategy-deselect' style='display:inline;margin-right:6px'>"
+                    f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+                    f"<input type='hidden' name='variant_id' value='{escape(str(item.get('variant_id', '')))}'>"
+                    "<button class='btn btn-sm' type='submit'>Deselect "
+                    f"{escape(str(item.get('variant_id', '')))}</button></form>"
+                    for item in selections
+                ),
+                hint="Selecting recorded your choice; it did not trade. Deselecting is "
+                "always allowed and takes effect immediately.",
+            )
+        )
+
+    # -- the catalogue ---------------------------------------------------
+    for item in catalogue:
+        variants = [dict(entry) for entry in item.get("variants_detail") or []]
+        body.append(_strategy_card(item, ctx, variants))
+
+    # -- screening -------------------------------------------------------
+    card_options = "".join(
+        f"<option value='{escape(str(item.get('card_id', '')))}'>"
+        f"{escape(str(item.get('name', '')))}</option>"
+        for item in catalogue
+        if (item.get("availability") or {}).get("evaluable")
+    )
+    screening = (
+        "<p class='small muted'>Screening applies the predeclared criteria and the "
+        "multiple-testing control to evaluations recorded on the Data &amp; evaluation "
+        "page, then writes every attempt to the ledger — including the ones that fail."
+        "</p>"
+        f"<form method='post' action='/actions/strategy-screen' class='stack'>"
+        f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+        "<div class='data-grid'>"
+        f"<label class='field'><span>Template</span><select name='card_id'>"
+        f"<option value=''>All evaluable templates</option>{card_options}</select></label>"
+        "<label class='field'><span>Symbol</span><input type='text' name='symbol' "
+        "value='' placeholder='e.g. EURUSD' autocomplete='off'></label>"
+        "<label class='field'><span>Timeframe</span><input type='text' name='timeframe' "
+        "value='' placeholder='blank = every declared timeframe' autocomplete='off'></label>"
+        "</div>"
+        "<div class='row'><button class='btn btn--primary' type='submit'>Screen recorded evaluations</button></div>"
+        "</form>"
+    )
+    if not view.get("has_evidence_source"):
+        screening += notice(
+            "warn",
+            "No evaluation source is wired in",
+            "This deployment cannot read recorded evaluations, so screening would have "
+            "nothing to read. Evaluate a candidate on Data & evaluation first.",
+        )
+    body.append(
+        card(
+            "Screen and record attempts",
+            screening,
+            hint=f"Criteria version {criteria.get('criteria_version', '')}. The thresholds "
+            "are AXIOM's declared choices, fixed before any result is read.",
+            right=chip("predeclared", "muted"),
+        )
+    )
+
+    # -- evaluate one variant -------------------------------------------
+    evaluable_cards = [item for item in catalogue if (item.get("availability") or {}).get("evaluable")]
+    if evaluable_cards:
+        body.append(
+            card(
+                "Evaluate one variant",
+                "<p class='small muted'>This runs the same chronological evaluator, "
+                "costs and locked-test custody as the paper lane, then records the "
+                "attempt. Both the dataset id and the data class must be yours: the "
+                "class decides whether a result may ever promote anything.</p>"
+                f"<form method='post' action='/actions/strategy-evaluate' class='stack'>"
+                f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+                "<div class='data-grid'>"
+                "<label class='field'><span>Variant</span><input type='text' "
+                "name='variant_id' autocomplete='off' placeholder='trend_sma_cross::fast_period=8-slow_period=21'></label>"
+                "<label class='field'><span>Symbol</span><input type='text' name='symbol' autocomplete='off' placeholder='EURUSD'></label>"
+                "<label class='field'><span>Timeframe</span><input type='text' name='timeframe' autocomplete='off' placeholder='5m'></label>"
+                "<label class='field'><span>Dataset id</span><input type='text' name='dataset_id' autocomplete='off' placeholder='e.g. eurusd-2026-q1'></label>"
+                "<label class='field'><span>Data class</span><select name='data_class'>"
+                "<option value=''>Choose…</option>"
+                "<option value='USER_SUPPLIED_HISTORICAL'>USER_SUPPLIED_HISTORICAL</option>"
+                "<option value='USER_SUPPLIED_PRODUCTION'>USER_SUPPLIED_PRODUCTION</option>"
+                "<option value='USER_SUPPLIED_DEMO'>USER_SUPPLIED_DEMO</option>"
+                "<option value='SYNTHETIC_FIXTURE'>SYNTHETIC_FIXTURE</option>"
+                "</select></label>"
+                "</div>"
+                "<div class='row'><button class='btn btn--primary' type='submit'>Evaluate and record</button></div>"
+                "</form>",
+                hint="A demo or fixture class can be studied, but it can never make a "
+                "variant eligible.",
+            )
+        )
+
+    # -- criteria --------------------------------------------------------
+    body.append(
+        card(
+            "The predeclared criteria",
+            dl(
+                [
+                    ("Closed trades (locked test)", escape(str(criteria.get("min_closed_trades", "")))),
+                    ("Max drawdown", escape(str(criteria.get("max_drawdown_fraction", "")))),
+                    ("Walk-forward folds", escape(str(criteria.get("min_walk_forward_folds", "")))),
+                    ("Positive fold fraction", escape(str(criteria.get("min_positive_fold_fraction", "")))),
+                    ("Validation positive", "yes" if criteria.get("require_positive_validation") else "no"),
+                    ("Locked test positive", "yes" if criteria.get("require_positive_locked_test") else "no"),
+                    ("Data class must be able to promote", "yes" if criteria.get("require_promoting_data_class") else "no"),
+                    ("FDR q-value limit", escape(str(criteria.get("max_q_value", "")))),
+                    ("Reality Check p limit", escape(str(criteria.get("max_reality_check", "")))),
+                ]
+            ),
+            hint="Changing a threshold invalidates the attempts recorded under the old "
+            "version, which is why the version is stored with every attempt.",
+        )
+    )
+
+    body.append(
+        card(
+            "Multiple testing",
+            f"<p class='small muted'>{escape(str(view.get('multiplicity_note', '')))}</p>",
+            right=chip("selection bias controlled, not removed", "muted"),
+        )
+    )
+
+    # -- monitoring coverage --------------------------------------------
+    coverage_body = (
+        f"<div class='row' style='margin-bottom:10px'>"
+        f"{action_form('strategy-monitor', nonce, 'Measure what can be monitored')}</div>"
+    )
+    if coverage_rows:
+        coverage_body += table(
+            "Symbols and timeframes, and whether a template declares them",
+            [("Symbol", ""), ("Timeframe", ""), ("Bars", "num"), ("Templates", "num"), ("Monitored", ""), ("Why not", "")],
+            [
+                [
+                    escape(str(row.get("symbol", ""))),
+                    escape(str(row.get("timeframe", ""))),
+                    escape(str(row.get("bars", ""))),
+                    escape(str(len(row.get("templates") or []))),
+                    chip("yes", "ok") if row.get("monitorable") else chip("no", "muted"),
+                    escape(str(row.get("reason", "")) or "—"),
+                ]
+                for row in coverage_rows
+            ],
+        )
+    else:
+        coverage_body += empty_state(
+            "No coverage measured yet",
+            "Coverage needs bars from this feed and a symbol list. A timeframe no "
+            "template declares is never analysed: a bar feed is not evidence that a "
+            "strategy supports it.",
+        )
+    body.append(
+        card(
+            "Automatic monitoring: what can be analysed",
+            coverage_body,
+            hint="Monitoring scores only on the timeframes each template declares, and "
+            "never promotes anything by itself.",
+        )
+    )
+
+    body.append(
+        card(
+            "What this page does not claim",
+            "<ul class='list'>"
+            + "".join(f"<li>{escape(str(note))}</li>" for note in view.get("non_claims") or [])
+            + "</ul>",
+        )
+    )
+
+    return render_shell(ctx, "".join(body))
+
+
 def render_message(ctx: PageContext, *, tone: str, title: str, message: str, actions: str = "") -> str:
     body = (
         f"<div class='notice notice--{escape(tone)}' role='alert'><div><strong>{escape(title)}</strong>"
@@ -3477,6 +3894,7 @@ PAGES = {
     "provider-setup": render_provider_setup,
     "live": render_live,
     "kronos": render_kronos,
+    "strategies": render_strategies,
     "health": render_health,
 }
 
@@ -3498,6 +3916,7 @@ __all__ = [
     "render_connecting",
     "render_health",
     "render_kronos",
+    "render_strategies",
     "render_live",
     "render_message",
     "render_mode",

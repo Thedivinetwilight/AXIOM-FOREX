@@ -71,6 +71,7 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/provider-setup": ("provider-setup", "Provider setup"),
     "/live": ("live", "Live execution"),
     "/kronos": ("kronos", "Kronos forecast"),
+    "/strategies": ("strategies", "Strategy library"),
     "/activity": ("activity", "Activity"),
     "/health": ("health", "System health"),
     "/mode": ("mode", "Trading mode"),
@@ -135,6 +136,14 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "kronos-reconcile",
         "kronos-benchmark",
         "kronos-inspect-weights",
+        # The strategy library. Screening records attempts (including failures);
+        # selecting records the operator's own choice. Neither sizes, arms, or
+        # trades, and selecting cannot override a rejection.
+        "strategy-screen",
+        "strategy-evaluate",
+        "strategy-select",
+        "strategy-deselect",
+        "strategy-monitor",
         # The live workflow: plan, review, arm, start, stop.
         "live-arm",
         "live-disarm",
@@ -243,6 +252,13 @@ class WorkstationApp:
     #: reads its state.  ``None`` means no runner is configured -- which is the
     #: default, and leaves every other page exactly as it was.
     runner: Any = None
+    #: The curated strategy library. ``None`` means this deployment has no
+    #: library page data, which is a state the page states plainly. It holds no
+    #: live or risk surface.
+    strategies: Any = None
+    #: The last library action's result, shown once on the next render.
+    strategies_result: dict[str, Any] = field(default_factory=dict)
+
     #: The optional Kronos forecasting panel. ``None`` means this deployment has
     #: no forecasting component, which is the default and leaves every other page
     #: exactly as it was. It can never reach the live or risk objects.
@@ -284,14 +300,14 @@ class WorkstationApp:
             self.preflight = LivePreflight(provider=self.preflight_facts)
 
     # -- rendering ---------------------------------------------------------
-    def page(self, path: str) -> tuple[int, str]:
+    def page(self, path: str, query: Mapping[str, Any] | None = None) -> tuple[int, str]:
         route = GET_ROUTES.get(path)
         if route is None:
             ctx = self._context("overview", "Not found")
             return HTTPStatus.NOT_FOUND, render_page(ctx)
         page, title = route
         with self.lock:
-            ctx = self._context(page, title)
+            ctx = self._context(page, title, query=query)
             html = render_page(ctx)
         return HTTPStatus.OK, html
 
@@ -534,7 +550,13 @@ class WorkstationApp:
             }
         return summary
 
-    def _context(self, page: str, title: str, notice: str = "") -> PageContext:
+    def _context(
+        self,
+        page: str,
+        title: str,
+        notice: str = "",
+        query: Mapping[str, Any] | None = None,
+    ) -> PageContext:
         # One preflight per page render: it is read-only, and running it twice
         # would let two panels disagree about the same facts.
         preflight = self.preflight_view()
@@ -559,6 +581,9 @@ class WorkstationApp:
                 ),
                 "live": self.live_view() if page == "live" else {},
                 "kronos": self.kronos_view() if page == "kronos" else {},
+                "strategies": (
+                    self.strategies_view(query=query) if page == "strategies" else {}
+                ),
                 "live_summary": self.live_summary(),
             },
         )
@@ -580,6 +605,40 @@ class WorkstationApp:
             # action just happened again.
             self.kronos_result = {}
         return view
+
+    def strategies_view(self, *, query: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The library page's model, or an honest "not wired" state."""
+
+        if self.strategies is None:
+            return {"available": False}
+        try:
+            symbols = list(getattr(self.wizard.choices, "selected_symbols", ()) or ())
+            view = dict(self.strategies.view(query=query, symbols=symbols))
+        except Exception as exc:
+            self._log(f"strategy library view failed: {type(exc).__name__}")
+            return {"available": True, "error": type(exc).__name__}
+        if self.strategies_result:
+            view["result"] = dict(self.strategies_result)
+            self.strategies_result = {}
+        return view
+
+    def _strategies_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        if self.strategies is None:
+            return (
+                HTTPStatus.CONFLICT,
+                "/strategies",
+                "This workstation has no strategy library, so there is nothing to record.",
+            )
+        payload = {name: (values[0] if values else "") for name, values in form.items()}
+        outcome = self.strategies.act(action, payload)
+        self.strategies_result = dict(outcome)
+        self._log(
+            f"strategy action {action}: "
+            + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused"))
+        )
+        if outcome.get("ok"):
+            return HTTPStatus.SEE_OTHER, str(outcome.get("path") or "/strategies"), ""
+        return HTTPStatus.CONFLICT, "/strategies", str(outcome.get("message") or "")
 
     def _kronos_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         if self.kronos is None:
@@ -627,6 +686,8 @@ class WorkstationApp:
         wizard = self.wizard
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
+        if action.startswith("strategy-"):
+            return self._strategies_action(action, form)
         if action == "connect":
             session = wizard.session
             simulated = wizard.simulated
@@ -1353,12 +1414,12 @@ class _Handler(BaseHTTPRequestHandler):
     # -- verbs -------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        status, html = self.app.page(parsed.path)
+        status, html = self.app.page(parsed.path, parse_qs(parsed.query))
         self._html(int(status), html)
 
     def do_HEAD(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        status, html = self.app.page(parsed.path)
+        status, html = self.app.page(parsed.path, parse_qs(parsed.query))
         self._html(int(status), html)
 
     def do_POST(self) -> None:  # noqa: N802

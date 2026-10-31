@@ -642,6 +642,15 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "kronos-reconcile",
         "kronos-benchmark",
         "kronos-inspect-weights",
+        # The strategy library. Screening and evaluating write attempt rows to a
+        # local ledger; selecting records the operator's own choice and cannot
+        # override a rejection. None of them sizes, arms, trades, or changes the
+        # mode, and the library holds no live or risk surface.
+        "strategy-screen",
+        "strategy-evaluate",
+        "strategy-select",
+        "strategy-deselect",
+        "strategy-monitor",
     }
 
 

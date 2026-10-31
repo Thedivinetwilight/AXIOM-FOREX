@@ -296,6 +296,29 @@ Every order still goes through the same planner, pre-trade gate, risk limits and
 ledger the paper lane uses; the intent is written durably before submission, and
 an in-doubt order is never re-sent. Full detail: `docs/LIVE_EXECUTION.md`.
 
+### Strategy library (optional, `/strategies`)
+
+`/strategies` is a research index of **documented** strategy templates — moving-average
+crossover, time-series momentum, Donchian breakout, Bollinger reversion, ATR-scaled
+breakout, session range — each with its source, its rules, its parameters, the
+timeframes it is explicitly analysed on, its assumptions, and its licence. Templates
+that need data AXIOM does not import (historical swap rates, multi-pair legs) are
+listed as **not evaluable**, with the missing input named, instead of approximated.
+
+"Large" means variants of those templates, counted honestly: the page shows templates,
+evaluable templates, predeclared variants, and **attempts recorded** as four separate
+numbers, and every attempt — including every failure — is written to a local ledger.
+Screening runs on the same chronological evaluator, fills, costs, splits and
+walk-forward folds the paper lane uses, applies a bootstrap p-value,
+Benjamini–Hochberg FDR and White's Reality Check across the whole search, and refuses
+to make anything eligible on fixture or demo data.
+
+Only an **eligible** attempt can be selected, only by you, with a confirmation, and
+selecting never sizes, arms, or trades: the selected variant then appears in the live
+plan, where the review, the confirmation phrase, the risk gate and the protective-stop
+requirement still apply. A timeframe no template declares is never analysed. Full
+detail: `docs/STRATEGY_LIBRARY.md`.
+
 ### Kronos forecasting (optional, `/kronos`)
 
 Kronos is a published financial foundation model that predicts the next few

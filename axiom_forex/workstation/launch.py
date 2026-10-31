@@ -27,6 +27,7 @@ import argparse
 import sys
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 from ..config.mt5 import MT5Settings, MT5SettingsFileError, load_settings_file
 from .app import WorkstationApp, make_server
@@ -338,6 +339,54 @@ def _wire_kronos(app):
             ) from exc
 
     return KronosPanel(root=_repo_root(), bars_provider=bars_provider)
+
+
+def _wire_strategies(app, args, settings_path: Path):
+    """The strategy library panel: catalogue, ledger, screening, selection.
+
+    The bar provider asks the live leg for bars (data only, never the adapter).
+    The evaluation platform is the same one the Data page uses, so a library
+    variant is scored with the lane's own costs and splits.  Nothing here runs
+    until the operator presses a button, and nothing here can trade.
+    """
+
+    try:
+        from axiom_forex.strategies.library.panel import StrategyLibraryPanel
+    except Exception:  # pragma: no cover - the module ships with the repo
+        return None
+
+    def bars_provider(symbol: str, timeframe: str, count: int):
+        from axiom_forex.kronos.inputs import InputRefused
+
+        leg = getattr(app, "live", None)
+        if leg is None:
+            raise InputRefused(
+                "no_terminal",
+                "no live leg is attached, so there are no broker bars to evaluate on",
+            )
+        try:
+            return leg.bars(symbol, timeframe, count=count)
+        except Exception as exc:
+            raise InputRefused(
+                str(getattr(exc, "reason", "") or type(exc).__name__),
+                str(getattr(exc, "detail", "") or ""),
+            ) from exc
+
+    builder = _evaluation_platform_builder(args, app, settings_path)
+
+    def platform_builder(symbol: str):
+        built = builder(symbol)
+        # The data page's builder returns ``(platform, version)``; the library only
+        # needs the platform, whose ``new_engine`` is the evaluator's factory.
+        if isinstance(built, tuple):
+            return built[0]
+        return built
+
+    return StrategyLibraryPanel(
+        root=_repo_root(),
+        bars_provider=bars_provider,
+        platform_builder=platform_builder,
+    )
 
 
 def read_only_terminal(session):
@@ -666,7 +715,7 @@ def _live_symbol_resolver(session, provider_setup):
     return resolve
 
 
-def _wire_live(args, app, *, settings, settings_path: Path):
+def _wire_live(args, app, *, settings, settings_path: Path, extra_candidates: Any = ()):
     """Hand the launch-time objects to the live assembly.  Builds nothing itself."""
 
     from axiom_forex.paper_runner.live_assembly import build_live_workflow
@@ -712,7 +761,7 @@ def _wire_live(args, app, *, settings, settings_path: Path):
         provider_setup_path=provider_setup or None,
         interval_seconds=max(int(args.paper_runner_interval), 1),
         quote_age_seconds=str(args.paper_runner_quote_age),
-        candidates=candidate_family(),
+        candidates=tuple(candidate_family()) + tuple(extra_candidates or ()),
         symbol_resolver=(
             _live_symbol_resolver(app.wizard.session, provider_setup)
             if provider_setup
@@ -818,12 +867,23 @@ def main(argv: list[str] | None = None) -> int:
             args, app, settings_path
         )
 
+    # The strategy library is built before the live leg so the live plan can list
+    # any variant the operator had already selected when this process started.
+    app.strategies = _wire_strategies(app, args, settings_path)
+
     # The live path is wired whenever the operator's own settings were loaded.
     # Building it connects nothing and sends nothing; every decision stays on
     # the Live execution page.  The assembly itself lives beside the live leg so
     # that this browser layer never names an order-submitting API.
-    app.live = _wire_live(args, app, settings=None if args.simulate else settings,
-                          settings_path=settings_path)
+    app.live = _wire_live(
+        args,
+        app,
+        settings=None if args.simulate else settings,
+        settings_path=settings_path,
+        extra_candidates=(
+            app.strategies.selected_candidates() if app.strategies is not None else ()
+        ),
+    )
 
     # The optional forecasting panel. It is built here but loads nothing: a
     # model is loaded only when the operator presses Load on /kronos, and the
@@ -904,6 +964,8 @@ def main(argv: list[str] | None = None) -> int:
                 app.kronos.stop()
             except Exception:
                 pass
+        # The library ledger opens a connection per operation, so there is
+        # nothing to close here; the row is the durable record.
     return 0
 
 
