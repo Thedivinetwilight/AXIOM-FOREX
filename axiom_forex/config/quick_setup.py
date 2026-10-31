@@ -111,8 +111,15 @@ class QuickChoices:
         elif raw_symbols is None:
             symbols = []
         else:
-            symbols = [str(item) for item in raw_symbols]
-        cleaned = tuple(dict.fromkeys(item.strip() for item in symbols if item.strip()))
+            # ``None`` is what an unchecked box posts; it is not a symbol name.
+            symbols = [str(item) for item in raw_symbols if item is not None]
+        cleaned = tuple(
+            dict.fromkeys(
+                str(item).strip()
+                for item in symbols
+                if item is not None and str(item).strip()
+            )
+        )
 
         positions = one("max_open_positions")
         try:

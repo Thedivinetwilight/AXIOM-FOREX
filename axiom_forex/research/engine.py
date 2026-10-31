@@ -474,6 +474,50 @@ def segment_stats(
     )
 
 
+def cost_model_for(
+    symbol: Any,
+    *,
+    account_currency: str = "",
+    commission_per_lot: float = 0.0,
+    commission_state: str = ASSUMED_ZERO,
+    slippage_pips: float = 0.2,
+    rollover_utc_hours: Sequence[int] = (),
+    conversion_rate: float | None = None,
+) -> CostModel:
+    """Build a cost model from one symbol's observed facts.
+
+    ``symbol`` is any object with the terminal-fact attributes (``point``,
+    ``contract_size``, ``profit_currency``, ``swap_long``/``swap_short`` and
+    ``swap_state``).  Whatever was not observed stays labelled, so the sweep can
+    say which part of a result rests on an assumption.
+    """
+
+    quote = str(getattr(symbol, "profit_currency", "") or "").strip().upper()
+    observed = str(getattr(symbol, "swap_state", UNKNOWN) or UNKNOWN)
+    state = observed if observed in ("POINTS", "CURRENCY", "DISABLED") else observed
+    swap_long = getattr(symbol, "swap_long", None)
+    swap_short = getattr(symbol, "swap_short", None)
+    return CostModel(
+        point=float(getattr(symbol, "point", 0) or 0),
+        contract_size=float(getattr(symbol, "contract_size", 0) or 0),
+        account_currency=str(account_currency or "").strip().upper(),
+        quote_currency=quote,
+        slippage_pips=float(slippage_pips or 0),
+        slippage_state=ESTIMATE,
+        commission_per_lot=float(commission_per_lot or 0),
+        commission_state=(
+            ASSUMED_ZERO
+            if float(commission_per_lot or 0) == 0 and commission_state == ASSUMED_ZERO
+            else commission_state
+        ),
+        swap_long=None if swap_long is None else float(swap_long),
+        swap_short=None if swap_short is None else float(swap_short),
+        swap_state=state,
+        rollover_utc_hours=tuple(int(hour) for hour in rollover_utc_hours or ()),
+        conversion_rate=conversion_rate,
+    )
+
+
 # -- simulation -------------------------------------------------------------
 
 
@@ -529,7 +573,9 @@ def simulate(
     trades: list[Trade] = []
     holding: _Open | None = None
     start = max(0, int(start))
-    end = min(len(series), int(end))
+    # A caller may hand in signals for a shorter series than the bars, so the loop
+    # stops at whichever runs out first instead of raising mid-run.
+    end = min(len(series), int(end), len(signals))
 
     def close(
         position: _Open, index: int, side: str, reason: str
@@ -1560,6 +1606,7 @@ __all__ = [
     "VariantResult",
     "WALK_FORWARD_FOLDS",
     "WalkForward",
+    "cost_model_for",
     "record_attempts",
     "run_sweep",
     "segment_stats",
