@@ -68,7 +68,8 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/account": ("account", "Account & symbols"),
     "/positions": ("positions", "Positions"),
     "/data": ("data", "Data & evaluation"),
-    "/provider-setup": ("provider-setup", "Provider setup"),
+    "/quick-setup": ("quick-setup", "Quick setup"),
+    "/provider-setup": ("provider-setup", "Broker terms (advanced)"),
     "/live": ("live", "Live execution"),
     "/kronos": ("kronos", "Kronos forecast"),
     "/strategies": ("strategies", "Strategy library"),
@@ -123,6 +124,14 @@ POST_ACTIONS: frozenset[str] = frozenset(
         # The guided provider setup. It writes one local, Git-ignored document
         # (provider_setup.local.json) and never reads or touches the MT5 settings.
         "provider-setup-save",
+        # The short setup and the one-year research path. These read the terminal
+        # (read-only), write one local settings file and one local history folder,
+        # and run a sweep on a worker thread. None of them connects, changes a
+        # mode, arms, sizes, or sends anything.
+        "quick-setup-save",
+        "research-fetch",
+        "research-run",
+        "research-cancel",
         # Kronos, the optional forecasting component. These actions change what a
         # forecast looks like, and nothing else: no order, no risk limit, no mode.
         "kronos-save",
@@ -258,6 +267,13 @@ class WorkstationApp:
     strategies: Any = None
     #: The last library action's result, shown once on the next render.
     strategies_result: dict[str, Any] = field(default_factory=dict)
+
+    #: The short setup, the stored history and the one-year sweep. ``None`` means
+    #: this process has no research panel, and the page says so plainly. It holds
+    #: no live, risk, or order surface.
+    research: Any = None
+    #: The last research action's result, shown once on the next render.
+    research_result: dict[str, Any] = field(default_factory=dict)
 
     #: The optional Kronos forecasting panel. ``None`` means this deployment has
     #: no forecasting component, which is the default and leaves every other page
@@ -584,6 +600,7 @@ class WorkstationApp:
                 "strategies": (
                     self.strategies_view(query=query) if page == "strategies" else {}
                 ),
+                "research": self.research_view() if page == "quick-setup" else {},
                 "live_summary": self.live_summary(),
             },
         )
@@ -621,6 +638,61 @@ class WorkstationApp:
             view["result"] = dict(self.strategies_result)
             self.strategies_result = {}
         return view
+
+    def research_view(self) -> dict[str, Any]:
+        """The short-setup panel's own view, or an honest "not wired" state."""
+
+        if self.research is None:
+            return {"available": False}
+        try:
+            view = dict(self.research.view())
+        except Exception as exc:  # a read model never raises into the page
+            self._log(f"research view failed: {type(exc).__name__}")
+            return {
+                "available": False,
+                "error": type(exc).__name__,
+                "message": "The research panel could not be read. Nothing was run.",
+            }
+        view.setdefault("available", True)
+        if self.research_result:
+            view["result"] = dict(self.research_result)
+            self.research_result = {}
+        return sanitize_audit_value(view)
+
+    def _research_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        if self.research is None:
+            return (
+                HTTPStatus.CONFLICT,
+                "/quick-setup",
+                "This workstation has no research panel, so there is nothing to record.",
+            )
+        # Repeated names (symbols, timeframes) stay lists; single answers stay strings.
+        payload: dict[str, Any] = {}
+        for name, values in form.items():
+            if name == "nonce":
+                continue
+            payload[name] = values if len(values) > 1 else (values[0] if values else "")
+        try:
+            outcome = dict(self.research.act(action, payload))
+        except Exception as exc:  # the panel promises not to raise; this is the wall
+            self._log(f"research action {action} raised: {type(exc).__name__}")
+            outcome = {
+                "ok": False,
+                "reason": type(exc).__name__,
+                "message": (
+                    "That step could not be completed. Nothing was traded, no mode "
+                    "changed, and no history was replaced."
+                ),
+                "path": "/quick-setup",
+            }
+        self.research_result = dict(outcome)
+        self._log(
+            f"research action {action}: "
+            + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused"))
+        )
+        if outcome.get("ok"):
+            return HTTPStatus.SEE_OTHER, str(outcome.get("path") or "/quick-setup"), ""
+        return HTTPStatus.CONFLICT, "/quick-setup", str(outcome.get("message") or "")
 
     def _strategies_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         if self.strategies is None:
@@ -688,6 +760,8 @@ class WorkstationApp:
             return self._kronos_action(action, form)
         if action.startswith("strategy-"):
             return self._strategies_action(action, form)
+        if action.startswith("research-") or action == "quick-setup-save":
+            return self._research_action(action, form)
         if action == "connect":
             session = wizard.session
             simulated = wizard.simulated

@@ -341,6 +341,32 @@ def _wire_kronos(app):
     return KronosPanel(root=_repo_root(), bars_provider=bars_provider)
 
 
+def _wire_research(app, args, settings_path: Path):
+    """The short setup, the stored year of history, and the one-year sweep.
+
+    The terminal is handed over as a *provider*, so the panel reads it only when a
+    page is rendered or an action is pressed, and never before the operator has
+    connected.  The setup file sits beside the operator's own settings file, and
+    the history store under the repository's ignored ``data/history`` folder --
+    both local, both Git-ignored, neither containing a credential.
+    """
+
+    try:
+        from axiom_forex.research.panel import ResearchPanel
+    except Exception:  # pragma: no cover - the module ships with the repo
+        return None
+
+    return ResearchPanel(
+        root=_repo_root(),
+        terminal_provider=lambda: read_only_terminal(app.wizard.session),
+        setup_path=settings_path.parent / "quick_setup.local.json",
+        ledger_path=Path(_runner_db_path(args, settings_path)),
+        store_root=None,
+        runner=app.runner,
+        budget_seconds=float(getattr(args, "research_budget_seconds", 540.0)),
+    )
+
+
 def _wire_strategies(app, args, settings_path: Path):
     """The strategy library panel: catalogue, ledger, screening, selection.
 
@@ -870,6 +896,9 @@ def main(argv: list[str] | None = None) -> int:
     # The strategy library is built before the live leg so the live plan can list
     # any variant the operator had already selected when this process started.
     app.strategies = _wire_strategies(app, args, settings_path)
+    # The short setup and the research path.  Building this connects nothing and
+    # reads nothing: the terminal is asked only when a page needs it.
+    app.research = _wire_research(app, args, settings_path)
 
     # The live path is wired whenever the operator's own settings were loaded.
     # Building it connects nothing and sends nothing; every decision stays on

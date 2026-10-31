@@ -285,10 +285,23 @@ class StoredHistory:
     timeframe: str
     pair: str
     path: str = ""
+    #: The coverage audit recorded when the series was fetched.  It is a statement
+    #: about the bars in the file, not a promise that they are still recent.
+    coverage: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def declared_usable(self) -> bool:
+        return bool(self.coverage.get("usable", True))
+
+    @property
+    def reason(self) -> str:
+        return str(self.coverage.get("reason") or "")
 
     @property
     def usable_for_research(self) -> bool:
-        return self.origin == ORIGIN_TERMINAL
+        """Terminal history that the coverage audit accepted when it was stored."""
+
+        return self.origin == ORIGIN_TERMINAL and self.declared_usable
 
     def audit_view(self) -> dict[str, Any]:
         return {
@@ -300,6 +313,8 @@ class StoredHistory:
             "window_days": self.window_days,
             "bars": len(self.series),
             "usable_for_research": self.usable_for_research,
+            "reason": self.reason,
+            "coverage": dict(self.coverage),
         }
 
 
@@ -420,6 +435,7 @@ class HistoryStore:
             timeframe=str(payload.get("timeframe") or timeframe),
             pair=str(payload.get("pair") or ""),
             path=str(path),
+            coverage=dict(payload.get("coverage") or {}),
         )
 
     def inventory(self) -> list[dict[str, Any]]:
@@ -434,6 +450,9 @@ class HistoryStore:
             except (ValueError, OSError):
                 continue
             bars = payload.get("bars") or ()
+            coverage = dict(payload.get("coverage") or {})
+            declared = bool(coverage.get("usable", True))
+            terminal = payload.get("origin") == ORIGIN_TERMINAL
             items.append(
                 {
                     "symbol": payload.get("symbol") or path.stem,
@@ -442,7 +461,11 @@ class HistoryStore:
                     "origin": payload.get("origin") or "",
                     "fetched_at": payload.get("fetched_at") or "",
                     "bars": len(bars),
-                    "usable_for_research": payload.get("origin") == ORIGIN_TERMINAL,
+                    "first_at": str(coverage.get("first_at") or ""),
+                    "last_at": str(coverage.get("last_at") or ""),
+                    "coverage_fraction": coverage.get("coverage_fraction") or 0.0,
+                    "reason": str(coverage.get("reason") or ""),
+                    "usable_for_research": terminal and declared,
                 }
             )
         return items

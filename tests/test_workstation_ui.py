@@ -617,6 +617,16 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         # reads mt5_settings.local.json, never stores a credential, and sends
         # nothing.
         "provider-setup-save",
+        # The short setup and the one-year research path. Recording the setup
+        # writes one local, Git-ignored file; fetching reads the terminal's own
+        # rate history (read-only) and stores it locally; running the sweep spends
+        # CPU on a worker thread. None of them connects, changes a mode, arms,
+        # sizes, or sends anything, and nothing here can start paper trading --
+        # that stays on ``runner-start`` above.
+        "quick-setup-save",
+        "research-fetch",
+        "research-run",
+        "research-cancel",
         # The live workflow. Arming writes the operator's plan and authorises the
         # broker adapter (sending nothing); starting begins the strategy loop
         # that the guard stops on any failed check; stopping ends it and

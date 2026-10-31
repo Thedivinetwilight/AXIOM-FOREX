@@ -31,15 +31,18 @@ APP_SUBTITLE = "FOREX"
 #: Navigation, in order.  ``icon`` is an inline SVG path (no icon font).
 NAV: tuple[tuple[str, str, str], ...] = (
     ("overview", "/", "Overview"),
+    ("quick-setup", "/quick-setup", "Quick setup"),
     ("mode", "/mode", "Trading mode"),
     ("live", "/live", "Live execution"),
     ("setup", "/setup", "Setup"),
     ("account", "/account", "Account & symbols"),
     ("positions", "/positions", "Positions"),
     ("data", "/data", "Data & evaluation"),
-    ("provider-setup", "/provider-setup", "Provider setup"),
     ("kronos", "/kronos", "Kronos forecast"),
     ("strategies", "/strategies", "Strategy library"),
+    # Kept, and kept later: live execution still needs this document. The short
+    # setup above is what the normal flow now uses.
+    ("provider-setup", "/provider-setup", "Broker terms (advanced)"),
     ("activity", "/activity", "Activity"),
     ("health", "/health", "System health"),
 )
@@ -52,6 +55,7 @@ ICONS: dict[str, str] = {
     "account": "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
     "positions": "M4 18V9M10 18V5M16 18v-6M22 18h-20",
     "data": "M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+    "quick-setup": "M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2zM5 17l1 2 2 1-2 1-1 2-1-2-2-1 2-1z",
     "provider-setup": "M9 3h7l4 4v14H9zM4 7v14h5M12 8h4M12 12h4M12 16h4",
     "activity": "M3 12h3l2-6 4 12 3-7h6",
     "health": "M12 21s-7-4.5-7-10a4 4 0 017-2.5A4 4 0 0119 11c0 5.5-7 10-7 10z",
@@ -3586,6 +3590,574 @@ def _strategy_card(item: Mapping[str, Any], ctx: PageContext, variants: Sequence
     )
 
 
+def _research_view(ctx: PageContext) -> Mapping[str, Any]:
+    return dict((ctx.extra or {}).get("research") or {})
+
+
+def _research_row_cells(row: Mapping[str, Any], columns: Sequence[str]) -> list[str]:
+    return [escape(str(row.get(name, ""))) for name in columns]
+
+
+def render_quick_setup(ctx: PageContext) -> str:
+    """The short setup, the stored year of history, and the one-year sweep.
+
+    One page, in the order the operator works: what the terminal already knows,
+    the five answers only they can give, what history exists, and what the
+    evaluation measured -- with every unknown and every unmeasured candidate
+    shown rather than smoothed over.
+    """
+
+    view = _research_view(ctx)
+    if not view.get("available"):
+        return render_shell(
+            ctx,
+            notice(
+                "warn",
+                "The research panel is not wired into this workstation",
+                "This process has no research panel, so there is nothing to read or "
+                "run here. The rest of the workstation is unaffected.",
+            ),
+        )
+
+    nonce = escape(ctx.action_nonce)
+    facts = dict(view.get("facts") or {})
+    symbols = [dict(item) for item in view.get("symbols") or []]
+    observed_rows = [dict(item) for item in view.get("observed_rows") or []]
+    choices = dict(view.get("choices") or {})
+    saved = view.get("saved") or None
+    readiness = view.get("readiness") or None
+    history = [dict(item) for item in view.get("history") or []]
+    report = view.get("report") or None
+    progress = dict(view.get("progress") or {})
+    paper = dict(view.get("paper") or {})
+    result = dict(view.get("result") or {})
+    body: list[str] = []
+
+    if result.get("message"):
+        body.append(
+            notice(
+                "ok" if result.get("ok") else "warn",
+                "The last research action",
+                str(result.get("message")),
+            )
+        )
+        for row in result.get("rows") or []:
+            if not row.get("usable"):
+                body.append(
+                    notice(
+                        "warn",
+                        f"{row.get('symbol', '')} {row.get('timeframe', '')}: "
+                        "no usable history",
+                        str(row.get("reason") or "the terminal returned no bars"),
+                    )
+                )
+
+    body.append(
+        notice(
+            "ok",
+            "Short setup: the terminal answers what it can",
+            "Account currency, leverage, the exact broker symbols, their specs and "
+            "their swap terms are read from your terminal, never typed in by hand. "
+            "You are asked only for what no terminal can know: the symbols to trade, "
+            "the size, and your hard risk limits. Anything the terminal did not answer "
+            "is labelled unknown, with what that affects.",
+        )
+    )
+
+    # -- what the terminal answered -------------------------------------
+    provenance = {
+        "OBSERVED": "ok",
+        "SIMULATED": "simulated",
+        "UNKNOWN": "muted",
+    }
+    if observed_rows:
+        rows_html = "".join(
+            "<tr>"
+            f"<th scope='row'>{escape(str(item.get('label', '')))}</th>"
+            f"<td class='mono'>{escape(str(item.get('value', '')))}</td>"
+            f"<td>{chip(str(item.get('state', 'UNKNOWN')), provenance.get(str(item.get('state')), 'muted'))}</td>"
+            f"<td class='small muted'>{escape(str(item.get('detail', '')))}</td>"
+            "</tr>"
+            for item in observed_rows
+        )
+        body.append(
+            card(
+                "What the terminal answered",
+                "<div class='table-wrap'><table><thead><tr>"
+                "<th scope='col'>Field</th><th scope='col'>Value</th>"
+                "<th scope='col'>Provenance</th><th scope='col'>What it means</th>"
+                f"</tr></thead><tbody>{rows_html}</tbody></table></div>",
+                hint=(
+                    "A value marked unknown was not reported by the terminal. It is "
+                    "never replaced by a zero, because a zero is a claim."
+                ),
+                right=chip(
+                    str(facts.get("state", "UNKNOWN")),
+                    "simulated" if facts.get("simulated") else ("ok" if facts.get("connected") else "muted"),
+                    dot=True,
+                ),
+            )
+        )
+
+    if symbols:
+        symbol_rows = "".join(
+            "<tr>"
+            f"<td class='mono'>{escape(str(item.get('broker_symbol', '')))}</td>"
+            f"<td>{escape(str(item.get('pair', '')) or 'unknown')}</td>"
+            f"<td>{escape(str(item.get('volume_min', '')) or 'unknown')}</td>"
+            f"<td>{escape(str(item.get('volume_step', '')) or 'unknown')}</td>"
+            f"<td>{escape(str(item.get('stops_level', '')) or '0')}</td>"
+            f"<td>{escape(str(item.get('swap_state', '')))}</td>"
+            f"<td class='small muted'>{escape(', '.join(item.get('missing') or []) or 'nothing')}</td>"
+            "</tr>"
+            for item in symbols
+        )
+        body.append(
+            card(
+                "The symbols your terminal reported",
+                "<div class='table-wrap'><table><thead><tr>"
+                "<th scope='col'>Broker symbol</th><th scope='col'>Pair</th>"
+                "<th scope='col'>Min volume</th><th scope='col'>Step</th>"
+                "<th scope='col'>Stops level</th><th scope='col'>Swap</th>"
+                "<th scope='col'>Not reported</th>"
+                f"</tr></thead><tbody>{symbol_rows}</tbody></table></div>",
+                hint=(
+                    "A pair is named only when the terminal reported both currency "
+                    "legs. A broker's suffix never becomes part of the pair name."
+                ),
+            )
+        )
+    else:
+        body.append(
+            notice(
+                "warn",
+                "No symbols were reported",
+                "Connect to your terminal on the Setup page; without it there is "
+                "nothing to choose, fetch, or evaluate.",
+            )
+        )
+
+    # -- the five answers ------------------------------------------------
+    if symbols:
+        choices_html = "".join(
+            "<label class='small' style='display:flex;gap:8px;align-items:center'>"
+            f"<input type='checkbox' name='symbols' value='{escape(str(item.get('broker_symbol', '')))}'"
+            + (" checked" if item.get("broker_symbol") in (choices.get("symbols") or []) else "")
+            + f"><span class='mono'>{escape(str(item.get('broker_symbol', '')))}</span>"
+            f" <span class='muted'>{escape(str(item.get('pair', '')))}</span></label>"
+            for item in symbols
+        )
+    else:
+        choices_html = (
+            "<label class='small'>Broker symbol"
+            "<input type='text' name='symbols' value='' placeholder='type one symbol'>"
+            "</label>"
+        )
+
+    body.append(
+        card(
+            "The five things only you can answer",
+            f"<form method='post' action='/actions/quick-setup-save' class='stack' style='gap:12px'>"
+            f"<input type='hidden' name='nonce' value='{nonce}'>"
+            "<div class='stack' style='gap:6px'>"
+            "<h3 class='small muted'>Symbols to trade</h3>" + choices_html + "</div>"
+            "<div class='data-grid'>"
+            "<label class='small'>Lot size"
+            f"<input type='text' name='lot_size' value='{escape(str(choices.get('lot_size', '') or ''))}' "
+            "placeholder='0.10'></label>"
+            "<label class='small'>Max open positions"
+            f"<input type='text' name='max_open_positions' value='{escape(str(choices.get('max_open_positions', 1)))}'></label>"
+            "<label class='small'>Max daily loss (account currency)"
+            f"<input type='text' name='max_daily_loss_account' value='{escape(str(choices.get('max_daily_loss_account', '') or ''))}'></label>"
+            "<label class='small'>Max order notional (account currency)"
+            f"<input type='text' name='max_order_notional_account' value='{escape(str(choices.get('max_order_notional_account', '') or ''))}'></label>"
+            "<label class='small'>Max spread (pips)"
+            f"<input type='text' name='max_spread_pips' value='{escape(str(choices.get('max_spread_pips', '') or ''))}'></label>"
+            "<label class='small'>Research window (days)"
+            f"<input type='text' name='window_days' value='{escape(str(choices.get('window_days', view.get('window_days', 365))))}'></label>"
+            "</div>"
+            "<div class='data-grid'>"
+            "<label class='small'>Commission per lot, round turn (assumed)"
+            "<input type='text' name='commission_per_lot' value='0' "
+            "aria-describedby='commission-note'></label>"
+            "<label class='small'>Slippage per fill (pips, estimated)"
+            "<input type='text' name='slippage_pips' value='0.2'></label>"
+            "</div>"
+            "<p class='small muted' id='commission-note'>The terminal does not report a "
+            "commission schedule, so this stays an assumption you state. If your broker "
+            "charges one, every research result without it is optimistic by that amount."
+            "</p>"
+            "<div class='step-actions'><button class='btn btn--primary' type='submit'>"
+            "Save the short setup</button>"
+            "<span class='small muted'>Written to a local, Git-ignored file. No "
+            "credential, no login, no account number.</span></div>"
+            "</form>",
+            hint="These are choices, not observations: nothing here is inferred for you.",
+            right=(
+                chip(f"recorded · {saved.get('fingerprint', '')}", "ok", dot=True)
+                if saved
+                else chip("not recorded yet", "muted")
+            ),
+        )
+    )
+
+    # -- readiness ------------------------------------------------------
+    if readiness:
+        blocks = []
+        for name, title in (("research", "Research"), ("live", "Live execution")):
+            item = dict(readiness.get(name) or {})
+            # Blockers arrive either as sentences or as {reason, message, hint}.
+            blockers = [
+                str(entry.get("message") or entry.get("reason") or "")
+                if isinstance(entry, Mapping)
+                else str(entry)
+                for entry in item.get("blockers") or []
+            ]
+            blocks.append(
+                f"<div><h3 class='small muted'>{escape(title)}</h3>"
+                + (
+                    chip("ready", "ok", dot=True)
+                    if item.get("ready")
+                    else chip(f"{len(blockers)} blocker(s)", "warn", dot=True)
+                )
+                + (
+                    "<ul class='list small'>"
+                    + "".join(f"<li>{escape(entry)}</li>" for entry in blockers)
+                    + "</ul>"
+                    if blockers
+                    else ""
+                )
+                + f"<p class='small muted'>{escape(str(item.get('note', '')))}</p></div>"
+            )
+        body.append(
+            card(
+                "What each mode can do with this setup",
+                "<div class='grid grid--two'>" + "".join(blocks) + "</div>",
+                hint=(
+                    "Research may run on labelled assumptions. Live execution still "
+                    "passes the broker-terms document, the pre-trade gate, the risk "
+                    "limits and the protective-stop requirement. Nothing here shortens "
+                    "that."
+                ),
+            )
+        )
+
+    # -- history --------------------------------------------------------
+    timeframes = [str(item) for item in view.get("timeframes") or []]
+    defaults = [str(item) for item in view.get("default_timeframes") or []]
+    fetch_boxes = "".join(
+        "<label class='small' style='display:flex;gap:6px;align-items:center'>"
+        f"<input type='checkbox' name='timeframes' value='{escape(name)}'"
+        + (" checked" if name in defaults else "")
+        + f"><span class='mono'>{escape(name)}</span></label>"
+        for name in timeframes
+    )
+    body.append(
+        card(
+            "One year of history, from your terminal",
+            f"<form method='post' action='/actions/research-fetch' class='stack' style='gap:10px'>"
+            f"<input type='hidden' name='nonce' value='{nonce}'>"
+            f"<div class='data-grid'>{fetch_boxes}</div>"
+            "<div class='step-actions'><button class='btn' type='submit'>"
+            "Read and store that history</button>"
+            "<span class='small muted'>Bars come from the terminal's own rate "
+            "history. Nothing is downloaded, generated, or substituted.</span></div>"
+            "</form>",
+            hint=(
+                "Bars are bid-only in the terminal, so the research series is the bid "
+                "plus the spread each bar itself quoted. That is recorded in the price "
+                "basis of every result."
+            ),
+            right=chip(f"{len(history)} stored", "muted"),
+        )
+    )
+
+    if history:
+        history_rows = "".join(
+            "<tr>"
+            f"<td class='mono'>{escape(str(item.get('symbol', '')))}</td>"
+            f"<td>{escape(str(item.get('timeframe', '')))}</td>"
+            f"<td class='num'>{escape(str(item.get('bars', 0)))}</td>"
+            f"<td class='small mono'>{escape(str(item.get('first_at', ''))[:16])}</td>"
+            f"<td class='small mono'>{escape(str(item.get('last_at', ''))[:16])}</td>"
+            f"<td>{chip('usable', 'ok', dot=True) if item.get('usable_for_research') else chip('not usable', 'warn', dot=True)}</td>"
+            f"<td class='small muted'>{escape(str(item.get('reason', '')) or 'coverage accepted')}</td>"
+            "</tr>"
+            for item in history
+        )
+        body.append(
+            card(
+                "Stored history, and whether it is usable",
+                "<div class='table-wrap'><table><thead><tr>"
+                "<th scope='col'>Symbol</th><th scope='col'>Timeframe</th>"
+                "<th scope='col'>Bars</th><th scope='col'>First</th>"
+                "<th scope='col'>Last</th><th scope='col'>Coverage</th>"
+                "<th scope='col'>Why not</th>"
+                f"</tr></thead><tbody>{history_rows}</tbody></table></div>",
+                hint=(
+                    "Timestamps, gaps and span are audited before anything is measured. "
+                    "A series that is short, sparse or stale is listed here as not usable "
+                    "instead of being padded or replaced."
+                ),
+            )
+        )
+
+    # -- the run --------------------------------------------------------
+    running = bool(view.get("running"))
+    fraction = float(progress.get("fraction") or 0.0)
+    run_button = (
+        action_form("research-cancel", ctx.action_nonce, "Cancel the run", tone="danger")
+        if running
+        else action_form(
+            "research-run", ctx.action_nonce, "Run the one-year evaluation", tone="primary"
+        )
+    )
+    body.append(
+        card(
+            "Run every candidate over that history",
+            "<div class='data-grid'>"
+            + kpi("Progress", f"{fraction * 100:.0f}%", foot=escape(str(progress.get("label", "")) or "not started"))
+            + kpi("Budget", f"{escape(str(int(float(report['summary']['budget_seconds']) if report else 540)))}s", foot="wall clock, then it stops and says so")
+            + kpi("Variants", "42", foot="predeclared combinations, all recorded")
+            + "</div>"
+            f"<div class='step-actions'>{run_button}"
+            "<span class='small muted'>Train / validation / test is chronological. The "
+            "test window is measured once, for the variant chosen on validation.</span>"
+            "</div>",
+            hint=(
+                "Spread comes from each bar's own quote; commission and slippage are the "
+                "assumptions you set; swap is included only where the broker reported it. "
+                "Anything that could not be priced is named in the result."
+            ),
+            right=chip(
+                str(progress.get("label", "")) or "idle",
+                "warn" if running else "muted",
+                dot=True,
+            ),
+        )
+    )
+
+    if report:
+        summary = dict(report.get("summary") or {})
+        body.append(
+            card(
+                "What the run measured",
+                "<div class='data-grid'>"
+                + kpi("Variants measured", escape(str(summary.get("variants_measured", 0))), foot=f"of {summary.get('variants_total', 0)}")
+                + kpi("Usable series", escape(str(summary.get("series_with_usable_history", 0))), foot=f"of {summary.get('series', 0)} requested")
+                + kpi("Did not run", escape(str(summary.get("not_run", 0))), foot="listed, never hidden")
+                + kpi("Elapsed", f"{float(summary.get('elapsed_seconds', 0)):.0f}s", foot=f"budget {int(float(summary.get('budget_seconds', 0)))}s")
+                + "</div>"
+                + f"<p class='small muted'>{escape(str(report.get('claim', '')))}</p>",
+                right=chip(str(summary.get("status", "")), "warn" if summary.get("status") != "COMPLETE" else "ok", dot=True),
+            )
+        )
+
+        rows = [dict(item) for item in report.get("table") or []]
+        if rows:
+            columns = [
+                ("symbol", "Symbol"),
+                ("timeframe", "TF"),
+                ("strategy", "Strategy variant"),
+                ("validation_trades", "Val trades"),
+                ("validation_net_return", "Val net"),
+                ("validation_cost_return", "Val cost"),
+                ("validation_max_drawdown", "Val DD"),
+                ("test_trades", "Test trades"),
+                ("test_net_return", "Test net"),
+                ("test_max_drawdown", "Test DD"),
+                ("selected_for_test", "On test"),
+            ]
+            head = "".join(f"<th scope='col'>{escape(label)}</th>" for _key, label in columns)
+            table_rows = []
+            for row in rows:
+                cells = []
+                for key, _label in columns:
+                    value = row.get(key, "")
+                    if key == "selected_for_test":
+                        cells.append(f"<td>{chip('chosen on validation', 'ok') if value else '<span class=muted>not measured</span>'}</td>")
+                    elif key in {"validation_net_return", "test_net_return", "validation_cost_return"}:
+                        cells.append(f"<td class='num'>{'' if value == '' else escape(f'{float(value):+.4%}')}</td>")
+                    elif key in {"validation_max_drawdown", "test_max_drawdown"}:
+                        cells.append(f"<td class='num'>{'' if value == '' else escape(f'{float(value):.4%}')}</td>")
+                    else:
+                        cells.append(f"<td>{escape(str(value))}</td>")
+                table_rows.append("<tr>" + "".join(cells) + "</tr>")
+            body.append(
+                card(
+                    "By strategy, symbol and timeframe",
+                    "<div class='table-wrap'><table><thead><tr>"
+                    + head
+                    + "</tr></thead><tbody>"
+                    + "".join(table_rows)
+                    + "</tbody></table></div>",
+                    hint=(
+                        "Validation is the window a candidate may be chosen on. The test "
+                        "window is shown only for the variant chosen on validation, so it "
+                        "stays a test window. Nothing here is a profitability claim."
+                    ),
+                    right=chip(f"{int(report.get('row_count', len(rows)))} rows", "muted"),
+                )
+            )
+
+        coverage = [dict(item) for item in report.get("coverage") or []]
+        if coverage:
+            coverage_rows = "".join(
+                "<tr>"
+                f"<td class='mono'>{escape(str(item.get('symbol', '')))}</td>"
+                f"<td>{escape(str(item.get('timeframe', '')))}</td>"
+                f"<td class='num'>{escape(str(item.get('bars', 0)))}</td>"
+                f"<td class='num'>{float(item.get('coverage_fraction', 0)):.1%}</td>"
+                f"<td class='num'>{escape(str(item.get('gaps', 0)))}</td>"
+                f"<td>{chip('used', 'ok', dot=True) if item.get('usable') else chip('not used', 'warn', dot=True)}</td>"
+                f"<td class='small muted'>{escape(str(item.get('reason', '')))}</td>"
+                "</tr>"
+                for item in coverage
+            )
+            body.append(
+                card(
+                    "Which history was actually used",
+                    "<div class='table-wrap'><table><thead><tr>"
+                    "<th scope='col'>Symbol</th><th scope='col'>TF</th>"
+                    "<th scope='col'>Bars</th><th scope='col'>Coverage</th>"
+                    "<th scope='col'>Gaps</th><th scope='col'>Used</th>"
+                    "<th scope='col'>Reason</th>"
+                    f"</tr></thead><tbody>{coverage_rows}</tbody></table></div>",
+                )
+            )
+
+        walk = [dict(item) for item in report.get("walk_forward") or []]
+        for item in walk:
+            folds = [dict(entry) for entry in item.get("folds") or []]
+            body.append(
+                card(
+                    f"Out of sample, in later chunks: {item.get('symbol', '')} "
+                    f"{item.get('timeframe', '')}",
+                    "<div class='data-grid'>"
+                    + kpi("Positive folds", f"{int(item.get('positive_folds', 0))} of {len(folds)}", foot="later chunks of the same history")
+                    + kpi("Median fold", f"{float(item.get('median_net_return', 0)):+.4%}", foot="net of the stated costs")
+                    + "</div>"
+                    + "<div class='table-wrap'><table><thead><tr>"
+                    "<th scope='col'>Fold</th><th scope='col'>From</th><th scope='col'>To</th>"
+                    "<th scope='col'>Trades</th><th scope='col'>Net</th><th scope='col'>Max DD</th>"
+                    "</tr></thead><tbody>"
+                    + "".join(
+                        "<tr>"
+                        f"<td>{escape(str(fold.get('fold', '')))}</td>"
+                        f"<td class='small mono'>{escape(str(fold.get('from', ''))[:16])}</td>"
+                        f"<td class='small mono'>{escape(str(fold.get('to', ''))[:16])}</td>"
+                        f"<td class='num'>{escape(str(fold.get('trades', 0)))}</td>"
+                        f"<td class='num'>{float(fold.get('net_return', 0)):+.4%}</td>"
+                        f"<td class='num'>{float(fold.get('max_drawdown', 0)):.4%}</td>"
+                        "</tr>"
+                        for fold in folds
+                    )
+                    + "</tbody></table></div>",
+                    hint=str(item.get("note", "")),
+                )
+            )
+
+        sensitivity = [dict(item) for item in report.get("sensitivity") or []]
+        for item in sensitivity:
+            runs = [dict(entry) for entry in item.get("runs") or []]
+            body.append(
+                card(
+                    f"Would a dearer cost assumption change it? {item.get('symbol', '')} "
+                    f"{item.get('timeframe', '')}",
+                    "<div class='table-wrap'><table><thead><tr>"
+                    "<th scope='col'>Cost multiplier</th><th scope='col'>Slippage (pips)</th>"
+                    "<th scope='col'>Commission / lot</th><th scope='col'>Trades</th>"
+                    "<th scope='col'>Validation net</th>"
+                    "</tr></thead><tbody>"
+                    + "".join(
+                        "<tr>"
+                        f"<td class='num'>{escape(str(run.get('cost_multiplier', '')))}x</td>"
+                        f"<td class='num'>{escape(str(run.get('slippage_pips', '')))}</td>"
+                        f"<td class='num'>{escape(str(run.get('commission_per_lot', '')))}</td>"
+                        f"<td class='num'>{escape(str(run.get('trades', 0)))}</td>"
+                        f"<td class='num'>{float(run.get('net_return', 0)):+.4%}</td>"
+                        "</tr>"
+                        for run in runs
+                    )
+                    + "</tbody></table></div>",
+                    hint=(
+                        "The same signals under a dearer assumption. If doubling the "
+                        "assumed costs erases the result, the result was the assumption."
+                    ),
+                )
+            )
+
+        problems = [dict(item) for item in report.get("failures") or []] + [
+            dict(item) for item in report.get("not_run") or []
+        ]
+        if problems:
+            problem_rows = "".join(
+                "<tr>"
+                f"<td class='mono'>{escape(str(item.get('symbol', '')))}</td>"
+                f"<td>{escape(str(item.get('timeframe', '')))}</td>"
+                f"<td class='mono small'>{escape(str(item.get('variant_id', '')) or 'all')}</td>"
+                f"<td>{escape(str(item.get('reason', '')))}</td>"
+                f"<td class='small muted'>{escape(str(item.get('detail', '')))}</td>"
+                "</tr>"
+                for item in problems
+            )
+            body.append(
+                card(
+                    "What did not run, and why",
+                    "<div class='table-wrap'><table><thead><tr>"
+                    "<th scope='col'>Symbol</th><th scope='col'>TF</th>"
+                    "<th scope='col'>Variant</th><th scope='col'>Reason</th>"
+                    "<th scope='col'>Detail</th>"
+                    f"</tr></thead><tbody>{problem_rows}</tbody></table></div>",
+                    hint="A candidate that could not be measured is listed. It was not skipped quietly.",
+                )
+            )
+
+    # -- paper ----------------------------------------------------------
+    runner = dict(paper.get("runner") or {})
+    selection = paper.get("selection") or None
+    paper_blockers = [dict(item) for item in paper.get("blockers") or []]
+    paper_body = (
+        "<div class='data-grid'>"
+        + kpi("Selected strategy", escape(str((selection or {}).get("variant_id", "")) or "none"), foot="the operator's own choice")
+        + kpi("Paper runner", "running" if runner.get("running") else ("ready" if runner.get("available") else "not configured"), foot="simulated fills, local ledger")
+        + kpi("Ready to start", "yes" if paper.get("ready") else "no", foot=escape(f"{len(paper_blockers)} blocker(s)"))
+        + "</div>"
+    )
+    if paper_blockers:
+        paper_body += _blocker_list(paper_blockers)
+    if runner.get("available"):
+        paper_body += (
+            "<div class='step-actions'>"
+            + action_form(
+                "runner-start",
+                ctx.action_nonce,
+                "Start paper trading",
+                tone="primary" if paper.get("ready") else "",
+            )
+            + "<span class='small muted'>Prices come from your terminal's current "
+            "quotes; fills are simulated locally.</span></div>"
+        )
+    body.append(
+        card(
+            "Paper trading, one click",
+            paper_body,
+            hint=str(paper.get("note", "")),
+        )
+    )
+
+    body.append(
+        notice(
+            "ok",
+            "No profitability claim is made anywhere on this page",
+            "These are historical estimates on broker bars under the stated cost "
+            "assumptions. A good-looking window is a reason to keep looking, not a "
+            "reason to trade. Live execution is a separate mode with its own gates.",
+        )
+    )
+    return render_shell(ctx, body)
+
+
 def render_strategies(ctx: PageContext) -> str:
     view = _strategies_view(ctx)
     nonce = ctx.action_nonce
@@ -3892,6 +4464,7 @@ PAGES = {
     "activity": render_activity,
     "data": render_data,
     "provider-setup": render_provider_setup,
+    "quick-setup": render_quick_setup,
     "live": render_live,
     "kronos": render_kronos,
     "strategies": render_strategies,
@@ -3913,6 +4486,7 @@ __all__ = [
     "render_activity",
     "render_data",
     "render_provider_setup",
+    "render_quick_setup",
     "render_connecting",
     "render_health",
     "render_kronos",
