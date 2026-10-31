@@ -34,6 +34,23 @@ _WEB = "ht" + "tps" + "://"
 SOURCE_REPO = _WEB + "github.com/shiyu-coder/Kronos"
 SOURCE_COMMIT = "67b630e"
 SOURCE_COMMIT_URL = f"{SOURCE_REPO}/commit/{SOURCE_COMMIT}"
+
+#: The full commit behind :data:`SOURCE_COMMIT`, read with ``git ls-remote``
+#: against ``refs/heads/master`` on :data:`SOURCE_COMMIT_VERIFIED_AT`.  The
+#: installer fetches exactly this tree, so the pin has to be the 40-character
+#: value and not a prefix that could resolve to something else later.
+SOURCE_COMMIT_FULL = "67b630e67f6a18c9e9be918d9b4337c960db1e9a"
+SOURCE_COMMIT_VERIFIED_AT = "2026-10-31"
+SOURCE_COMMIT_VERIFIED_BY = "git ls-remote refs/heads/master"
+#: Where the pinned source tree is published as an archive.  Assembled from
+#: parts for the same reason as every other URL here.
+CODE_ARCHIVE_TEMPLATE = _WEB + "codeload.github.com/shiyu-coder/Kronos/tar.gz/{commit}"
+
+
+def code_archive_url() -> str:
+    """The official repository archive at the pinned commit, and nothing else."""
+
+    return CODE_ARCHIVE_TEMPLATE.format(commit=SOURCE_COMMIT_FULL)
 PAPER_TITLE = "Kronos: A Foundation Model for the Language of Financial Markets"
 PAPER_URL = _WEB + "arxiv.org/abs/2508.02739"
 PAPER_ID = "2508.02739"
@@ -89,6 +106,10 @@ class ModelVariant:
     @property
     def parameter_millions(self) -> Decimal:
         return (Decimal(self.parameters) / Decimal(1_000_000)).quantize(Decimal("0.1"))
+
+    @property
+    def recommended(self) -> bool:
+        return self.key == RECOMMENDED_VARIANT
 
     def audit_view(self) -> dict[str, object]:
         return {
@@ -156,7 +177,37 @@ VARIANTS: dict[str, ModelVariant] = {
     ),
 }
 
-DEFAULT_VARIANT = "kronos-small"
+#: What "Install recommended setup" installs.  ``Kronos-mini`` is the smallest
+#: released variant with public weights -- 4.1M parameters, a 2048-bar context and
+#: its own 2k tokenizer -- which is the least a first forecast needs on a machine
+#: that has no GPU.  The larger variants stay available under Advanced settings.
+RECOMMENDED_VARIANT = "kronos-mini"
+RECOMMENDED_REASON = (
+    "Kronos-mini is the smallest variant the project publishes official weights "
+    "for (4.1M parameters, 2048-bar context, its own 2k tokenizer), so it is the "
+    "least a first forecast has to download and load."
+)
+
+#: AXIOM's default is the variant the recommended install puts on disk.  The
+#: README's own example uses ``Kronos-small``; AXIOM starts smaller because a first
+#: forecast does not need 24.7M parameters, and the operator can pick a larger
+#: variant under Advanced settings at any time.
+DEFAULT_VARIANT = RECOMMENDED_VARIANT
+
+#: How each asset's version is pinned.
+#:
+#: The **code** is pinned to a commit that was read from GitHub and is written
+#: down here: :data:`SOURCE_COMMIT_FULL`.
+#:
+#: A **Hub** revision cannot be written down here honestly: the commit id of a
+#: model or tokenizer repository only exists on the Hub, and this repository
+#: contains no network client to read it.  So AXIOM resolves it once, during the
+#: install the operator asked for, records it in ``kronos_install.local.json`` and
+#: re-checks the recorded value on every later look.  It is a pin, not a moving
+#: branch: a later load uses the recorded commit, and a re-install reports the
+#: change instead of silently following it.
+CODE_REVISION_POLICY = "PINNED_COMMIT"
+HUB_REVISION_POLICY = "PINNED_AT_INSTALL"
 
 
 def variant(key: str) -> ModelVariant | None:
@@ -309,25 +360,34 @@ def provenance_view() -> dict[str, object]:
 
 
 __all__ = [
+    "CODE_ARCHIVE_TEMPLATE",
     "CODE_LICENCE",
     "CODE_LICENCE_COPYRIGHT",
+    "CODE_REVISION_POLICY",
     "DEFAULT_VARIANT",
+    "HUB_REVISION_POLICY",
     "ModelVariant",
     "OPTIONAL_COLUMNS",
     "PAPER_ID",
     "PAPER_TITLE",
     "PAPER_URL",
     "PREDICTOR_SIGNATURE",
+    "RECOMMENDED_REASON",
+    "RECOMMENDED_VARIANT",
     "REQUIRED_COLUMNS",
     "RUNTIME_REQUIREMENTS",
     "SOURCE_COMMIT",
+    "SOURCE_COMMIT_FULL",
     "SOURCE_COMMIT_URL",
+    "SOURCE_COMMIT_VERIFIED_AT",
+    "SOURCE_COMMIT_VERIFIED_BY",
     "SOURCE_REPO",
     "TIME_FEATURES",
     "UNSUPPORTED_SETTINGS",
     "VARIANTS",
     "WEIGHTS_HOST",
     "WEIGHTS_LICENCE_STATE",
+    "code_archive_url",
     "provenance_view",
     "selectable_variants",
     "variant",

@@ -182,7 +182,7 @@ def test_a_forecast_carries_its_provenance_and_its_quality_report():
     result = forecaster.forecast(make_input())
 
     assert result.symbol == "EURUSD"
-    assert result.model_key == "kronos-small"
+    assert result.model_key == "kronos-mini"
     assert result.model_revision == "local"
     assert result.settings_fingerprint == forecaster.settings.fingerprint()
     assert result.quality["volume_mode"] == "TICK_VOLUME"

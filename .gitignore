@@ -28,6 +28,9 @@ data/universe/
 data/datasets/
 # The catalog's evaluation record and the paper test's ledger/state.
 data/catalog/
+# The AXIOM-managed Kronos install (weights, tokenizer, pinned source tree). It is
+# fetched by an explicit Install action and never belongs in Git.
+data/kronos/
 results/*
 !results/.gitkeep
 

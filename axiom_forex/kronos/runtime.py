@@ -28,7 +28,7 @@ import platform
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping
 
 from .registry import (
@@ -69,6 +69,35 @@ OPTIONAL_FOR_INFERENCE = ("matplotlib", "tqdm")
 
 #: Nothing in this module retries by itself; a failure waits for the operator.
 NO_AUTOMATIC_RETRY = "no_automatic_retry"
+
+#: Settings that change *what is read and forecast*, not what is loaded.  They can
+#: be changed on a loaded model without reloading the weights: the model is the
+#: same object, and only the request around it moves.
+READ_SIDE_FIELDS: tuple[str, ...] = (
+    "symbol",
+    "timeframe",
+    "volume_mode",
+    "pred_len",
+    "temperature",
+    "top_k",
+    "top_p",
+    "rollouts",
+    "interval_seconds",
+    "seed",
+)
+
+#: Settings that are baked into the loaded predictor.  Changing one of these is a
+#: reload, and AXIOM says so instead of pretending it took effect.
+STRUCTURAL_FIELDS: tuple[str, ...] = (
+    "model_key",
+    "model_path",
+    "tokenizer_path",
+    "revision",
+    "code_path",
+    "device",
+    "max_context",
+    "clip",
+)
 
 #: Bytes per parameter, for the estimate only.
 BYTES_PER_PARAMETER = 4
@@ -429,6 +458,38 @@ class KronosRuntime:
         view["unloaded"] = unloaded
         return view
 
+    # -- changing what is read, without reloading ------------------------
+
+    def update_settings(self, settings: KronosSettings) -> dict[str, Any]:
+        """Apply read-side changes to the loaded model; name the ones it cannot take.
+
+        Nothing is loaded, reloaded, connected, or traded here.  A structural change
+        (a different checkpoint, device, context window) is reported as needing a
+        reload rather than being silently ignored.
+        """
+
+        with self._lock:
+            current = self.settings
+            if current is None:
+                return {"applied": [], "reload_required": []}
+            applied = [
+                name
+                for name in READ_SIDE_FIELDS
+                if getattr(current, name, None) != getattr(settings, name, None)
+            ]
+            reload_required = [
+                name
+                for name in STRUCTURAL_FIELDS
+                if getattr(current, name, None) != getattr(settings, name, None)
+            ]
+            if applied:
+                merged = replace(current, **{name: getattr(settings, name) for name in READ_SIDE_FIELDS})
+                self.settings = merged
+                forecaster = self.forecaster
+                if forecaster is not None and hasattr(forecaster, "settings"):
+                    forecaster.settings = merged
+            return {"applied": applied, "reload_required": reload_required}
+
     # -- one forecast ---------------------------------------------------
 
     def forecast_once(self) -> dict[str, Any]:
@@ -514,6 +575,7 @@ __all__ = [
     "NOT_LOADED",
     "NO_AUTOMATIC_RETRY",
     "OPTIONAL_FOR_INFERENCE",
+    "READ_SIDE_FIELDS",
     "PackageFact",
     "READY",
     "REQUIRED_FOR_INFERENCE",
@@ -522,6 +584,7 @@ __all__ = [
     "SOURCE_COMMIT",
     "SOURCE_REPO",
     "STOPPED",
+    "STRUCTURAL_FIELDS",
     "KronosRuntime",
     "TIMEFRAMES",
     "estimate",

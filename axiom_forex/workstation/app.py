@@ -148,6 +148,13 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "kronos-reconcile",
         "kronos-benchmark",
         "kronos-inspect-weights",
+        # The explicit install: a check of the official sources (metadata only), the
+        # download the operator asked for, its cancellation, and its cleanup. None
+        # of these connects to a broker, changes a mode, arms, or sends anything.
+        "kronos-install-check",
+        "kronos-install",
+        "kronos-install-cancel",
+        "kronos-install-cleanup",
         # The strategy library. Screening records attempts (including failures);
         # selecting records the operator's own choice. Neither sizes, arms, or
         # trades, and selecting cannot override a rejection.

@@ -6,7 +6,7 @@ What is pinned here:
   pages -- a forecast is never an order path;
 * every state the runtime can be in is worded as what it is, including "this
   deployment has no forecasting component";
-* the model-file card never offers a download, and the licence/version are shown
+* the install card offers one explicit action, and the licence/version are shown
   before anything is used;
 * a stale nonce is refused, and every action that changes something is on the
   POST allowlist;
@@ -140,6 +140,10 @@ def test_every_kronos_action_is_on_the_allowlist_and_none_can_trade():
         "kronos-reconcile",
         "kronos-benchmark",
         "kronos-inspect-weights",
+        "kronos-install-check",
+        "kronos-install",
+        "kronos-install-cancel",
+        "kronos-install-cleanup",
     }
     for name in kronos_actions:
         for forbidden in ("order", "trade", "arm", "mode", "risk", "live"):
@@ -190,9 +194,11 @@ def test_the_page_renders_in_this_sandbox_where_torch_is_absent(tmp_path):
     # Forecast-only is stated on the page, not implied.
     assert "Forecast only" in html
     assert "cannot place an order" in html
-    # The model-file card says outright that nothing is fetched for you.
-    assert "no automatic download" in html
-    assert "AXIOM does not download weights" in html
+    # The install card offers exactly one clear action, and says nothing is
+    # fetched until it is pressed.
+    assert "Install the recommended setup" in html
+    assert "official sources only" in html
+    assert "nothing downloaded until you press Install" in html
     # Every dependency the sandbox lacks is listed with its requirement line.
     assert "torch&gt;=2.0.0" in html or "torch>=2.0.0" in html
     # The model limits come from the variant, and the unsupported settings are

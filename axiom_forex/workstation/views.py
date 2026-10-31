@@ -303,6 +303,10 @@ pre.template{
 .symbol{display:flex;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;font-size:13px}
 .symbol:hover{background:rgba(255,255,255,.04)}
 .symbol input{width:15px;height:15px;accent-color:var(--accent-2)}
+.progress{height:10px;border-radius:6px;background:rgba(255,255,255,.08);overflow:hidden;border:1px solid var(--line)}
+.progress__bar{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+details.advanced{margin:14px 0}
+details.advanced>summary{cursor:pointer;color:var(--text-2);font-size:12.5px;font-weight:600;padding:8px 0}
 .symbol--off{opacity:.7}
 .symbol--off input{cursor:not-allowed}
 .field{display:flex;flex-direction:column;gap:6px;max-width:640px}
@@ -3212,6 +3216,282 @@ def _kronos_controls_form(view: Mapping[str, Any], ctx: PageContext) -> str:
     )
 
 
+def _kronos_bytes(count: Any) -> str:
+    try:
+        value = float(count)
+    except (TypeError, ValueError):
+        return "unknown"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def _kronos_progress(job: Mapping[str, Any]) -> str:
+    """A progress bar built from the numbers the installer reported."""
+
+    percent = job.get("percent")
+    try:
+        width = max(0.0, min(100.0, float(percent)))
+    except (TypeError, ValueError):
+        width = 0.0
+    label = (
+        f"{_kronos_bytes(job.get('bytes_done'))} of {_kronos_bytes(job.get('bytes_total'))}"
+        if job.get("bytes_total")
+        else f"{_kronos_bytes(job.get('bytes_done'))} downloaded"
+    )
+    return (
+        "<div class='progress' role='progressbar' aria-valuemin='0' aria-valuemax='100' "
+        f"aria-valuenow='{width:.0f}' aria-label='Download progress'>"
+        f"<span class='progress__bar' style='width:{width:.0f}%'></span></div>"
+        f"<p class='small muted' style='margin:6px 0 0'>{escape(label)}"
+        + (
+            f" · step {escape(str(job.get('step', '')))} of {escape(str(job.get('steps', '')))}"
+            f" · {escape(str(job.get('asset_label', '')))}"
+            if job.get("steps")
+            else ""
+        )
+        + "</p>"
+    )
+
+
+def _kronos_setup_card(view: Mapping[str, Any], nonce: str) -> str:
+    """The one setup action: check, then install, into AXIOM's own folder."""
+
+    install = dict(view.get("install") or {})
+    plan = dict(install.get("plan") or {})
+    job = dict(install.get("job") or {})
+    manifest = dict(install.get("manifest") or {})
+    state = str(install.get("state") or "NOT_INSTALLED")
+    hardware = dict(plan.get("hardware") or {})
+    licence = dict(plan.get("licence") or {})
+    installed = bool(install.get("installed"))
+    running = bool(job.get("running")) or state == "DOWNLOADING"
+    exact = bool(plan.get("exact"))
+    download = (
+        plan.get("download_human")
+        if exact
+        else f"about {plan.get('estimated_human', 'unknown')} (estimated; check for the exact size)"
+    )
+
+    rows: list[tuple[str, str]] = [
+        (
+            "Recommended",
+            escape(str(plan.get("variant_name", "Kronos-mini")))
+            + " · the smallest variant with official public weights",
+        ),
+        ("Download", escape(str(download or "unknown"))),
+        ("Free on this machine", escape(str(plan.get("free_human", "unknown")))),
+        ("Installs into", f"<span class='mono'>{escape(str(install.get('destination', '')))}</span>"),
+        (
+            "Hardware",
+            escape(str(hardware.get("device_hint", "")))
+            + (
+                " " + chip("torch present", "ok")
+                if hardware.get("torch_present")
+                else " " + chip("torch missing", "danger")
+            ),
+        ),
+        (
+            "Revisions",
+            "code pinned to "
+            + f"<span class='mono'>{escape(str(plan.get('code_commit', ''))[:12])}</span>"
+            + "; model and tokenizer pinned to the commit the check resolves and recorded "
+            "in the install manifest, so a later load never follows a moving branch",
+        ),
+        (
+            "Licence",
+            escape(f"code {licence.get('code', 'MIT')}; weights {licence.get('weights_state', 'UNVERIFIED_BY_AXIOM')}"),
+        ),
+    ]
+    body = dl(rows)
+
+    body += (
+        "<ul class='list' style='margin-top:10px'>"
+        "<li><strong>Storage.</strong> Everything is written into the AXIOM-managed folder "
+        f"<span class='mono'>{escape(str(install.get('managed_root', '')))}</span>, and nowhere "
+        "else. <em>Clean up</em> removes it again.</li>"
+        "<li><strong>Internet.</strong> Only when you press Install, AXIOM contacts the two "
+        "official Hugging Face repositories and the pinned GitHub source tree, for the files "
+        "listed here. Nothing is fetched at startup or while a page is being read.</li>"
+        "<li><strong>Licence.</strong> The code is MIT (Copyright (c) 2025 ShiYu). The weights "
+        "are published under <span class='mono'>NeoQuasar/*</span>, and their licence is not "
+        "something AXIOM can vouch for: read the model card before you rely on them.</li>"
+        "<li><strong>Forecast only.</strong> Installing downloads files. It cannot create a "
+        "signal, switch PAPER/LIVE, arm execution, or place an order.</li>"
+        "</ul>"
+    )
+
+    blockers = [str(item) for item in plan.get("blockers") or []]
+    if "not_enough_disk_space" in blockers:
+        body += notice(
+            "warn",
+            "Not enough free space for this download",
+            f"It needs {download} and {plan.get('free_human', 'unknown')} is free. "
+            "Free some space, then press Check again. Nothing was downloaded.",
+        )
+    if "runtime_packages_missing" in blockers:
+        missing = ", ".join(str(item) for item in hardware.get("missing_packages") or [])
+        body += notice(
+            "warn",
+            "The Kronos runtime is not installed on this machine",
+            f"Missing: {missing}. AXIOM does not install software; install the official "
+            "requirements first (they are listed further down this page), then press Check.",
+        )
+
+    if running:
+        body += "<div style='margin-top:12px'>" + _kronos_progress(job) + "</div>"
+        body += (
+            "<div class='step-actions'>"
+            + action_form("kronos-install-cancel", nonce, "Cancel download", tone="danger")
+            + "</div>"
+            "<p class='small muted' style='margin:6px 0 0'>Cancelling stops between files; "
+            "whatever arrived stays in the managed folder so you can retry, or clean it up.</p>"
+        )
+    elif installed:
+        paths = dict(install.get("paths") or {})
+        revisions = dict(manifest.get("revisions") or {})
+        body += notice(
+            "ok",
+            "The recommended Kronos setup is installed",
+            f"Installed {escape(str(manifest.get('installed_at', '')))} · "
+            f"{_kronos_bytes(manifest.get('bytes'))}. Paths are recorded, so nothing has to be "
+            "typed. Press Load model to use it.",
+        )
+        body += dl(
+            [
+                ("Code", f"<span class='mono'>{escape(str(paths.get('code_path', '')))}</span>"),
+                ("Model", f"<span class='mono'>{escape(str(paths.get('model_path', '')))}</span>"),
+                ("Tokenizer", f"<span class='mono'>{escape(str(paths.get('tokenizer_path', '')))}</span>"),
+                ("Pinned model revision", escape(str(revisions.get('model', '')) or "—")),
+                ("Pinned code commit", f"<span class='mono'>{escape(str(plan.get('code_commit', ''))[:12])}</span>"),
+            ]
+        )
+        body += (
+            "<div class='row' style='margin-top:10px'>"
+            + action_form("kronos-load", nonce, "Load model", tone="primary")
+            + action_form("kronos-install-check", nonce, "Check the sources again")
+            + action_form("kronos-install-cleanup", nonce, "Clean up the install", tone="danger")
+            + "</div>"
+        )
+    else:
+        if state in {"FAILED", "CANCELLED"}:
+            body += notice(
+                "warn",
+                "The install did not finish"
+                if state == "FAILED"
+                else "The install was cancelled",
+                escape(
+                    f"{job.get('detail', '') or job.get('reason', '')}. "
+                    f"{job.get('hint', '')}".strip()
+                ),
+            )
+        checked = bool(install.get("checked"))
+        body += (
+            "<div class='row' style='margin-top:10px'>"
+            + action_form("kronos-install-check", nonce, "Check this machine and the download")
+            + action_form(
+                "kronos-install",
+                nonce,
+                "Retry install" if state in {"FAILED", "CANCELLED"} else "Install recommended setup",
+                tone="primary",
+            )
+            + (
+                action_form("kronos-install-cleanup", nonce, "Clean up partial download")
+                if state in {"FAILED", "CANCELLED"}
+                else ""
+            )
+            + "</div>"
+        )
+        body += (
+            "<p class='small muted' style='margin:8px 0 0'>"
+            + (
+                f"Checked at {escape(str(plan.get('checked_at', '')))}. "
+                if checked
+                else "Install checks this machine and the sources first: it shows the exact "
+                "size, then downloads when you press Install again. "
+            )
+            + "No download starts without that press."
+            + "</p>"
+        )
+
+    return card(
+        "Install the recommended setup",
+        body,
+        hint="One action, official sources only, into a folder AXIOM manages: no paths to "
+        "type, nothing downloaded until you press Install, and a Clean up button when you "
+        "want it gone.",
+        right=(
+            chip("installed", "ok", dot=True)
+            if installed
+            else chip("downloading", "warn", dot=True)
+            if running
+            else chip("not installed", "muted", dot=True)
+        ),
+    )
+
+
+def _kronos_forecast_card(view: Mapping[str, Any], nonce: str) -> str:
+    """Symbol, timeframe and horizon, right where the forecast is run."""
+
+    settings = dict(view.get("settings") or {})
+    choices = [str(item) for item in view.get("symbol_choices") or []]
+    current = str(settings.get("symbol", ""))
+    timeframes = [str(item) for item in view.get("timeframes") or []]
+    if choices:
+        symbol_field = (
+            "<label class='field'><span>Symbol</span><select name='symbol'>"
+            + "".join(
+                f"<option value='{escape(item)}'"
+                f"{' selected' if item == current else ''}>{escape(item)}</option>"
+                for item in choices
+            )
+            + "</select><span class='help'>The verified symbols you selected on Account &amp; "
+            "symbols. The first one is the default.</span></label>"
+        )
+    else:
+        symbol_field = (
+            "<label class='field'><span>Symbol</span>"
+            f"<input type='text' name='symbol' value='{escape(current)}' autocomplete='off'>"
+            "<span class='help'>No verified symbol is selected yet. Select one on Account &amp; "
+            "symbols, then it appears here as a choice.</span></label>"
+        )
+    body = (
+        f"<form method='post' action='/actions/kronos-forecast' class='stack'>"
+        f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+        "<div class='data-grid'>"
+        + symbol_field
+        + "<label class='field'><span>Timeframe</span><select name='timeframe'>"
+        + "".join(
+            f"<option value='{escape(tf)}'{' selected' if tf == str(settings.get('timeframe')) else ''}>"
+            f"{escape(tf)}</option>"
+            for tf in timeframes
+        )
+        + "</select><span class='help'>Built from the terminal's bid/ask bars.</span></label>"
+        "<label class='field'><span>Horizon (bars)</span>"
+        f"<input type='number' name='pred_len' value='{escape(str(settings.get('pred_len', '')))}' "
+        "min='1' step='1'><span class='help'>How many bars ahead to forecast.</span></label>"
+        "</div>"
+        "<div class='row'><button class='btn btn--primary' type='submit'>Run one forecast</button>"
+        "</div></form>"
+    )
+    state = str(dict(view.get("state") or {}).get("state", "NOT_LOADED"))
+    if state != "READY":
+        body += (
+            "<p class='small muted' style='margin:10px 0 0'>The model is not loaded yet. "
+            "Install and load it above; the symbol and timeframe here are remembered either "
+            "way, and installing never waits for a symbol.</p>"
+        )
+    return card(
+        "Forecast controls",
+        body,
+        hint="Symbol, timeframe and horizon are part of the forecast, not of the load: you "
+        "can change them and run again without reloading the model.",
+        right=chip(state.lower().replace("_", " "), "ok" if state == "READY" else "muted"),
+    )
+
+
 def render_kronos(ctx: PageContext) -> str:
     view = _kronos_view(ctx)
     nonce = ctx.action_nonce
@@ -3256,6 +3536,9 @@ def render_kronos(ctx: PageContext) -> str:
             "existing risk gate.",
         )
     )
+
+    body.append(_kronos_setup_card(view, nonce))
+    body.append(_kronos_forecast_card(view, nonce))
 
     # -- status ----------------------------------------------------------
     status_rows = [
@@ -3373,15 +3656,14 @@ def render_kronos(ctx: PageContext) -> str:
             f"<ul class='list'>{items}</ul></div></div>"
         )
     settings_body += _kronos_controls_form(view, ctx)
-    body.append(
-        card(
-            "Inference settings",
-            settings_body,
-            hint="Every control maps to a real Kronos argument or to an AXIOM-side "
-            "scheduling choice. Limits come from the selected variant's published "
-            "context length.",
-            right=chip("basic + advanced", "muted"),
-        )
+    settings_card = card(
+        "Inference settings",
+        settings_body,
+        hint="Every control maps to a real Kronos argument or to an AXIOM-side "
+        "scheduling choice. Limits come from the selected variant's published "
+        "context length. AXIOM-managed install paths are filled in; a path you type "
+        "here overrides them.",
+        right=chip("advanced", "muted"),
     )
 
     # presets
@@ -3389,7 +3671,7 @@ def render_kronos(ctx: PageContext) -> str:
     preset_options = "".join(
         f"<option value='{escape(item)}'>{escape(item)}</option>" for item in presets
     )
-    body.append(
+    presets_card = (
         card(
             "Named presets",
             f"<form method='post' action='/actions/kronos-preset-save' class='stack'>"
@@ -3414,6 +3696,17 @@ def render_kronos(ctx: PageContext) -> str:
             ),
             hint="Loading a preset fills the form; it does not load the model.",
         )
+    )
+    body.append(
+        "<details class='advanced'>"
+        "<summary>Advanced settings — model variants, custom paths, revisions, and "
+        "hardware overrides</summary>"
+        + settings_card
+        + presets_card
+        + "<p class='small muted' style='margin:8px 0 0'>The recommended install needs "
+        "none of this. Open it only to use a different variant, to point at files you "
+        "placed yourself, to pin a different revision, or to force a device.</p>"
+        + "</details>"
     )
 
     # -- hardware and cost ----------------------------------------------
@@ -3477,10 +3770,11 @@ def render_kronos(ctx: PageContext) -> str:
     ]
     weights_body = dl(weights_rows)
     weights_body += (
-        "<p class='small muted' style='margin-top:10px'>AXIOM does not download weights, "
-        "packages, or code. Obtain the files from the official source yourself, place them "
-        "in a folder, and point the setting above at it. The inspection below only hashes "
-        "what is already there.</p>"
+        "<p class='small muted' style='margin-top:10px'>AXIOM downloads only the three "
+        "official sources listed above, only when you press Install, and only into its own "
+        "managed folder. The inspection below hashes whatever is on disk -- including an "
+        "install you already have -- so the files can be compared with the publisher's own "
+        "values. AXIOM does not install software packages.</p>"
     )
     if weights.get("files"):
         weights_body += table(
@@ -3509,7 +3803,7 @@ def render_kronos(ctx: PageContext) -> str:
             weights_body,
             hint="Licence and version are shown before anything is used; the weights' "
             "licence is not something AXIOM can vouch for.",
-            right=chip("no automatic download", "warn"),
+            right=chip("official sources only", "warn"),
         )
     )
 

@@ -181,8 +181,15 @@ class KronosSettings:
 
     # -- validation ----------------------------------------------------
 
-    def validate(self, *, symbols: Iterable[str] = ()) -> tuple[SettingProblem, ...]:
-        """Every problem with this configuration, in the operator's terms."""
+    def validate(
+        self, *, symbols: Iterable[str] = (), require_symbol: bool = True
+    ) -> tuple[SettingProblem, ...]:
+        """Every problem with this configuration, in the operator's terms.
+
+        ``require_symbol=False`` is for the things that do not read a series --
+        installing and loading the model.  Which symbol to forecast is a forecast
+        decision, and it must not stand between the operator and the install.
+        """
 
         problems: list[SettingProblem] = []
         item = self.spec
@@ -270,7 +277,8 @@ class KronosSettings:
             )
 
         if not self.symbol.strip():
-            problems.append(SettingProblem("kronos.symbol", "choose the symbol to forecast"))
+            if require_symbol:
+                problems.append(SettingProblem("kronos.symbol", "choose the symbol to forecast"))
         else:
             known = [str(symbol) for symbol in symbols]
             if known and self.symbol.strip() not in known:
@@ -494,39 +502,53 @@ class KronosSettings:
         item = self.spec
         context_limit = item.context_length if item else 512
         return [
-            _control("Basic", "model_key", "Model variant", "select", self.model_key,
-                     options=[entry.key for entry in selectable_variants()],
-                     help="Only variants with official public weights are listed."),
-            _control("Basic", "model_path", "Model file location", "text", self.model_path,
-                     help="A local directory containing the model, or blank to use the "
-                          "official Hub id. Downloads are a separate, explicit action."),
-            _control("Basic", "tokenizer_path", "Tokenizer file location", "text",
-                     self.tokenizer_path,
-                     help="Optional local directory for the tokenizer. The official "
-                          "tokenizer is published as its own repository, so a fully "
-                          "offline install usually needs it. Blank uses the official id, "
-                          "or the model folder when that folder is local."),
-            _control("Basic", "device", "Device", "select", self.device, options=list(DEVICES),
-                     help="auto resolves to cuda:0, then mps, then cpu, exactly as the "
-                          "predictor does."),
             _control("Basic", "symbol", "Input symbol", "text", self.symbol,
-                     help="One of the symbols declared in your provider setup."),
+                     help="The broker symbol to forecast. On the forecast page this is a "
+                          "choice of the symbols selected on Account & symbols."),
             _control("Basic", "timeframe", "Input timeframe", "select", self.timeframe,
                      options=list(TIMEFRAMES),
                      help="Bar timeframe built from broker bid/ask data. Tick input is "
                           "not supported by this model."),
-            _control("Basic", "lookback", "Context length (bars)", "number", self.lookback,
-                     minimum=MIN_LOOKBACK, maximum=context_limit,
-                     help=f"Bars sent to the model; the variant reads at most {context_limit}."),
             _control("Basic", "pred_len", "Forecast horizon (bars)", "number", self.pred_len,
                      minimum=MIN_HORIZON, maximum=context_limit,
                      help=f"Bars to forecast; must fit inside the model's {context_limit}-bar "
                           "context."),
+            _control("Basic", "lookback", "Context length (bars)", "number", self.lookback,
+                     minimum=MIN_LOOKBACK, maximum=context_limit,
+                     help=f"Bars sent to the model; the variant reads at most {context_limit}."),
             _control("Basic", "rollouts", "Forecast rollouts", "number", self.rollouts,
                      minimum=MIN_ROLLOUTS, maximum=MAX_ROLLOUTS,
                      help="Independent sampled paths. The predictor averages the paths it "
                           "is given, so AXIOM runs one predict() per rollout to keep the "
                           "spread and report bands."),
+            _control("Advanced", "model_key", "Model variant", "select", self.model_key,
+                     options=[entry.key for entry in selectable_variants()],
+                     help="Only variants with official public weights are listed. The "
+                          "recommended install uses the smallest of them."),
+            _control("Advanced", "model_path", "Model file location", "text", self.model_path,
+                     help="Blank means the AXIOM-managed install. A folder here overrides "
+                          "it when you want files you placed yourself."),
+            _control("Advanced", "tokenizer_path", "Tokenizer file location", "text",
+                     self.tokenizer_path,
+                     help="Blank means the AXIOM-managed install. The official tokenizer is "
+                          "published as its own repository, so it is stored beside the "
+                          "model, not inside it."),
+            _control("Advanced", "code_path", "Official code checkout", "text",
+                     self.code_path,
+                     help="Blank means the AXIOM-managed install at the pinned commit. "
+                          "A folder here overrides it; it must contain model/kronos.py."),
+            _control("Advanced", "revision", "Hub revision (pinned)", "text", self.revision,
+                     help="The commit the install resolved, recorded when it installed. A "
+                          "moving branch is refused; blank uses the recorded pin."),
+            _control("Advanced", "device", "Device", "select", self.device, options=list(DEVICES),
+                     help="auto resolves to cuda:0, then mps, then cpu, exactly as the "
+                          "predictor does. Set this to override the detected hardware."),
+            _control("Advanced", "max_context", "Predictor max_context", "number",
+                     self.max_context, minimum=16, maximum=context_limit,
+                     help="KronosPredictor(max_context=...). AXIOM never lets it exceed "
+                          "the variant's trained context."),
+            _control("Advanced", "clip", "Standardisation clip", "number", str(self.clip),
+                     minimum="0.1", help="KronosPredictor(clip=...). Default 5."),
             _control("Advanced", "temperature", "Sampling temperature (T)", "number",
                      str(self.temperature), minimum="0.01", maximum="5",
                      help="predict(T=...). Higher is more diffuse."),
@@ -535,12 +557,6 @@ class KronosSettings:
             _control("Advanced", "top_p", "Top-p", "number", str(self.top_p),
                      minimum="0.01", maximum="1",
                      help="predict(top_p=...). Nucleus sampling mass."),
-            _control("Advanced", "max_context", "Predictor max_context", "number",
-                     self.max_context, minimum=16, maximum=context_limit,
-                     help="KronosPredictor(max_context=...). AXIOM never lets it exceed "
-                          "the variant's trained context."),
-            _control("Advanced", "clip", "Standardisation clip", "number", str(self.clip),
-                     minimum="0.1", help="KronosPredictor(clip=...). Default 5."),
             _control("Advanced", "volume_mode", "Volume mapping", "select", self.volume_mode,
                      options=["TICK_VOLUME", "ABSENT"],
                      help="MT5 gives tick volume, never exchange volume. TICK_VOLUME passes "
@@ -552,14 +568,6 @@ class KronosSettings:
                      "" if self.seed is None else self.seed,
                      help="Seeds the process RNG before inference. The predictor has no "
                           "seed argument, so this is best-effort and not a model control."),
-            _control("Advanced", "revision", "Hub revision (pinned)", "text", self.revision,
-                     help="Required before a load or download from the Hub; a moving "
-                          "branch is refused."),
-            _control("Advanced", "code_path", "Official code checkout", "text",
-                     self.code_path,
-                     help="Folder of the official Kronos repository (it contains "
-                          "model/kronos.py). Blank means the model package is already "
-                          "importable."),
         ]
 
 

@@ -694,6 +694,13 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "kronos-reconcile",
         "kronos-benchmark",
         "kronos-inspect-weights",
+        # The Kronos install: one explicit, cancellable download of the official
+        # sources into AXIOM's own folder. It writes files and one manifest; it
+        # cannot connect to a broker, change a mode, arm, or send anything.
+        "kronos-install-check",
+        "kronos-install",
+        "kronos-install-cancel",
+        "kronos-install-cleanup",
         # The strategy library. Screening and evaluating write attempt rows to a
         # local ledger; selecting records the operator's own choice and cannot
         # override a rejection. None of them sizes, arms, trades, or changes the

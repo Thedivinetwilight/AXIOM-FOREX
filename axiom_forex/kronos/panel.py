@@ -11,14 +11,17 @@ an operator-facing sentence without knowing anything about Kronos:
 
 ``{"ok": bool, "message": str, "reason": str, "path": str}``
 
-Nothing here retries, downloads, installs, or starts by itself.
+The one exception is the install: an explicit, cancellable download of the
+official sources into AXIOM's own folder, started only when the operator presses
+Install.  Nothing here downloads on import, on startup, or on a page render, and
+nothing here can trade.
 """
 
 from __future__ import annotations
 
 import json
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -26,9 +29,16 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from .benchmark import KronosModel, evaluate, standard_baselines
 from .forecast import FORECAST_LABEL, Forecast, LocalKronosForecaster
 from .history import ForecastStore, reconcile
+from .install import (
+    INSTALL_SCHEMA,
+    KronosInstaller,
+    managed_root,
+    recommended_assets,
+)
 from .inputs import InputRefused, build_input, describe_mapping
 from .registry import (
     CODE_LICENCE,
+    RECOMMENDED_VARIANT,
     CODE_LICENCE_COPYRIGHT,
     PAPER_URL,
     RUNTIME_REQUIREMENTS,
@@ -97,6 +107,11 @@ class KronosPanel:
     _weights: dict[str, Any] = field(default_factory=dict)
     _last_benchmark: dict[str, Any] = field(default_factory=dict)
     _notice: dict[str, Any] = field(default_factory=dict)
+    #: The install flow.  Injected by tests; built on first use otherwise.
+    install_system: Any = None
+    #: The symbols Account & symbols verified and the operator selected.  Read-only
+    #: here: this page can pick one of them, never add to them.
+    _symbols: tuple[str, ...] = ()
 
     # -- paths ----------------------------------------------------------
 
@@ -117,6 +132,46 @@ class KronosPanel:
         return Path(self.root) / BENCHMARK_FILENAME
 
     # -- settings -------------------------------------------------------
+
+    def apply_installed_paths(self) -> bool:
+        """Remember the paths the install recorded, once, without overwriting yours.
+
+        Only blank fields are filled.  A path the operator typed under Advanced
+        settings stays exactly as typed.
+        """
+
+        recorded = self.installer().paths(self.settings().model_key)
+        if not recorded:
+            return False
+        settings = self.settings()
+        updates = {
+            name: recorded[name]
+            for name in ("model_path", "tokenizer_path", "code_path", "revision")
+            if recorded.get(name) and not str(getattr(settings, name) or "").strip()
+        }
+        if not updates:
+            return False
+        settings = replace(settings, **updates)
+        self._settings = settings
+        self._write_settings(settings)
+        return True
+
+    def settings_for(self, symbols: Iterable[str] = ()) -> KronosSettings:
+        """The settings a page should show: installed paths, and a first symbol.
+
+        The first verified symbol selected on Account & symbols becomes the default
+        input on the first run, and is remembered.  It is never a substitute for a
+        symbol the operator typed: only a blank value is filled.
+        """
+
+        self.apply_installed_paths()
+        settings = self.settings()
+        chosen = [str(item) for item in symbols if str(item).strip()]
+        if not settings.symbol.strip() and chosen:
+            settings = replace(settings, symbol=chosen[0])
+            self._settings = settings
+            self._write_settings(settings)
+        return settings
 
     def settings(self) -> KronosSettings:
         if self._settings is None:
@@ -174,6 +229,13 @@ class KronosPanel:
                 logger=self.logger,
             )
         return self._runtime
+
+    def installer(self) -> KronosInstaller:
+        """The one install flow, built on first use.  Nothing runs on construction."""
+
+        if self.install_system is None:
+            self.install_system = KronosInstaller(Path(self.root), logger=self.logger)
+        return self.install_system
 
     def _default_factory(self, settings: KronosSettings) -> Any:
         return LocalKronosForecaster(settings, clock=self.clock)
@@ -284,6 +346,59 @@ class KronosPanel:
             "UNVERIFIED_BY_AXIOM until you compare them with the publisher's values.",
         )
 
+    # -- install --------------------------------------------------------
+
+    def install_check(self) -> dict[str, Any]:
+        """Read the official sources' metadata.  Downloads nothing."""
+
+        outcome = self.installer().check(self.settings().model_key)
+        return self._install_outcome(outcome)
+
+    def install_start(self) -> dict[str, Any]:
+        """Start the one install the operator asked for, after a check."""
+
+        outcome = self.installer().install(self.settings().model_key)
+        return self._install_outcome(outcome)
+
+    def install_cancel(self) -> dict[str, Any]:
+        outcome = self.installer().cancel()
+        return self._install_outcome(outcome)
+
+    def install_cleanup(self) -> dict[str, Any]:
+        """Remove the managed folder, and forget any path that pointed into it."""
+
+        root = managed_root(self.root)
+        outcome = self.installer().cleanup(self.settings().model_key)
+        if not outcome.get("ok"):
+            return self._install_outcome(outcome)
+        settings = self.settings()
+        updates: dict[str, str] = {}
+        for name in ("model_path", "tokenizer_path", "code_path"):
+            value = str(getattr(settings, name) or "").strip()
+            if not value:
+                continue
+            candidate = Path(value)
+            if candidate == root or root in candidate.parents:
+                updates[name] = ""
+        if updates:
+            settings = replace(settings, **updates)
+            self._settings = settings
+            self._write_settings(settings)
+        # A loaded model whose files just disappeared must not keep reporting READY.
+        if self.runtime().view().get("state") == "READY":
+            self.runtime().stop(reason="install_removed")
+        return self._install_outcome(outcome)
+
+    def _install_outcome(self, outcome: Mapping[str, Any]) -> dict[str, Any]:
+        if not outcome.get("ok"):
+            return _result(
+                False,
+                str(outcome.get("message") or "The install action did not run."),
+                reason=str(outcome.get("reason") or ""),
+            )
+        self.apply_installed_paths()
+        return _result(True, str(outcome.get("message") or "The install action ran."))
+
     # -- actions --------------------------------------------------------
 
     def save(self, form: Mapping[str, Any]) -> dict[str, Any]:
@@ -305,6 +420,7 @@ class KronosPanel:
 
     def load(self, form: Mapping[str, Any] | None = None) -> dict[str, Any]:
         payload = _settings_payload(form)
+        self.apply_installed_paths()
         settings = KronosSettings.from_form(payload) if payload else self.settings()
         self._settings = settings
         if payload:
@@ -327,7 +443,39 @@ class KronosPanel:
         runtime.stop()
         return _result(True, "Stopped. The model is unloaded and scheduled forecasting is off.")
 
-    def forecast(self) -> dict[str, Any]:
+    def forecast(self, form: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Run one forecast on the symbol and timeframe the controls show.
+
+        The input choice belongs to the forecast, not to the load: changing it on a
+        loaded model re-points the request and leaves the weights alone.  A change
+        that would need different weights is named as one instead of being applied.
+        """
+
+        payload = _settings_payload(form)
+        if payload:
+            merged = {**self.settings().to_payload(), **payload}
+            candidate = KronosSettings.from_form(merged)
+            problems = candidate.validate(symbols=self._symbols)
+            if problems:
+                return _result(
+                    False,
+                    "Nothing was forecast: "
+                    + "; ".join(f"{item.path}: {item.message}" for item in problems),
+                    reason="settings_invalid",
+                )
+            self._settings = candidate
+            self._write_settings(candidate)
+            if self.runtime().view().get("state") in {"READY", "LOADING"}:
+                applied = self.runtime().update_settings(candidate)
+                if applied.get("reload_required"):
+                    return _result(
+                        False,
+                        "Nothing was forecast: "
+                        + ", ".join(applied["reload_required"])
+                        + " only take effect after pressing Load model. The symbol and "
+                        "timeframe can change without a reload; these cannot.",
+                        reason="reload_required",
+                    )
         runtime = self.runtime()
         outcome = runtime.forecast_once()
         if not outcome.get("ok"):
@@ -495,6 +643,14 @@ class KronosPanel:
                 value = value[0] if value else ""
             return str(value if value is not None else "").strip()
 
+        if action == "kronos-install-check":
+            return self.install_check()
+        if action == "kronos-install":
+            return self.install_start()
+        if action == "kronos-install-cancel":
+            return self.install_cancel()
+        if action == "kronos-install-cleanup":
+            return self.install_cleanup()
         if action == "kronos-save":
             return self.save(payload)
         if action == "kronos-load":
@@ -502,7 +658,7 @@ class KronosPanel:
         if action == "kronos-stop":
             return self.stop()
         if action == "kronos-forecast":
-            return self.forecast()
+            return self.forecast(payload)
         if action == "kronos-schedule-start":
             return self.schedule_start(payload)
         if action == "kronos-schedule-stop":
@@ -526,7 +682,8 @@ class KronosPanel:
     # -- view -----------------------------------------------------------
 
     def view(self, symbols: Iterable[str] = ()) -> dict[str, Any]:
-        settings = self.settings()
+        self._symbols = tuple(str(item) for item in symbols if str(item).strip())
+        settings = self.settings_for(self._symbols)
         runtime = self.runtime()
         problems = [item.audit_view() for item in settings.validate(symbols=list(symbols))]
         availability = probe_availability()
@@ -552,6 +709,13 @@ class KronosPanel:
             "state": runtime.view(),
             "schedule_running": runtime.running,
             "presets": list_presets(self.presets_path),
+            "install": self.installer().view(settings.model_key),
+            "install_schema": INSTALL_SCHEMA,
+            "recommended_variant": RECOMMENDED_VARIANT,
+            "managed_root": str(managed_root(self.root)),
+            "installed_assets": [item.audit_view() for item in recommended_assets(settings.model_key)],
+            "symbol_default": settings.symbol,
+            "symbol_choices": list(self._symbols),
             "history": history,
             "mapping": describe_mapping(),
             "unsupported": [{"setting": name, "why": why} for name, why in UNSUPPORTED_SETTINGS],

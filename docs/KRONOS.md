@@ -13,7 +13,7 @@ same facts in code, with the commit they were read at.
 
 | Fact | Value |
 | --- | --- |
-| Source | `github.com/shiyu-coder/Kronos` at commit `67b630e` |
+| Source | `github.com/shiyu-coder/Kronos` at commit `67b630e67f6a18c9e9be918d9b4337c960db1e9a` |
 | Paper | arXiv `2508.02739` |
 | Code licence | MIT ("Copyright (c) 2025 ShiYu") |
 | Weights | published on Hugging Face under `NeoQuasar/*` |
@@ -23,7 +23,7 @@ The official model zoo, exactly as the README lists it:
 
 | Variant | Weights | Context | Parameters |
 | --- | --- | --- | --- |
-| `Kronos-mini` | public | 2048 | 4.1M |
+| `Kronos-mini` | public (the recommended install) | 2048 | 4.1M |
 | `Kronos-small` | public | 512 | 24.7M |
 | `Kronos-base` | public | 512 | 102.3M |
 | `Kronos-large` | **not open-source** | 512 | 499.2M |
@@ -31,39 +31,69 @@ The official model zoo, exactly as the README lists it:
 `Kronos-large` is listed by the project and is **not selectable** here: there is no
 official weight file to point at, so the page refuses it rather than pretending.
 
-## 2. Getting it running (all manual, by design)
+## 2. Install and forecast
 
-AXIOM never downloads code, weights, or packages, and never installs software.
+Four steps, and you type no paths.
 
-1. Get the official code at the pinned commit and its weights from the official
-   host. Keep the weights' licence in mind — AXIOM cannot vouch for it.
-2. Install the official runtime requirements yourself. They are listed on the page
-   with a per-package state, and `torch>=2.0.0` is what usually decides whether it
-   can run at all:
+1. **Open `/kronos`** and press **Check this machine and the download**. It reads
+   the official sources' metadata — the files, their exact sizes, and the commit
+   each repository currently resolves to — and shows them next to this machine's
+   free space and detected hardware. It downloads nothing.
+2. **Press Install recommended setup.** Only now does anything download: the
+   smallest official variant (`Kronos-mini`, 4.1M parameters, 2048-bar context),
+   its official tokenizer repository, and the official source tree at the pinned
+   commit. The page shows a progress bar and a **Cancel** button; cancelling leaves
+   what arrived in the managed folder so you can retry or clean it up.
+3. **Press Load model** once the install says it is installed.
+4. **Press Run one forecast.** The symbol defaults to the first verified symbol you
+   selected on **Account & symbols**; change the symbol, timeframe or horizon in the
+   forecast controls and run again — that is a new request, not a reload.
 
-   ```
-   numpy, pandas==2.2.2, torch>=2.0.0, einops==0.8.1, huggingface_hub==0.33.1,
-   matplotlib==3.9.3, tqdm==4.67.1, safetensors==0.6.2
-   ```
+Nothing is installed or fetched at startup, on import, or while a page is read.
 
-   Only `torch`, `pandas`, `numpy`, `einops`, `safetensors` and `huggingface_hub`
-   are needed to forecast; `matplotlib` and `tqdm` are reported as optional.
-3. On `/kronos`, set **Official code checkout** to the repository folder (it must
-   contain `model/kronos.py`) and **Model file location** to the weights folder (a
-   `config.json` plus a `.safetensors`/`.bin`/`.pth`/`.pt` file). The official
-   tokenizer is published as **its own repository**, so a fully offline install
-   usually also needs **Tokenizer file location** pointing at that second folder;
-   leave it blank when one folder holds both. Both paths are checked before any
-   file is loaded.
-4. Press **Inspect and hash the model files**. This runs locally, prints each
-   file's size and SHA-256, and records them in `kronos_weights.local.json` so you
-   can compare them with the publisher's own values. The state stays
-   `UNVERIFIED_BY_AXIOM`, because AXIOM has nothing upstream to compare against.
-5. Press **Load model**. That is the first moment any model file is read.
+### What is downloaded, from where, and how it is pinned
 
-A Hub reference (`NeoQuasar/Kronos-small`) is accepted only with a **pinned
-revision**, and even then it is a read of files already under that revision. There
-is no "download" button anywhere in AXIOM.
+| Asset | Source | Pinned to |
+| --- | --- | --- |
+| Code | the official repository archive | commit `67b630e67f6a18c9e9be918d9b4337c960db1e9a` (read from `refs/heads/master` on 2026-10-31) |
+| Model | `NeoQuasar/Kronos-mini` | the commit the check resolved, recorded in the install manifest and reused on every later load |
+| Tokenizer | `NeoQuasar/Kronos-Tokenizer-2k` | the same: pinned at install, never a moving branch |
+
+AXIOM ships no hard-coded Hub commit id, because that value only exists on the Hub
+and this repository contains no network client to read it. It resolves the commit
+once — in the install you asked for — writes it down, checks the weights against
+the digest the Hub publishes for that revision, and refuses to load anything at a
+different revision later.
+
+Everything is written to `data/kronos/<variant>/` (`code/`, `model/`, `tokenizer/`)
+plus `kronos_install.local.json` beside the launcher. Both are Git-ignored, and
+**Clean up the install** removes them again — nothing outside that folder is
+touched.
+
+The page states this before you press anything: the storage location, the internet
+use (only at install time, only the two official Hugging Face repositories and the
+pinned GitHub tree), and the licence — code MIT (`Copyright (c) 2025 ShiYu`),
+weights `UNVERIFIED_BY_AXIOM`, to be confirmed on the model card yourself.
+
+### If something goes wrong
+
+* **Not enough free space** or **missing runtime packages** — reported by the
+  check, with the exact requirement lines, before anything downloads. AXIOM never
+  installs software.
+* **A digest mismatch** aborts the install: nothing is moved into place and no
+  manifest is written. The page offers **Retry install** and **Clean up partial
+  download**.
+* **A cancelled download** stays in the partial folder and is treated the same way.
+* **A source that does not answer** is reported by reason; nothing is guessed and
+  nothing is substituted.
+
+### Advanced settings (collapsed on the page)
+
+Only if you need them: a different model variant, your own model/tokenizer/code
+folders, a revision you want to pin yourself, the torch device, the predictor's
+`max_context`/`clip`, sampling temperature/top-k/top-p, the volume mapping, the
+scheduled interval, and the AXIOM-side seed. A path you type there overrides the
+managed install; the install never overwrites one.
 
 ## 3. Settings, and their limits
 
@@ -135,10 +165,14 @@ execution. It shows:
   window only;
 * the field-by-field input mapping, and the settings Kronos does not support.
 
-Controls: **Load model**, **Run one forecast**, **Start/Stop scheduled
-forecasting**, **Stop and unload**, **Save/Load named presets**, **Score forecasts
-whose horizon has passed**, **Run the benchmark**, **Inspect and hash the model
-files**.
+Controls: **Check this machine and the download**, **Install recommended setup**,
+**Cancel download**, **Clean up**, **Load model**, **Run one forecast** (with the
+symbol, timeframe and horizon beside it), **Start/Stop scheduled forecasting**,
+**Stop and unload**, **Save/Load named presets**, **Score forecasts whose horizon
+has passed**, **Run the benchmark**, **Inspect and hash the model files**.
+
+The install controls write files and one manifest; none of them connects to a
+broker, changes PAPER/LIVE, arms execution, or places an order.
 
 ## 6. The benchmark, and what it is not
 
@@ -185,7 +219,9 @@ profitably.
 | File | Contents | In Git |
 | --- | --- | --- |
 | `axiom_forex/kronos/*.py` | the component, its tests' subject | yes |
-| `kronos_settings.local.json` | the settings you saved | no (`*.local.json`) |
+| `kronos_settings.local.json` | the settings you saved, including installed paths | no (`*.local.json`) |
+| `kronos_install.local.json` | installed paths, pinned revisions, digests | no (`*.local.json`) |
+| `data/kronos/<variant>/` | the installed code, weights and tokenizer | no (`data/kronos/`) |
 | `kronos_presets.local.json` | named presets | no |
 | `kronos_weights.local.json` | local file digests | no |
 | `kronos_benchmark.local.json` | the last benchmark result | no |
@@ -198,4 +234,6 @@ contain.
 
 Every actual Kronos run — loading weights, `torch` device selection, inference
 time, memory use — needs the operator's machine. The tests here use a fake
-predictor and synthetic bars; they pin the contract, not the model.
+predictor, synthetic bars, and a mocked download: they pin the contract, not the
+model. No weight file is fetched and no Hub or GitHub request is made while
+developing.

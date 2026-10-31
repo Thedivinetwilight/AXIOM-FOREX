@@ -339,13 +339,21 @@ the page cannot place an order, size a position, set a stop, arm anything, or ch
 an execution mode, and a forecast is labelled `FORECAST_ONLY_NOT_A_SIGNAL`
 everywhere it is stored or shown.
 
-AXIOM never downloads code, weights, or packages. You install the official runtime
-and point the page at the official code checkout, the model folder, and — when it
-is separate, as the official layout ships it — the tokenizer folder; the page
-lists every dependency with its requirement and shows an estimated weight/size cost
-before anything is loaded. **Inspect and hash the model files** prints each file's
-SHA-256 locally so you can compare it with the publisher's own values — the state
-stays `UNVERIFIED_BY_AXIOM`, because AXIOM has nothing upstream to check against.
+One action installs it: **Install recommended setup** on `/kronos` puts the smallest
+official variant, its official tokenizer, and the official source tree at a pinned
+commit into an AXIOM-managed folder (`data/kronos/`, Git-ignored), records the paths
+and revisions in `kronos_install.local.json`, and needs no path typed by you. A
+check first shows the exact download size, the destination, this machine's free
+space and detected hardware; nothing downloads until you press Install, nothing
+downloads at startup, and the download can be cancelled and cleaned up. AXIOM never
+installs software packages: missing requirements are listed with their exact lines.
+The first forecast defaults to the first verified symbol from **Account & symbols**,
+and the symbol, timeframe and horizon can be changed and re-run without reloading
+the model. Model variants, custom paths, revisions and hardware overrides live under
+a collapsed **Advanced settings** section. **Inspect and hash the model files**
+prints each file's SHA-256 locally so you can compare it with the publisher's own
+values — the weights' state stays `UNVERIFIED_BY_AXIOM`, because AXIOM has nothing
+upstream to check them against.
 
 Input mapping is explicit and never invented: OHLC is the **bid/ask midpoint**
 (labelled `MID`, not tradable), `volume` is MT5's **tick count** (labelled
