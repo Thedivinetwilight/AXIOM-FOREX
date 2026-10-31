@@ -849,11 +849,15 @@ def _wire_live(args, app, *, settings, settings_path: Path, extra_candidates: An
             else None
         ),
         audit_log=getattr(getattr(app, "platform", None), "audit_log", None),
+        # The same 24-hour record the catalog panel's paper test writes: LIVE is
+        # offered only after that test has passed, and passing offers nothing else.
+        qualification=getattr(getattr(app, "catalog", None), "qualification", None),
     )
     if live is not None:
         print(
             "[axiom-workstation] live execution wired: review, arm, start, stop. "
-            "Nothing is connected, armed, or sent until you do each of those."
+            "LIVE stays unavailable until the one-day paper test has passed, and "
+            "nothing is connected, armed, or sent until you do each of those."
         )
     return live
 

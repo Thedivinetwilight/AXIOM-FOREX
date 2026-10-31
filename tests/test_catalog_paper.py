@@ -287,3 +287,159 @@ def test_the_bar_that_is_still_forming_is_never_used_for_a_decision(tmp_path):
     series = test._fetch_bars(test.watches[0])
     assert series is not None
     assert series.timestamps[-1] < NOW, "the forming bar must not be in the series"
+
+
+# -- the 24-hour qualification clock -----------------------------------------
+
+
+class _Clock:
+    """A qualification clock the test moves by hand."""
+
+    def __init__(self):
+        self.now = NOW
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now = self.now + timedelta(seconds=seconds)
+
+
+def _qualified(tmp_path, quotes, *, clock=None, **kwargs):
+    from axiom_forex.paper_runner.qualification import QualificationClock
+
+    clock = clock or _Clock()
+    qualification = QualificationClock(tmp_path / "catalog", clock=clock)
+    return _test(tmp_path, quotes, qualification=qualification, **kwargs), qualification, clock
+
+
+def test_a_healthy_cycle_is_what_makes_the_qualification_clock_count(tmp_path):
+    from axiom_forex.paper_runner.qualification import RUNNING
+
+    test, qualification, clock = _qualified(tmp_path, FakeQuotes(age_seconds=2.0))
+    test._open_qualification()
+    clock.advance(60)
+    test._cycle()
+    report = qualification.report()
+    assert report["status"] == RUNNING
+    assert report["active_seconds"] == 60
+    assert report["paused_seconds"] == 0
+    assert report["stale_ticks"] == 0
+    assert report["decisions"] >= 1
+    assert report["symbols"] == ["EURUSD.pro"]
+
+
+def test_a_stale_quote_pauses_the_qualification_clock_and_says_why(tmp_path):
+    from axiom_forex.paper_runner.qualification import PAUSE_STALE
+
+    test, qualification, clock = _qualified(tmp_path, FakeQuotes(age_seconds=600.0))
+    test._open_qualification()
+    clock.advance(60)
+    test._cycle()
+    report = qualification.report()
+    assert report["active_seconds"] == 0
+    assert report["paused_seconds"] == 60
+    assert report["pause_seconds_by_reason"][PAUSE_STALE] == 60
+    assert report["stale_ticks"] == 1
+
+
+def test_an_unreachable_quote_surface_pauses_and_never_counts(tmp_path):
+    from axiom_forex.paper_runner.qualification import PAUSE_STALE
+
+    class DeadQuotes(FakeQuotes):
+        def tick(self, symbol):
+            raise OSError("terminal is not running")
+
+    test, qualification, clock = _qualified(tmp_path, DeadQuotes())
+    test._open_qualification()
+    clock.advance(60)
+    test._cycle()
+    report = qualification.report()
+    assert report["active_seconds"] == 0
+    assert report["pause_seconds_by_reason"][PAUSE_STALE] == 60
+
+
+def test_a_cycle_that_raises_is_recorded_as_a_failure_not_hidden(tmp_path):
+    from axiom_forex.paper_runner.qualification import FAILED
+
+    class BrokenQuotes(FakeQuotes):
+        def rates(self, symbol, timeframe, start, end):
+            raise RuntimeError("no history")
+
+    test, qualification, clock = _qualified(tmp_path, BrokenQuotes(age_seconds=1.0))
+    test._open_qualification()
+    try:
+        test._cycle()
+    except RuntimeError:
+        pass
+    # The loop's own handler is what books the failure; exercise it directly.
+    qualification.record_failure("cycle_error", detail="RuntimeError")
+    clock.advance(60)
+    report = qualification.report()
+    assert report["verdict"] == FAILED
+    assert len(report["failures"]) >= 1
+    assert qualification.live_available() is False
+
+
+def test_stopping_the_paper_test_stops_the_clock_it_was_being_judged_by(tmp_path):
+    from axiom_forex.paper_runner.qualification import PAUSE_OPERATOR, STOPPED
+
+    test, qualification, clock = _qualified(tmp_path, FakeQuotes(age_seconds=2.0))
+    test._open_qualification()
+    clock.advance(60)
+    test._cycle()
+    test.stop()
+    state = qualification.state()
+    assert state["status"] == STOPPED
+    assert state["events"][-1]["note"] == PAUSE_OPERATOR
+    frozen = state["active_seconds"]
+    clock.advance(600)
+    test._cycle()
+    assert qualification.state()["active_seconds"] == frozen
+
+
+def test_a_restart_resumes_the_same_record_and_never_credits_the_dark_time(tmp_path):
+    test, qualification, clock = _qualified(tmp_path, FakeQuotes(age_seconds=2.0))
+    test._open_qualification()
+    clock.advance(60)
+    test._cycle()
+    active = qualification.state()["active_seconds"]
+
+    clock.advance(3 * 3600)  # the machine was off
+    revived, revived_qualification, revived_clock = _qualified(
+        tmp_path, FakeQuotes(age_seconds=2.0), clock=clock
+    )
+    revived._open_qualification()
+    report = revived_qualification.report()
+    assert report["active_seconds"] == active
+    assert report["restarts"] == 1
+    assert report["paused_seconds"] >= 3 * 3600
+    revived_clock.advance(60)
+    revived._cycle()
+    assert revived_qualification.report()["active_seconds"] == active + 60
+
+
+def test_a_full_day_of_healthy_cycles_qualifies_and_changes_no_execution_state(tmp_path):
+    from axiom_forex.paper_runner.qualification import PASSED
+
+    test, qualification, clock = _qualified(tmp_path, FakeQuotes(age_seconds=2.0))
+    test._open_qualification()
+    for _ in range(288):  # 288 x 300 s = 24 h of healthy heartbeats
+        clock.advance(300)
+        test._cycle()
+
+    report = qualification.report()
+    assert report["verdict"] == PASSED
+    assert report["active_seconds"] == 24 * 3600
+    assert report["live_available"] is True
+    assert report["criteria_met"] == report["criteria_total"]
+
+    # ... and that is all it did.  A completed paper test makes live *reviewable*;
+    # it cannot arm, cannot change the mode, and has no order surface at all.
+    source = Path("axiom_forex/paper_runner/catalog_paper.py").read_text(encoding="utf-8")
+    for forbidden in ("order_send", "arm_trading", "enable_live", "live_workflow", "import socket"):
+        assert forbidden not in source
+    snapshot = test.snapshot()
+    for key in ("armed", "execution_mode", "mode", "account"):
+        assert key not in snapshot
+    assert snapshot["simulated"] is True

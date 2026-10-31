@@ -189,6 +189,10 @@ class QualificationClock:
         self.path = self.root / QUALIFICATION_FILENAME
         self._clock = clock
         self._policy = policy or QualificationPolicy()
+        #: Kept apart from ``self._policy``: loading an old record adopts *its*
+        #: policy for continuity, but a person who states criteria for a new test
+        #: means them, so ``start`` prefers this one.
+        self._explicit_policy = policy
         self._lock = threading.RLock()
         self._document: dict[str, Any] = self._blank()
         self._loaded = False
@@ -241,6 +245,8 @@ class QualificationClock:
         document = self._blank()
         document.update(payload)
         self._document = document
+        # A record already on disk governs a resumption; a policy stated to this
+        # constructor governs only a test this object starts itself (see ``start``).
         self._policy = QualificationPolicy.from_dict(document.get("policy"))
 
     def _write(self) -> None:
@@ -272,7 +278,7 @@ class QualificationClock:
         with self._lock:
             self._load()
             now = self._clock()
-            self._policy = policy or self._policy
+            self._policy = policy or self._explicit_policy or self._policy
             document = self._blank()
             document["policy"] = self._policy.as_dict()
             document["status"] = RUNNING
@@ -485,7 +491,9 @@ class QualificationClock:
 
     @property
     def policy(self) -> QualificationPolicy:
-        return self._policy
+        with self._lock:
+            self._load()
+            return self._policy
 
     def state(self) -> dict[str, Any]:
         with self._lock:

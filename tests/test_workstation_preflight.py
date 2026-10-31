@@ -129,6 +129,7 @@ def ready_facts(**overrides):
         confirmed=True,
         selected_symbols=("EURUSD",),
         strategy=StrategyBinding("strat-ok", "APPROVED", approved_active=True),
+        qualification={"present": True, "passed": True, "summary": "PASSED"},
     )
     values.update(overrides)
     return facts_from(**values)

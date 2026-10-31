@@ -166,7 +166,30 @@ def values(**overrides):
     return base
 
 
-def make_live(tmp_path, *, adapter, mode, setup_path, platform, armed_strategy=None):
+def passed_qualification(tmp_path, *, passed: bool = True):
+    """A paper-test record the live pages are gated on.
+
+    ``passed=False`` is a test that has not counted its 24 hours yet.
+    """
+
+    from axiom_forex.paper_runner.qualification import QualificationClock, QualificationPolicy
+
+    policy = QualificationPolicy(
+        required_active_seconds=0.0 if passed else 86400.0,
+        required_span_seconds=0.0 if passed else 86400.0,
+        min_decisions=0 if passed else 1,
+    )
+    qualification = QualificationClock(Path(tmp_path) / "catalog", policy=policy)
+    qualification.start()
+    return qualification
+
+
+_UNSET = object()
+
+
+def make_live(
+    tmp_path, *, adapter, mode, setup_path, platform, armed_strategy=None, qualification=_UNSET
+):
     return LiveTrading(
         adapter=adapter,
         mode=mode,
@@ -176,6 +199,9 @@ def make_live(tmp_path, *, adapter, mode, setup_path, platform, armed_strategy=N
         stack_builder=resolver_for(platform),
         candidates=candidate_family(),
         clock=lambda: START,
+        qualification=(
+            passed_qualification(tmp_path) if qualification is _UNSET else qualification
+        ),
     )
 
 
@@ -210,7 +236,7 @@ def live(tmp_path, fake, terminal, setup_path, platform):
 
 
 def test_arming_needs_the_review_acknowledgement(live):
-    result = live.arm(values(), confirmation=PHRASE, reviewed=False)
+    result = live.arm(values(), confirmation=PHRASE, reviewed=False, account_confirmation=live.confirmed_account_fingerprint())
     assert result.armed is False
     assert [item.reason for item in result.blockers] == ["review_not_acknowledged"]
     assert live.armed is False
@@ -218,7 +244,12 @@ def test_arming_needs_the_review_acknowledgement(live):
 
 
 def test_arming_needs_the_exact_typed_phrase(live):
-    result = live.arm(values(), confirmation="yes", reviewed=True)
+    result = live.arm(
+        values(),
+        confirmation="yes",
+        reviewed=True,
+        account_confirmation=live.confirmed_account_fingerprint(),
+    )
     assert result.armed is False
     assert result.reason == "live_confirmation_mismatch"
     assert live.armed is False
@@ -234,7 +265,7 @@ def test_arming_needs_a_confirmed_live_mode(tmp_path, fake, terminal, setup_path
             tmp_path, adapter=adapter, mode=Mode("PAPER", False), setup_path=setup_path,
             platform=platform,
         )
-        result = live.arm(values(), confirmation=PHRASE, reviewed=True)
+        result = live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())
         assert result.armed is False
         assert any(item.reason == "live_mode_required" for item in result.blockers)
         assert not Path(live.plan_path).exists()
@@ -254,7 +285,7 @@ def test_arming_needs_a_connected_adapter(
         tmp_path, adapter=adapter, mode=Mode("LIVE", True), setup_path=setup_path,
         platform=platform,
     )
-    result = live.arm(values(), confirmation=PHRASE, reviewed=True)
+    result = live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())
     assert result.armed is False
     assert any(item.reason == "mt5_not_connected" for item in result.blockers)
     assert fake.send_requests == []
@@ -309,7 +340,7 @@ def test_a_size_off_the_brokers_grid_is_refused(live):
 
 
 def test_arming_writes_the_plan_and_sends_no_order(live, fake):
-    result = live.arm(values(), confirmation=PHRASE, reviewed=True)
+    result = live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())
 
     assert result.armed is True, [item.audit_view() for item in result.blockers]
     assert live.armed is True
@@ -332,7 +363,7 @@ def test_arming_writes_the_plan_and_sends_no_order(live, fake):
 
 
 def test_disarming_ends_the_authorisation(live, fake):
-    live.arm(values(), confirmation=PHRASE, reviewed=True)
+    live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())
     live.disarm(reason="test")
     assert live.armed is False
     assert live.summary()["next_signal_sends_real_order"] is False
@@ -440,7 +471,7 @@ def _live_host(*, adapter, mode, plan, terminal, setup_doc):
 
 
 def test_a_live_session_sends_one_order_and_never_retries(live, fake, terminal, setup_doc):
-    result = live.arm(values(), confirmation=PHRASE, reviewed=True)
+    result = live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())
     assert result.armed, [item.audit_view() for item in result.blockers]
 
     host = _live_host(
@@ -510,7 +541,7 @@ def test_the_session_refuses_to_start_unarmed(tmp_path, fake, terminal, setup_do
 
 
 def test_a_failed_check_stops_the_session_and_disarms(live, fake, terminal, setup_doc):
-    live.arm(values(), confirmation=PHRASE, reviewed=True)  # noqa: F841
+    live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())  # noqa: F841
     host = _live_host(
         adapter=live.adapter,
         mode=Mode("LIVE", True),
@@ -622,3 +653,202 @@ def test_the_page_prints_no_secret_and_no_balance(live):
     for value in account_state.values():
         if isinstance(value, (int, float)) and float(value) > 0:
             assert str(value) not in html
+
+
+# ---------------------------------------------------------------------------
+# 8. the paper test gates LIVE; the account is named exactly
+# ---------------------------------------------------------------------------
+
+
+def test_no_paper_test_means_live_is_not_on_offer(tmp_path, fake, terminal, setup_path, platform):
+    adapter = make_adapter(
+        fake=fake, terminal=terminal, db_path=Path(tmp_path) / "gate.sqlite3"
+    )
+    try:
+        live = make_live(
+            tmp_path,
+            adapter=adapter,
+            mode=Mode("LIVE", True),
+            setup_path=setup_path,
+            platform=platform,
+            qualification=None,
+        )
+        result = live.arm(
+            values(),
+            confirmation=PHRASE,
+            reviewed=True,
+            account_confirmation=live.confirmed_account_fingerprint(),
+        )
+        assert result.armed is False
+        assert "paper_test_not_started" in [item.reason for item in result.blockers]
+        assert not Path(live.plan_path).exists()
+        assert fake.send_requests == []
+        assert live.view()["qualification"]["present"] is False
+    finally:
+        adapter.disconnect(reason="test")
+
+
+def test_an_unfinished_paper_test_keeps_live_closed(tmp_path, fake, terminal, setup_path, platform):
+    adapter = make_adapter(
+        fake=fake, terminal=terminal, db_path=Path(tmp_path) / "unfinished.sqlite3"
+    )
+    try:
+        live = make_live(
+            tmp_path,
+            adapter=adapter,
+            mode=Mode("LIVE", True),
+            setup_path=setup_path,
+            platform=platform,
+            qualification=passed_qualification(tmp_path, passed=False),
+        )
+        result = live.arm(
+            values(),
+            confirmation=PHRASE,
+            reviewed=True,
+            account_confirmation=live.confirmed_account_fingerprint(),
+        )
+        assert result.armed is False
+        assert "paper_test_not_passed" in [item.reason for item in result.blockers]
+        assert live.view()["qualification"]["passed"] is False
+        assert fake.send_requests == []
+    finally:
+        adapter.disconnect(reason="test")
+
+
+def test_arming_must_name_the_account_the_terminal_is_on(live):
+    result = live.arm(
+        values(), confirmation=PHRASE, reviewed=True, account_confirmation="0000000000"
+    )
+    assert result.armed is False
+    assert "account_confirmation_mismatch" in [item.reason for item in result.blockers]
+    assert not Path(live.plan_path).exists()
+
+
+def test_the_confirmed_account_is_what_gets_armed(live, fake):
+    fingerprint = live.confirmed_account_fingerprint()
+    assert fingerprint
+    result = live.arm(
+        values(), confirmation=PHRASE, reviewed=True, account_confirmation=fingerprint
+    )
+    assert result.armed, [item.audit_view() for item in result.blockers]
+    status = live.adapter.status()
+    assert status["armed_account_fingerprint"] == fingerprint
+    assert status["armed_account_matches_current"] is True
+    assert fake.send_requests == []
+
+
+def test_a_switch_after_arming_refuses_the_order_it_was_armed_for(live, fake, terminal):
+    fingerprint = live.confirmed_account_fingerprint()
+    armed = live.arm(
+        values(), confirmation=PHRASE, reviewed=True, account_confirmation=fingerprint
+    )
+    assert armed.armed
+    # The operator changes account in the terminal behind AXIOM's back.
+    fake.account_login = 99900001
+    live.adapter.refresh_account()
+    assert live.adapter.armed is True, "a switch is the operator's act; it does not disarm"
+    assert live.adapter.status()["armed_account_matches_current"] is False
+
+
+def _page_app(live_controller, qualification):
+    app = _app(live_controller)
+    app.qualification = qualification
+    return app
+
+
+class _ConfiguredLive:
+    """A wired live page that is neither armed nor running.  Sends nothing."""
+
+    def __init__(self, account_mode="REAL"):
+        self.account_mode = account_mode
+
+    def view(self):
+        return {
+            "configured": True,
+            "armed": False,
+            "connected": True,
+            "live_effective": False,
+            "mode": "PAPER",
+            "account_mode": self.account_mode,
+            "session_running": False,
+            "next_signal_sends_real_order": False,
+            "plan": {"present": False},
+            "blockers": [],
+            "candidates": [],
+            "symbols": [],
+            "account": {"fingerprint": "abc123"},
+            "positions": [],
+            "account_fingerprint": "abc123",
+            "confirmation_phrase": PHRASE,
+            "qualification": {"present": True, "passed": True},
+        }
+
+    def summary(self):
+        return {
+            "present": True,
+            "armed": False,
+            "next_signal_sends_real_order": False,
+            "sentence": "Paper mode: every fill is simulated locally; no order is sent.",
+        }
+
+
+def test_the_live_page_offers_no_arm_form_until_the_paper_test_passes(tmp_path):
+    waiting = passed_qualification(tmp_path, passed=False)
+    html = _page_app(_ConfiguredLive(), waiting).page("/live")[1]
+    assert "The one-day paper test" in html
+    assert "LIVE is not available yet" in html
+    assert "name='account_confirmation'" not in html
+
+    passed = passed_qualification(tmp_path)
+    html = _page_app(_ConfiguredLive(), passed).page("/live")[1]
+    assert "The one-day paper test" in html
+    assert "LIVE is not available yet" not in html
+    assert "name='account_confirmation'" in html
+
+
+def test_the_report_and_the_account_type_are_printed_plainly(tmp_path):
+    html = _page_app(_ConfiguredLive(), passed_qualification(tmp_path)).page("/live")[1]
+    assert "REAL-money account" in html
+    assert "The one-day paper test" in html
+    assert "not proof of profitability or safety" in html
+
+
+def test_a_passed_paper_test_sends_nothing_and_arms_nothing(live, fake):
+    qualification = live.qualification
+    assert qualification.live_available() is True
+    assert live.adapter.status()["armed"] is False
+    assert live.armed is False
+    assert fake.send_requests == []
+    # Reading the gate is not a state change: asking twice changes nothing either.
+    assert live.qualification_verdict()["passed"] is True
+    assert live.adapter.status()["armed"] is False
+    assert fake.send_requests == []
+
+
+def test_switching_to_paper_stops_new_entries_and_does_not_close_positions(live, fake):
+    class Session:
+        """A live session that records what the mode switch asks of it."""
+
+        def __init__(self):
+            self.calls = []
+
+        def stop_runner(self, *, reason="", disarm=True):
+            self.calls.append(("stop_runner", reason, disarm))
+            return {"running": False, "state": "STOPPED"}
+
+        def close(self):
+            self.calls.append(("close", "", False))
+
+        def view(self):
+            return {"running": False, "state": "STOPPED"}
+
+    session = Session()
+    live.session = session
+    live.arm(values(), confirmation=PHRASE, reviewed=True,
+             account_confirmation=live.confirmed_account_fingerprint())
+    live.stop_session(reason="mode_switched_to_paper", close=False)
+
+    assert session.calls == [("stop_runner", "mode_switched_to_paper", True)]
+    assert live.adapter.armed is False
+    # Nothing was liquidated: a mode switch ends authorisation, not positions.
+    assert fake.send_requests == []

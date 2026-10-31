@@ -136,7 +136,9 @@ def windows_report(settings=None):
     )
 
 
-def ready_app(tmp_path: Path, *, settings_path: Path | None = None, **kwargs) -> WorkstationApp:
+def ready_app(
+    tmp_path: Path, *, settings_path: Path | None = None, qualification=True, **kwargs
+) -> WorkstationApp:
     """A workstation whose live preflight is clear but whose mode is paper."""
 
     settings = live_settings()
@@ -149,6 +151,23 @@ def ready_app(tmp_path: Path, *, settings_path: Path | None = None, **kwargs) ->
         mode_path=settings_path if settings_path is not None else tmp_path / "mt5_settings.local.json",
         **kwargs,
     )
+    if qualification is not None:
+        # A finished, passing paper test, as the live gate expects.  ``False``
+        # means one that has not passed; ``None`` means no record at all.
+        from axiom_forex.paper_runner.qualification import (
+            QualificationClock,
+            QualificationPolicy,
+        )
+
+        policy = QualificationPolicy(
+            required_active_seconds=0.0 if qualification else 86400.0,
+            required_span_seconds=0.0 if qualification else 86400.0,
+            min_decisions=0 if qualification else 1,
+        )
+        app.qualification = QualificationClock(
+            tmp_path / "catalog", policy=policy
+        )
+        app.qualification.start()
     app.act("connect", {"nonce": [app.nonce]})
     app.act("symbols", {"nonce": [app.nonce], "symbol": ["EURUSD"]})
     app.act("confirm", {"nonce": [app.nonce]})
@@ -576,3 +595,43 @@ def test_an_account_mismatch_is_visible_on_the_pages_and_never_hidden(tmp_path):
     status, redirect, _ = act(app, "mode-live", confirmation=PHRASE)
     assert (status, redirect) == (303, "/mode")
     assert app.mode_view()["mode"] == PAPER
+
+
+# ---------------------------------------------------------------------------
+# the one-day paper test gates LIVE availability
+# ---------------------------------------------------------------------------
+
+
+def test_live_is_not_available_before_any_paper_test(tmp_path):
+    app = ready_app(tmp_path, qualification=None)
+    reasons = {item["reason"] for item in app.preflight_view()["blockers"]}
+    assert "paper_test_not_passed" in reasons
+    status, redirect, message = act(app, "mode-live", confirmation=PHRASE)
+    assert (status, redirect) == (303, "/mode")
+    assert "did not change" in message
+    assert app.mode_view()["mode"] == PAPER
+    assert app.qualification_view()["present"] is False
+
+
+def test_an_unfinished_paper_test_keeps_live_closed(tmp_path):
+    app = ready_app(tmp_path, qualification=False)
+    reasons = {item["reason"] for item in app.preflight_view()["blockers"]}
+    assert "paper_test_not_passed" in reasons
+    act(app, "mode-live", confirmation=PHRASE)
+    assert app.mode_view()["mode"] == PAPER
+    report = app.qualification_view()
+    assert report["present"] is True
+    assert report["passed"] is False
+
+
+def test_a_passing_paper_test_makes_live_available_and_does_nothing_else(tmp_path):
+    app = ready_app(tmp_path, qualification=True)
+    assert app.qualification_view()["passed"] is True
+    assert app.preflight_view()["ready"] is True
+    # Availability is not activation: the mode has not moved, and nothing is running.
+    assert app.mode_view()["mode"] == PAPER
+    assert app.mode_view()["live_effective"] is False
+    assert app.live is None or getattr(app.live, "armed", False) is False
+    status, _, _ = act(app, "mode-live", confirmation=PHRASE)
+    assert status == 303
+    assert app.mode_view()["live_effective"] is True

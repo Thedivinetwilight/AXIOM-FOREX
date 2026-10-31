@@ -2504,6 +2504,97 @@ def render_provider_setup(ctx: PageContext) -> str:
 # --------------------------------------------------------------------------
 
 
+def _qualification_section(ctx: PageContext) -> Mapping[str, Any]:
+    return dict((ctx.extra or {}).get("qualification") or {})
+
+
+def qualification_card(section: Mapping[str, Any], *, compact: bool = False) -> str:
+    """The one-day paper test's report, and what it does and does not authorise.
+
+    A passing report makes LIVE *available*.  This card never changes the mode,
+    arms anything, or suggests that a day of paper running proves anything about
+    money: it is an operational check of the pipeline and says so.
+    """
+
+    if not section.get("present"):
+        return notice(
+            "warn",
+            "No one-day paper test has been run here yet",
+            "LIVE is not available until a live-market paper test has passed its "
+            "criteria. Run it from the catalog card, then read its report. "
+            "Whatever the result, it never enables or arms live trading by itself.",
+        )
+
+    report = dict(section.get("report") or {})
+    passed = bool(section.get("passed"))
+    verdict = str(section.get("verdict") or report.get("verdict") or "")
+    rows: list[tuple[str, str]] = [
+        ("Verdict", chip(verdict or "UNKNOWN", "ok" if passed else "warn", dot=True)),
+        (
+            "Counted (healthy) time",
+            "{} h of {} h".format(
+                escape(f"{float(report.get('active_hours') or 0):.2f}"),
+                escape(f"{float(report.get('required_hours') or 0):.2f}"),
+            ),
+        ),
+        (
+            "Paused time",
+            "{} h in {} pause(s)".format(
+                escape(f"{float(report.get('paused_seconds') or 0) / 3600:.2f}"),
+                escape(str(report.get("pause_count", 0))),
+            ),
+        ),
+        ("Criteria met", f"{int(report.get('criteria_met') or 0)} of {int(report.get('criteria_total') or 0)}"),
+    ]
+    reasons = [
+        f"{escape(str(key))}: {escape(f'{float(value) / 3600:.2f}')} h"
+        for key, value in sorted((report.get("pause_seconds_by_reason") or {}).items())
+        if value
+    ]
+    if reasons:
+        rows.append(("Why the clock paused", ", ".join(reasons)))
+    started = str(report.get("started_at") or "")
+    finished = str(report.get("finished_at") or "")
+    if started:
+        rows.append(("Test started", escape(started)))
+    if finished:
+        rows.append(("Test finished", escape(finished)))
+
+    body = dl(rows)
+    criteria = [dict(item) for item in report.get("criteria") or []]
+    if criteria and not compact:
+        body += "<table class='table small'><thead><tr><th>Criterion</th><th>Required</th>"             "<th>Actual</th><th>Met</th></tr></thead><tbody>" + "".join(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                    escape(str(item.get("label", ""))),
+                    escape(str(item.get("required", ""))),
+                    escape(str(item.get("actual", ""))),
+                    chip("yes", "ok") if item.get("met") else chip("no", "warn"),
+                )
+                for item in criteria
+            ) + "</tbody></table>"
+    failures = [dict(item) for item in report.get("failures") or []]
+    if failures:
+        body += "<ul class='list'>" + "".join(
+            "<li><strong class='mono'>{}</strong> {}</li>".format(
+                escape(str(item.get("kind", ""))), escape(str(item.get("detail", "")))
+            )
+            for item in failures[:6]
+        ) + "</ul>"
+    body += notice(
+        "ok" if passed else "warn",
+        "Passing makes LIVE available — nothing more",
+        "A passing report does not change the mode, arm execution, or place an order. "
+        "One day of paper running is an operational check of this pipeline, not proof "
+        "of profitability or safety.",
+    )
+    return card(
+        "The one-day paper test",
+        body,
+        hint=str(section.get("summary") or report.get("summary") or ""),
+        right=chip("PASSED" if passed else "NOT PASSED", "ok" if passed else "warn", dot=True),
+    )
+
+
 def _live_view(ctx: PageContext) -> Mapping[str, Any]:
     return dict((ctx.extra or {}).get("live") or {})
 
@@ -2647,7 +2738,10 @@ def render_live(ctx: PageContext) -> str:
     candidates = [dict(item) for item in view.get("candidates") or []]
     symbols = [str(item) for item in view.get("symbols") or []]
 
-    body = [live_status_banner(ctx)]
+    qualification = _qualification_section(ctx)
+    live_available = bool(qualification.get("passed"))
+
+    body = [live_status_banner(ctx), qualification_card(qualification)]
 
     if not configured:
         body.append(
@@ -2712,6 +2806,12 @@ def render_live(ctx: PageContext) -> str:
         "placeholder='e.g. 100' required>"
         "<span class='small muted'>Enforced by AXIOM before each order; it is not a broker "
         "stop-loss.</span></label>"
+        "<label class='field'><span>Type the account signature shown below</span>"
+        "<input type='text' name='account_confirmation' autocomplete='off' spellcheck='false' "
+        f"placeholder='{escape(str(view.get('account_fingerprint', '')) or 'account signature')}' required>"
+        "<span class='small muted'>Arming is bound to this one account. If the terminal is "
+        "switched to another account afterwards, every order is refused instead of "
+        "being routed to the new one.</span></label>"
         "<label class='field field--check'><input type='checkbox' name='reviewed' value='yes'>"
         "<span>I read the review above and I am choosing these terms myself.</span></label>"
         "<label class='field'><span>Type <span class='mono'>"
@@ -2720,18 +2820,56 @@ def render_live(ctx: PageContext) -> str:
         "<div class='row'><button class='btn btn--danger' type='submit'>Arm live orders</button></div>"
         "</form>"
     )
-    body.append(
-        card(
-            "Choose the terms, then arm",
-            form,
-            hint="Arming writes the plan and authorises the adapter. It sends nothing and starts nothing.",
-            right=chip("armed" if armed else "not armed", "danger" if armed else "muted", dot=True),
+    if not live_available:
+        body.append(
+            notice(
+                "warn",
+                "LIVE is not available yet, so there is nothing to arm",
+                "The one-day paper test above has to pass its own criteria first. "
+                "PAPER trading stays available meanwhile.",
+            )
         )
-    )
+    else:
+        body.append(
+            card(
+                "Choose the terms, then arm",
+                form,
+                hint="Arming writes the plan and authorises the adapter. It sends nothing and starts nothing.",
+                right=chip("armed" if armed else "not armed", "danger" if armed else "muted", dot=True),
+            )
+        )
 
     # -- account and broker state ----------------------------------------
     account = dict(view.get("account") or {})
     positions = [dict(item) for item in view.get("positions") or []]
+    account_kind = str(view.get("account_mode") or account.get("account_mode") or "").upper()
+    if account_kind == "REAL":
+        body.append(
+            notice(
+                "danger",
+                "The connected account is a REAL-money account",
+                "Every order this page authorises spends real money. A demo account is "
+                "the same software with none of that consequence, and switching to one "
+                "inside MetaTrader 5 is enough to change this line.",
+            )
+        )
+    elif account_kind:
+        body.append(
+            notice(
+                "ok",
+                f"The connected account is a {account_kind} account",
+                "No real money is at risk on this account type.",
+            )
+        )
+    else:
+        body.append(
+            notice(
+                "warn",
+                "The account type has not been identified",
+                "AXIOM cannot tell whether this is a demo or a real account, so nothing "
+                "here should be treated as safe. Connect first.",
+            )
+        )
     account_card = card(
         "The account this would trade",
         dl(
@@ -4530,6 +4668,7 @@ def render_catalog_section(ctx: PageContext) -> str:
             "execution mode, and makes no claim that any candidate will make money.",
         )
     )
+    body.append(qualification_card(_qualification_section(ctx), compact=True))
     return card("Catalog and the Monday paper test", "".join(body))
 
 

@@ -96,6 +96,9 @@ class PreflightFacts:
     confirmed: bool = False
     selected_symbols: tuple[str, ...] = ()
     strategy: StrategyBinding | None = None
+    #: The one-day paper test's own verdict: ``present``/``passed``/``summary``.
+    #: ``None`` means this process has no record to read, which is not a pass.
+    qualification: Mapping[str, Any] | None = None
 
     @property
     def connected(self) -> bool:
@@ -509,6 +512,21 @@ def collect_blockers(facts: PreflightFacts) -> list[LiveBlocker]:
             category=CATEGORY_CONFIGURATION,
         )
 
+    # -- the paper test that makes LIVE available at all -----------------
+    qualification = facts.qualification
+    passed = bool((qualification or {}).get("passed", False))
+    if not passed:
+        summary = str((qualification or {}).get("summary", "") or "").strip()
+        add(
+            "paper_test_not_passed",
+            "The one-day paper test has not passed",
+            summary
+            or "No live-market paper test has been completed on this installation.",
+            "Run the paper test on live quotes for a continuous 24 counted hours and "
+            "read its report. It makes LIVE available; it never enables or arms it.",
+            category=CATEGORY_SESSION,
+        )
+
     # -- a strategy, when this deployment declares one ------------------
     strategy = facts.strategy
     if strategy is not None and not strategy.approved_active:
@@ -547,6 +565,7 @@ def facts_from(
     confirmed: bool = False,
     selected_symbols: Iterable[str] = (),
     strategy: StrategyBinding | None = None,
+    qualification: Mapping[str, Any] | None = None,
 ) -> PreflightFacts:
     """Build facts from the objects the workstation already holds."""
 
@@ -558,6 +577,7 @@ def facts_from(
         confirmed=bool(confirmed),
         selected_symbols=tuple(name for name in selected_symbols if name),
         strategy=strategy,
+        qualification=dict(qualification) if qualification else None,
     )
 
 

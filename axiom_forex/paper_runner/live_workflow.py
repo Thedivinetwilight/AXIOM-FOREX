@@ -65,6 +65,13 @@ ARM_REFUSED = "live_arming_refused"
 PLAN_WRITE_FAILED = "live_plan_not_written"
 ALREADY_ARMED = "already_armed"
 ACCOUNT_INVALID = "mt5_account_profile_invalid"
+#: The gate in front of all of it: a finished, passing paper test.
+QUALIFICATION_MISSING = "paper_test_not_started"
+QUALIFICATION_NOT_PASSED = "paper_test_not_passed"
+#: Arming names one account, and the operator must type that account's
+#: fingerprint.  A different account in the terminal is refused, not adopted.
+ACCOUNT_NOT_IDENTIFIED = "account_not_identified"
+ACCOUNT_CONFIRMATION_MISMATCH = "account_confirmation_mismatch"
 
 
 def _utc_now() -> datetime:
@@ -143,6 +150,7 @@ class LiveTrading:
         armed_strategy: ArmedStrategy | None = None,
         clock: Callable[[], datetime] | None = None,
         audit_log: Any = None,
+        qualification: Any = None,
     ) -> None:
         self.adapter = adapter
         self.mode = mode
@@ -156,6 +164,7 @@ class LiveTrading:
         self.audit_log = audit_log
         self.session_factory = session_factory
         self.armed_strategy = armed_strategy
+        self.qualification = qualification
         self.session: Any = None
         self.plan: dict[str, Any] = {}
         self.armed_at: datetime | None = None
@@ -264,6 +273,8 @@ class LiveTrading:
             "setup_reason": setup_reason,
             "setup_loaded": setup is not None,
             "confirmation_phrase": ARM_CONFIRMATION_PHRASE,
+            "account_fingerprint": self.confirmed_account_fingerprint(),
+            "qualification": self.qualification_verdict(),
             "account": self._account_facts(),
             "symbol": self._symbol_facts(str(values.get("pair", "") or "").strip()),
             "at": self.clock().isoformat(),
@@ -296,6 +307,7 @@ class LiveTrading:
                     "Complete the live confirmation on the Trading mode screen.",
                 )
             )
+        blockers.extend(self.qualification_blockers())
         adapter = self.adapter
         if adapter is None:
             blockers.append(
@@ -343,6 +355,55 @@ class LiveTrading:
             )
         blockers.extend(self._plan_blockers(values, document))
         return tuple(blockers)
+
+    def qualification_verdict(self) -> dict[str, Any]:
+        """The paper test's own words about whether live may be offered at all."""
+
+        qualification = self.qualification
+        if qualification is None:
+            return {"present": False, "passed": False, "verdict": "", "summary": ""}
+        try:
+            return {
+                "present": True,
+                "passed": bool(qualification.live_available()),
+                "verdict": str(qualification.verdict()),
+                "summary": str(qualification.summary_line()),
+            }
+        except Exception as exc:  # a read model never raises, and never assumes pass
+            return {
+                "present": True,
+                "passed": False,
+                "verdict": "UNREADABLE",
+                "summary": f"The paper test record could not be read ({type(exc).__name__}).",
+            }
+
+    def qualification_blockers(self) -> list[Blocker]:
+        """A finished, passing paper test is the price of admission to LIVE.
+
+        It is a gate, not a permission: passing it makes the live page *available*.
+        Arming, starting a session, and sending an order remain separate acts.
+        """
+
+        state = self.qualification_verdict()
+        if not state["present"]:
+            return [
+                Blocker(
+                    QUALIFICATION_MISSING,
+                    "No one-day paper test has been run on this installation.",
+                    "Run the live-market paper test for a continuous 24 hours first; "
+                    "its result is what makes LIVE available. It never enables it.",
+                )
+            ]
+        if state["passed"]:
+            return []
+        return [
+            Blocker(
+                QUALIFICATION_NOT_PASSED,
+                "The paper test has not passed its criteria.",
+                state["summary"]
+                or "Let the paper test run to 24 counted hours and check its report.",
+            )
+        ]
 
     def _plan_blockers(
         self, values: Mapping[str, Any] | None, document: Mapping[str, Any] | None
@@ -499,14 +560,31 @@ class LiveTrading:
 
     # -- operator actions ------------------------------------------------
 
+    def confirmed_account_fingerprint(self) -> str:
+        """The fingerprint of the account in front of the operator right now."""
+
+        adapter = self.adapter
+        if adapter is None:
+            return ""
+        try:
+            return str(adapter.account_fingerprint() or "")
+        except Exception:
+            return ""
+
     def arm(
         self,
         values: Mapping[str, Any],
         *,
         confirmation: str = "",
         reviewed: bool = False,
+        account_confirmation: str = "",
     ) -> ArmResult:
-        """Write the plan and arm the broker, or refuse without doing either."""
+        """Write the plan and arm the broker, or refuse without doing either.
+
+        ``account_confirmation`` must be the fingerprint of the account the
+        terminal is on *now*.  Arming is bound to that one account: a different
+        account in the terminal later refuses the order instead of receiving it.
+        """
 
         document, problems = self.build(values)
         blockers = list(self.blockers(values, document=document))
@@ -518,6 +596,25 @@ class LiveTrading:
                     REVIEW_NOT_ACKNOWLEDGED,
                     "The review was not acknowledged.",
                     "Tick the box that says you read the review above.",
+                )
+            )
+        fingerprint = self.confirmed_account_fingerprint()
+        if not fingerprint:
+            blockers.append(
+                Blocker(
+                    ACCOUNT_NOT_IDENTIFIED,
+                    "The terminal has not identified the account in front of you.",
+                    "Connect first, and check the account badge shows the account you mean.",
+                )
+            )
+        elif str(account_confirmation or "").strip().lower() != fingerprint.lower():
+            blockers.append(
+                Blocker(
+                    ACCOUNT_CONFIRMATION_MISMATCH,
+                    "The account confirmation does not match the account the terminal is on.",
+                    f"Type the account fingerprint shown on this page ({fingerprint}) "
+                    "exactly. LIVE also refuses to arm if that account is not the "
+                    "confirmed one.",
                 )
             )
         phrase = str(confirmation or "").strip().upper()
@@ -546,7 +643,9 @@ class LiveTrading:
                 ]
             )
         try:
-            self.adapter.arm_trading(confirm=ARM_CONFIRMATION_PHRASE)
+            self.adapter.arm_trading(
+                confirm=ARM_CONFIRMATION_PHRASE, account_fingerprint=fingerprint
+            )
         except Exception as exc:
             reason = str(getattr(exc, "reason", "") or type(exc).__name__)
             mapped = {
@@ -558,6 +657,8 @@ class LiveTrading:
                 "mt5_account_profile_invalid": ACCOUNT_INVALID,
                 "mt5_arming_account_mismatch": ACCOUNT_INVALID,
                 "mt5_arming_server_mismatch": ACCOUNT_INVALID,
+                "mt5_arming_account_confirmation_mismatch": ACCOUNT_CONFIRMATION_MISMATCH,
+                "mt5_account_changed_since_confirmation": ACCOUNT_CONFIRMATION_MISMATCH,
             }.get(reason, ARM_REFUSED)
             return self._refuse(
                 [
@@ -576,6 +677,7 @@ class LiveTrading:
             self.armed_strategy.armed = True
         self._audit(
             "LIVE_PLAN_ARMED",
+            account_fingerprint=fingerprint,
             candidate_id=document.get("candidate_id", ""),
             pair=document.get("pair", ""),
             quantity=document.get("quantity", ""),
@@ -800,6 +902,8 @@ class LiveTrading:
             "review": dict(self.last_review),
             "last_refusal": dict(self.last_refusal),
             "confirmation_phrase": ARM_CONFIRMATION_PHRASE,
+            "account_fingerprint": self.confirmed_account_fingerprint(),
+            "qualification": self.qualification_verdict(),
             "candidates": self.candidate_choices(),
             "symbols": self.symbol_choices(),
             "runner": runner_view or session_view,

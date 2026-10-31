@@ -290,6 +290,11 @@ class WorkstationApp:
     #: The last catalog action's result, shown once on the next render.
     catalog_result: dict[str, Any] = field(default_factory=dict)
 
+    #: The 24-hour paper-test record LIVE is gated on.  ``None`` means "read it
+    #: from the catalog panel or the live workflow"; either way the record only
+    #: ever says whether the test passed.  Passing still enables and arms nothing.
+    qualification: Any = None
+
     #: The optional Kronos forecasting panel. ``None`` means this deployment has
     #: no forecasting component, which is the default and leaves every other page
     #: exactly as it was. It can never reach the live or risk objects.
@@ -353,6 +358,7 @@ class WorkstationApp:
             confirmed=bool(self.wizard.choices.confirmed),
             selected_symbols=self.wizard.choices.selected_symbols,
             strategy=self.strategy,
+            qualification=self.qualification_view(),
         )
 
     def preflight_view(self) -> dict[str, Any]:
@@ -519,6 +525,52 @@ class WorkstationApp:
                 )
         return blockers
 
+    def qualification_record(self) -> Any:
+        """The paper-test record this process reads, wherever it was wired in."""
+
+        if self.qualification is not None:
+            return self.qualification
+        for holder in (self.live, self.catalog):
+            source = getattr(holder, "qualification", None)
+            if source is not None:
+                return source
+        return None
+
+    def qualification_view(self) -> dict[str, Any]:
+        """The one-day paper test's report, or an honest "no record" state.
+
+        This is the gate LIVE availability is read from.  It never enables LIVE,
+        never selects it, and never arms anything.
+        """
+
+        source = self.qualification_record()
+        if source is None:
+            return {
+                "present": False,
+                "passed": False,
+                "verdict": "NOT_STARTED",
+                "summary": "No live-market paper test has been run here yet.",
+                "report": {},
+            }
+        try:
+            report = dict(source.report())
+            return {
+                "present": True,
+                "passed": bool(source.live_available()),
+                "verdict": str(report.get("verdict", "")),
+                "summary": str(report.get("summary", "")),
+                "report": report,
+            }
+        except Exception as exc:  # a read model never raises, and never assumes a pass
+            self._log(f"qualification view failed: {type(exc).__name__}")
+            return {
+                "present": True,
+                "passed": False,
+                "verdict": "UNREADABLE",
+                "summary": "The paper-test record could not be read, so LIVE stays closed.",
+                "report": {},
+            }
+
     def live_view(self) -> dict[str, Any]:
         """The live page's whole model.  Reads only, never sends."""
 
@@ -618,6 +670,7 @@ class WorkstationApp:
                 "research": self.research_view() if page == "quick-setup" else {},
                 "catalog": self.catalog_view() if page == "quick-setup" else {},
                 "live_summary": self.live_summary(),
+                "qualification": self.qualification_view(),
             },
         )
 
@@ -1046,6 +1099,9 @@ class WorkstationApp:
                 values,
                 confirmation=field("confirmation"),
                 reviewed=field("reviewed") == "yes",
+                # The operator repeats the account signature shown on the page, so
+                # arming names one account rather than "whatever is in the terminal".
+                account_confirmation=field("account_confirmation"),
             )
             self.live_result = result.audit_view()
             if result.armed:

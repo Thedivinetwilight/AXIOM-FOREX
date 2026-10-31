@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .live_plan import PLAN_FILENAME
 from .live_workflow import ArmedStrategy, LiveTrading
+from .qualification import QualificationClock
 
 
 def build_live_workflow(
@@ -41,6 +42,7 @@ def build_live_workflow(
     audit_log: Any = None,
     vault: Any = None,
     pause_seconds: float = 1.0,
+    qualification: QualificationClock | None = None,
 ) -> LiveTrading | None:
     """Return the workflow, or ``None`` when this deployment cannot trade live."""
 
@@ -133,8 +135,14 @@ def build_live_workflow(
             pause_seconds=pause_seconds,
         )
 
+    if qualification is None:
+        # The same record the live-market paper test writes; LIVE is offered only
+        # when that test has passed.  Reading it decides nothing on its own.
+        qualification = QualificationClock(Path(project_root) / "data" / "catalog")
+
     return LiveTrading(
         adapter=adapter,
+        qualification=qualification,
         mode=mode,
         plan_path=Path(project_root) / PLAN_FILENAME,
         setup_path=provider_setup_path or None,
