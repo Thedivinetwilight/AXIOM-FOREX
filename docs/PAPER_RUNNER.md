@@ -438,7 +438,11 @@ profitable.
 
 `--paper-runner-provider-setup` points at one local JSON document of broker terms,
 schema `axiom-provider-setup-v1` (`axiom_forex/config/provider_setup.py`). The
-workstation builds it on **Provider setup** (`/provider-setup`):
+workstation builds it on **Broker terms (advanced)** (`/provider-setup`). This
+document is now the *advanced* route, and the only route to live execution: the
+normal flow starts at **Quick setup** (`/quick-setup`), which reads what your
+terminal can report and asks for five things only you know (see
+`docs/QUICK_SETUP_AND_RESEARCH.md`). Both pages are kept; neither can trade.
 
 | Field group | Source | Notes |
 | --- | --- | --- |
