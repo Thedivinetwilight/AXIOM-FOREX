@@ -93,7 +93,7 @@ class _EvaluationRun:
         return self.thread is not None and self.thread.is_alive()
 
 
-def _facts_from_terminal(terminal: Any, limit: int = 400) -> tuple[SymbolFacts, ...]:
+def _facts_from_terminal(terminal: Any, limit: int = 200) -> tuple[SymbolFacts, ...]:
     """Read the terminal's symbol facts, read-only, and never invent one."""
 
     if terminal is None:
