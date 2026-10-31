@@ -70,6 +70,7 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/data": ("data", "Data & evaluation"),
     "/provider-setup": ("provider-setup", "Provider setup"),
     "/live": ("live", "Live execution"),
+    "/kronos": ("kronos", "Kronos forecast"),
     "/activity": ("activity", "Activity"),
     "/health": ("health", "System health"),
     "/mode": ("mode", "Trading mode"),
@@ -121,6 +122,19 @@ POST_ACTIONS: frozenset[str] = frozenset(
         # The guided provider setup. It writes one local, Git-ignored document
         # (provider_setup.local.json) and never reads or touches the MT5 settings.
         "provider-setup-save",
+        # Kronos, the optional forecasting component. These actions change what a
+        # forecast looks like, and nothing else: no order, no risk limit, no mode.
+        "kronos-save",
+        "kronos-load",
+        "kronos-stop",
+        "kronos-forecast",
+        "kronos-schedule-start",
+        "kronos-schedule-stop",
+        "kronos-preset-save",
+        "kronos-preset-load",
+        "kronos-reconcile",
+        "kronos-benchmark",
+        "kronos-inspect-weights",
         # The live workflow: plan, review, arm, start, stop.
         "live-arm",
         "live-disarm",
@@ -229,6 +243,13 @@ class WorkstationApp:
     #: reads its state.  ``None`` means no runner is configured -- which is the
     #: default, and leaves every other page exactly as it was.
     runner: Any = None
+    #: The optional Kronos forecasting panel. ``None`` means this deployment has
+    #: no forecasting component, which is the default and leaves every other page
+    #: exactly as it was. It can never reach the live or risk objects.
+    kronos: Any = None
+    #: The last Kronos action's result, shown once on the next render.
+    kronos_result: dict[str, Any] = field(default_factory=dict)
+
     #: Where the operator drops broker exports and canonical CSVs.  The data page
     #: lists *names* in this folder and never accepts a path from a form.
     import_dir: Any = None
@@ -537,9 +558,48 @@ class WorkstationApp:
                     self.provider_setup_view() if page == "provider-setup" else {}
                 ),
                 "live": self.live_view() if page == "live" else {},
+                "kronos": self.kronos_view() if page == "kronos" else {},
                 "live_summary": self.live_summary(),
             },
         )
+
+    def kronos_view(self) -> dict[str, Any]:
+        """The forecasting panel's own view, or an honest "not wired" state."""
+
+        if self.kronos is None:
+            return {"available": False}
+        try:
+            symbols = list(getattr(self.wizard.choices, "selected_symbols", ()) or ())
+            view = dict(self.kronos.view(symbols=symbols))
+        except Exception as exc:
+            self._log(f"kronos view failed: {type(exc).__name__}")
+            return {"available": True, "error": type(exc).__name__}
+        if self.kronos_result:
+            view["result"] = dict(self.kronos_result)
+            # Shown once. A success line that outlives its action reads as if the
+            # action just happened again.
+            self.kronos_result = {}
+        return view
+
+    def _kronos_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        if self.kronos is None:
+            return (
+                HTTPStatus.CONFLICT,
+                "/kronos",
+                "This workstation has no Kronos panel, so there is nothing to configure.",
+            )
+        payload = {name: (values[0] if values else "") for name, values in form.items()}
+        outcome = self.kronos.act(action, payload)
+        self.kronos_result = dict(outcome)
+        self._log(
+            f"kronos action {action}: "
+            + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused"))
+        )
+        if outcome.get("ok"):
+            # Redirect so the destination page re-reads the runtime and history
+            # instead of rendering a stale view; the message rides on that render.
+            return HTTPStatus.SEE_OTHER, str(outcome.get("path") or "/kronos"), ""
+        return HTTPStatus.CONFLICT, "/kronos", str(outcome.get("message") or "")
 
     # -- actions -----------------------------------------------------------
     def act(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
@@ -565,6 +625,8 @@ class WorkstationApp:
 
     def _dispatch(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         wizard = self.wizard
+        if action.startswith("kronos-"):
+            return self._kronos_action(action, form)
         if action == "connect":
             session = wizard.session
             simulated = wizard.simulated

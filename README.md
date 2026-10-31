@@ -296,6 +296,33 @@ Every order still goes through the same planner, pre-trade gate, risk limits and
 ledger the paper lane uses; the intent is written durably before submission, and
 an in-doubt order is never re-sent. Full detail: `docs/LIVE_EXECUTION.md`.
 
+### Kronos forecasting (optional, `/kronos`)
+
+Kronos is a published financial foundation model that predicts the next few
+K-lines. AXIOM runs it as an **optional, replaceable forecasting component** on its
+own page, separate from Provider setup and from Live execution. It is forecast-only:
+the page cannot place an order, size a position, set a stop, arm anything, or change
+an execution mode, and a forecast is labelled `FORECAST_ONLY_NOT_A_SIGNAL`
+everywhere it is stored or shown.
+
+AXIOM never downloads code, weights, or packages. You install the official runtime
+and point the page at the official code checkout and the model folder; the page
+lists every dependency with its requirement and shows an estimated weight/size cost
+before anything is loaded. **Inspect and hash the model files** prints each file's
+SHA-256 locally so you can compare it with the publisher's own values — the state
+stays `UNVERIFIED_BY_AXIOM`, because AXIOM has nothing upstream to check against.
+
+Input mapping is explicit and never invented: OHLC is the **bid/ask midpoint**
+(labelled `MID`, not tradable), `volume` is MT5's **tick count** (labelled
+`TICK_VOLUME`, which is not exchange volume), `amount` is derived and labelled, and
+a missing field is omitted rather than zero-filled by us. Every forecast is stored
+with its model, revision, settings fingerprint, and input-quality report before it is
+shown, then scored later against realised bars — direction, absolute error, and band
+coverage, with no profit figure. A benchmark against hold/drift/momentum baselines
+runs on the chronological out-of-sample window only, and **a benchmark score is
+never evidence of profit**. `Kronos-large` is not offered: the project does not
+publish its weights. Full detail: `docs/KRONOS.md`.
+
 ### Provider setup (`provider_setup.local.json`)
 
 The runner trades the symbol *your broker* quotes, so it needs one local document

@@ -38,6 +38,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("positions", "/positions", "Positions"),
     ("data", "/data", "Data & evaluation"),
     ("provider-setup", "/provider-setup", "Provider setup"),
+    ("kronos", "/kronos", "Kronos forecast"),
     ("activity", "/activity", "Activity"),
     ("health", "/health", "System health"),
 )
@@ -55,6 +56,7 @@ ICONS: dict[str, str] = {
     "health": "M12 21s-7-4.5-7-10a4 4 0 017-2.5A4 4 0 0119 11c0 5.5-7 10-7 10z",
     "connection": "M5 12a7 7 0 0114 0M8 12a4 4 0 018 0M12 12v0",
     "shield": "M12 3l7 3v6c0 5-3.5 8-7 9-3.5-1-7-4-7-9V6l7-3z",
+    "kronos": "M3 17l4-6 3 4 3-8 3 6 2-3 3 7M3 21h18",
 }
 
 STYLES = """
@@ -2800,6 +2802,650 @@ def render_live(ctx: PageContext) -> str:
 
 
 
+# --------------------------------------------------------------------------
+# Kronos: the optional forecasting component
+# --------------------------------------------------------------------------
+
+
+def _kronos_view(ctx: PageContext) -> Mapping[str, Any]:
+    return dict((ctx.extra or {}).get("kronos") or {})
+
+
+def kronos_status_chip(view: Mapping[str, Any]) -> str:
+    """One chip, and it never says more than the runtime actually reported."""
+
+    state = dict(view.get("state") or {})
+    name = str(state.get("state", "NOT_LOADED"))
+    if name == "READY":
+        return chip("model loaded · forecast only", "ok", dot=True)
+    if name == "LOADING":
+        return chip("loading", "warn", dot=True)
+    if name == "FAILED":
+        return chip(f"failed · {state.get('reason', 'unknown')}", "danger", dot=True)
+    if name == "STOPPED":
+        return chip("stopped", "muted", dot=True)
+    return chip("not loaded", "muted", dot=True)
+
+
+def _kronos_chart(chart: Mapping[str, Any]) -> str:
+    """An inline SVG: recent mid closes, then the forecast with its band.
+
+    No script, no library, no external asset.  Prices are floats only for
+    drawing; the numbers themselves are printed as text elsewhere.
+    """
+
+    history = [dict(item) for item in chart.get("history") or []]
+    forecast = dict(chart.get("forecast") or {})
+    if not history:
+        return ""
+    closes = []
+    for item in history:
+        try:
+            closes.append(float(item.get("close")))
+        except (TypeError, ValueError):
+            continue
+    if not closes:
+        return ""
+
+    p10 = [float(value) for value in forecast.get("p10") or []]
+    p50 = [float(value) for value in forecast.get("p50") or []]
+    p90 = [float(value) for value in forecast.get("p90") or []]
+    width, height, pad = 760, 220, 34
+    span = max(1, len(closes) + len(p50) - 1)
+    values = list(closes) + p10 + p50 + p90
+    low, high = min(values), max(values)
+    if high <= low:
+        high = low + 1e-9
+    step_x = (width - pad * 2) / max(1, span)
+    scale_y = (height - pad * 2) / (high - low)
+
+    def x(index: int) -> float:
+        return pad + index * step_x
+
+    def y(value: float) -> float:
+        return height - pad - (value - low) * scale_y
+
+    path = " ".join(
+        f"{'M' if index == 0 else 'L'}{x(index):.1f},{y(value):.1f}"
+        for index, value in enumerate(closes)
+    )
+    parts = [
+        f"<svg viewBox='0 0 {width} {height}' width='100%' height='{height}' role='img' "
+        f"aria-label='Recent mid closes and the last forecast with its uncertainty band'>",
+        "<rect x='0' y='0' width='100%' height='100%' fill='none'/>",
+        f"<line x1='{pad}' y1='{height - pad}' x2='{width - pad}' y2='{height - pad}' "
+        "stroke='#24313f' stroke-width='1'/>",
+    ]
+    if p10 and p90 and p50:
+        upper = " ".join(
+            f"{x(len(closes) + index):.1f},{y(value):.1f}" for index, value in enumerate(p90)
+        )
+        lower = " ".join(
+            f"{x(len(closes) + index):.1f},{y(value):.1f}"
+            for index, value in reversed(list(enumerate(p10)))
+        )
+        parts.append(
+            f"<polygon points='{upper} {lower}' fill='rgba(94,200,255,0.16)' "
+            "stroke='rgba(94,200,255,0.45)' stroke-width='1'/>"
+        )
+        median = " ".join(
+            f"{'M' if index == 0 else 'L'}{x(len(closes) + index):.1f},{y(value):.1f}"
+            for index, value in enumerate(p50)
+        )
+        parts.append(
+            f"<path d='{median}' fill='none' stroke='#5ec8ff' stroke-width='2' "
+            "stroke-dasharray='5 4'/>"
+        )
+        parts.append(
+            f"<line x1='{x(len(closes) - 1):.1f}' y1='{pad}' x2='{x(len(closes) - 1):.1f}' "
+            f"y2='{height - pad}' stroke='#3a4a5c' stroke-width='1' stroke-dasharray='3 4'/>"
+        )
+    parts.append(f"<path d='{path}' fill='none' stroke='#8fa1b2' stroke-width='2'/>")
+    parts.append(
+        f"<text x='{pad}' y='{height - 10}' fill='#8fa1b2' font-size='11'>history</text>"
+        + (
+            f"<text x='{width - pad - 52}' y='{height - 10}' fill='#5ec8ff' "
+            "font-size='11'>forecast</text>"
+            if p50
+            else ""
+        )
+    )
+    parts.append(
+        f"<text x='{pad}' y='{pad - 12}' fill='#8fa1b2' font-size='11'>{high:.5f}</text>"
+        f"<text x='{pad}' y='{height - pad + 16}' fill='#8fa1b2' font-size='11'>{low:.5f}</text>"
+    )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _kronos_control(control: Mapping[str, Any]) -> str:
+    name = escape(str(control.get("name", "")))
+    label = escape(str(control.get("label", "")))
+    value = escape(str(control.get("value", "")))
+    help_text = escape(str(control.get("help", "")))
+    kind = str(control.get("kind", "text"))
+    name_attr = f"name='{name}'"
+    if kind == "select":
+        options = "".join(
+            f"<option value='{escape(str(option))}'"
+            f"{' selected' if str(option) == str(control.get('value', '')) else ''}>"
+            f"{escape(str(option))}</option>"
+            for option in control.get("options") or []
+        )
+        field_html = f"<select {name_attr}>{options}</select>"
+    elif kind == "number":
+        extra = ""
+        if str(control.get("min", "")):
+            extra += f" min='{escape(str(control['min']))}'"
+        if str(control.get("max", "")):
+            extra += f" max='{escape(str(control['max']))}'"
+        field_html = (
+            f"<input type='number' step='any' {name_attr} value='{value}'{extra}>"
+        )
+    else:
+        field_html = (
+            f"<input type='text' {name_attr} value='{value}' autocomplete='off' "
+            "spellcheck='false'>"
+        )
+    help_html = f"<span class='help'>{help_text}</span>" if help_text else ""
+    return (
+        f"<label class='field'><span>{label}</span>{field_html}{help_html}</label>"
+    )
+
+
+def _kronos_controls_form(view: Mapping[str, Any], ctx: PageContext) -> str:
+    controls = [dict(item) for item in view.get("controls") or []]
+    groups = []
+    for group in ("Basic", "Advanced"):
+        items = [control for control in controls if control.get("group") == group]
+        if not items:
+            continue
+        groups.append(
+            f"<h3 class='small muted'>{escape(group)}</h3>"
+            + "".join(_kronos_control(control) for control in items)
+        )
+    if not groups:
+        return empty_state(
+            "No settings exposed", "This build exposes no Kronos setting."
+        )
+    return (
+        f"<form method='post' action='/actions/kronos-save' class='stack'>"
+        f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+        + "".join(groups)
+        + "<div class='row'><button class='btn btn--primary' type='submit'>"
+        "Save these settings</button></div></form>"
+    )
+
+
+def render_kronos(ctx: PageContext) -> str:
+    view = _kronos_view(ctx)
+    nonce = ctx.action_nonce
+    if not view.get("available"):
+        return render_shell(
+            ctx,
+            notice(
+                "warn",
+                "The Kronos panel is not wired into this workstation",
+                "This process has no forecasting component, so there is nothing to "
+                "configure here. It is optional and never required for trading.",
+            ),
+        )
+
+    state = dict(view.get("state") or {})
+    settings = dict(view.get("settings") or {})
+    availability = dict(view.get("availability") or {})
+    estimate = dict(view.get("estimate") or {})
+    history = dict(view.get("history") or {})
+    summary = dict(history.get("summary") or {})
+    last = dict(view.get("last") or {})
+    benchmark = dict(view.get("benchmark") or {})
+    body: list[str] = []
+
+    result = dict(view.get("result") or {})
+    if result.get("message"):
+        body.append(
+            notice(
+                "ok" if result.get("ok") else "warn",
+                "The last Kronos action",
+                str(result.get("message")),
+            )
+        )
+
+    body.append(
+        notice(
+            "ok",
+            "Forecast only — this page cannot place an order",
+            "Kronos estimates the next bars. Nothing here sizes a position, sets a "
+            "stop, changes an execution mode, or creates an order. Using a forecast "
+            "in a strategy is a separate, explicit configuration through the "
+            "existing risk gate.",
+        )
+    )
+
+    # -- status ----------------------------------------------------------
+    status_rows = [
+        ("Component", chip("optional · replaceable", "muted")),
+        ("Model state", kronos_status_chip(view)),
+        ("Variant", escape(str(settings.get("model_key", "")))),
+        ("Device", escape(str(state.get("device", "")) or "—")),
+        ("Settings fingerprint", f"<span class='mono'>{escape(str(view.get('fingerprint', '')))}</span>"),
+        ("Scheduled forecasting", chip("running", "ok", dot=True) if view.get("schedule_running") else chip("stopped", "muted")),
+        ("Forecasts this session", escape(str(state.get("forecasts", 0)))),
+        ("Failures", escape(str(state.get("failures", 0)))),
+        ("Last forecast", escape(str(state.get("last_forecast_at", "")) or "—")),
+        ("Last error", escape(str(state.get("last_error", "")) or "—")),
+    ]
+    if state.get("reason"):
+        status_rows.append(("Failure reason", escape(str(state.get("detail", "")) or str(state.get("reason", "")))))
+    body.append(
+        card(
+            "Status",
+            dl(status_rows),
+            hint="A state is only ever what the runtime reported. Nothing retries by itself.",
+            right=kronos_status_chip(view),
+        )
+    )
+
+    if not view.get("has_bar_source"):
+        body.append(
+            notice(
+                "warn",
+                "No bar source is wired in",
+                "Forecasting needs broker bars. Start this workstation against your "
+                "MetaTrader 5 terminal with a connected session, or import bars on the "
+                "Data page. AXIOM will not invent prices to fill the gap, so until then "
+                "this page can validate settings but cannot produce a forecast.",
+            )
+        )
+
+    # -- input chart and last forecast ------------------------------------
+    chart = dict(view.get("chart") or {})
+    svg = _kronos_chart(chart) if chart else ""
+    if svg:
+        caption = (
+            f"{escape(str(chart.get('symbol', '')))} · "
+            f"{escape(str(chart.get('timeframe', '')))} · mid price (not tradable)"
+        )
+        band_note = (
+            "The shaded band is the 10th–90th percentile of the sampled paths. A "
+            "band that excludes the outcome is a failure of the model's uncertainty, "
+            "and it is recorded as one."
+            if chart.get("forecast")
+            else "History only: no forecast has been run on this page yet."
+        )
+        body.append(card("Input and forecast", svg, hint=caption + ". " + band_note))
+
+    if last:
+        quality = dict(last.get("quality") or {})
+        band = dict(last.get("band_at_horizon") or {})
+        body.append(
+            card(
+                "The last forecast",
+                dl(
+                    [
+                        ("Recorded", escape(str(last.get("created_at", "")))),
+                        ("Symbol / timeframe", escape(f"{last.get('symbol', '')} {last.get('timeframe', '')}")),
+                        ("Model", escape(str(last.get("model_key", ""))) + " · " + escape(str(last.get("model_revision", "")))),
+                        ("Horizon", escape(str(last.get("horizon", ""))) + " bar(s)"),
+                        ("Last observed close", escape(str(last.get("last_close", "")))),
+                        ("Median at horizon", escape(str(band.get("p50", "")) or "—")),
+                        ("Band at horizon", escape(f"{band.get('p10', '')} – {band.get('p90', '')}")),
+                        ("Expected move", escape(str(last.get("expected_move", ""))) + f" ({escape(str(last.get('expected_move_basis_points', '')))} bp)"),
+                        ("Data freshness", escape(str(quality.get("last_at", ""))) + " · " + chip(str(quality.get("volume_mode", "")), "muted")),
+                        ("Input quality", escape(f"{quality.get('bars', '')} bars · {quality.get('gaps', 0)} gap(s) · {quality.get('crossed', 0)} crossed")),
+                        ("Inference time", escape(str(last.get("runtime_seconds", ""))) + " s for " + escape(str(last.get("rollouts", ""))) + " rollout(s)"),
+                        ("Label", chip(str(last.get("label", "")), "paper")),
+                    ]
+                ),
+                hint="Stored before it was shown, with the settings fingerprint and input quality it was built from.",
+                right=chip("forecast only", "paper"),
+            )
+        )
+
+    # -- run controls ----------------------------------------------------
+    ready = str(state.get("state", "")) == "READY"
+    controls = []
+    controls.append(
+        action_form("kronos-load", nonce, "Load model", tone="primary")
+    )
+    controls.append(action_form("kronos-forecast", nonce, "Run one forecast"))
+    if view.get("schedule_running"):
+        controls.append(action_form("kronos-schedule-stop", nonce, "Stop scheduled forecasting", tone="danger"))
+    else:
+        controls.append(action_form("kronos-schedule-start", nonce, "Start scheduled forecasting"))
+    controls.append(action_form("kronos-stop", nonce, "Stop and unload", tone="danger"))
+    body.append(
+        card(
+            "Run",
+            "<div class='row'>" + "".join(controls) + "</div>",
+            hint="Load reads the saved settings and the model files you placed on this "
+            "machine. It never downloads, installs, or starts anything at boot.",
+        )
+    )
+
+    # -- settings --------------------------------------------------------
+    problems = [dict(item) for item in view.get("problems") or []]
+    settings_body = ""
+    if problems:
+        items = "".join(
+            f"<li><strong class='mono'>{escape(str(item.get('path', '')))}</strong> "
+            f"{escape(str(item.get('message', '')))}</li>"
+            for item in problems
+        )
+        settings_body += (
+            "<div class='notice notice--warn' role='status'><div>"
+            "<strong>These settings cannot be loaded yet</strong>"
+            f"<ul class='list'>{items}</ul></div></div>"
+        )
+    settings_body += _kronos_controls_form(view, ctx)
+    body.append(
+        card(
+            "Inference settings",
+            settings_body,
+            hint="Every control maps to a real Kronos argument or to an AXIOM-side "
+            "scheduling choice. Limits come from the selected variant's published "
+            "context length.",
+            right=chip("basic + advanced", "muted"),
+        )
+    )
+
+    # presets
+    presets = [str(item) for item in view.get("presets") or []]
+    preset_options = "".join(
+        f"<option value='{escape(item)}'>{escape(item)}</option>" for item in presets
+    )
+    body.append(
+        card(
+            "Named presets",
+            f"<form method='post' action='/actions/kronos-preset-save' class='stack'>"
+            f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+            "<label class='field'><span>Name</span>"
+            "<input type='text' name='preset_name' autocomplete='off' maxlength='60' "
+            "placeholder='e.g. eurusd 15m quiet'>"
+            "<span class='help'>Saved beside the launcher as kronos_presets.local.json, "
+            "which Git ignores.</span></label>"
+            "<div class='row'><button class='btn' type='submit'>Save current settings</button>"
+            "</div></form>"
+            + (
+                f"<form method='post' action='/actions/kronos-preset-load' class='stack' "
+                "style='margin-top:12px'>"
+                f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+                "<label class='field'><span>Saved presets</span>"
+                f"<select name='preset_name'>{preset_options}</select></label>"
+                "<div class='row'><button class='btn' type='submit'>Load into the form</button>"
+                "</div></form>"
+                if presets
+                else "<p class='small muted' style='margin-top:12px'>No presets saved yet.</p>"
+            ),
+            hint="Loading a preset fills the form; it does not load the model.",
+        )
+    )
+
+    # -- hardware and cost ----------------------------------------------
+    packages = [dict(item) for item in availability.get("packages") or []]
+    body.append(
+        card(
+            "Before you load: what it costs and what is installed",
+            dl(
+                [
+                    ("Parameters", escape(str(estimate.get("parameters", "")))),
+                    ("Weights (estimated)", escape(str(estimate.get("weights_megabytes", ""))) + " MB at fp32"),
+                    ("Context / horizon", escape(f"{estimate.get('context_bars', '')} bars → {estimate.get('horizon_bars', '')} bars")),
+                    ("Rollouts", escape(str(estimate.get("rollouts", ""))) + " sequential predict() calls"),
+                    ("Python", escape(str(availability.get("python", "")))),
+                    ("torch", chip("present", "ok") if availability.get("torch_present") else chip("missing", "danger")),
+                    ("CUDA", "—" if availability.get("cuda_available") is None else chip("available", "ok") if availability.get("cuda_available") else chip("not available", "warn")),
+                ]
+            )
+            + table(
+                "Dependencies from the official requirements.txt",
+                [("Requirement", ""), ("Import name", "mono"), ("State", "")],
+                [
+                    [
+                        escape(str(item.get("requirement", ""))),
+                        escape(str(item.get("import_name", ""))),
+                        chip("present", "ok") if item.get("present") else chip(
+                            "missing" if item.get("required") else "missing (optional)", "danger" if item.get("required") else "warn"
+                        ),
+                    ]
+                    for item in packages
+                ],
+            ),
+            hint="AXIOM never installs software. Missing packages are reported with the exact "
+            "requirement so you can install them yourself.",
+            right=chip("estimate, not a measurement", "muted"),
+        )
+    )
+    if estimate.get("notes"):
+        body.append(
+            card(
+                "What that estimate does not include",
+                "<ul class='list'>"
+                + "".join(f"<li>{escape(str(note))}</li>" for note in estimate.get("notes") or [])
+                + "</ul>",
+            )
+        )
+
+    # -- model files and licence ----------------------------------------
+    source = dict(view.get("source") or {})
+    weights = dict(view.get("weights") or {})
+    weights_rows = [
+        ("Repository", escape(str(source.get("repo", "")))),
+        ("Commit read for these facts", escape(str(source.get("commit_url", "")))),
+        ("Code licence", escape(str(source.get("code_licence", ""))) + " · " + escape(str(source.get("code_copyright", "")))),
+        ("Paper", escape(str(source.get("paper_url", "")))),
+        ("Weights host", escape(str(source.get("weights_host", "")))),
+        ("Weights licence", chip(str(source.get("weights_licence", "")), "warn")),
+        ("Model file location", escape(str(settings.get("model_path", "")) or "official Hub id")),
+        ("Pinned revision", escape(str(settings.get("revision", "")) or "—")),
+        ("Local digests", escape(str(weights.get("state", "not inspected")))),
+    ]
+    weights_body = dl(weights_rows)
+    weights_body += (
+        "<p class='small muted' style='margin-top:10px'>AXIOM does not download weights, "
+        "packages, or code. Obtain the files from the official source yourself, place them "
+        "in a folder, and point the setting above at it. The inspection below only hashes "
+        "what is already there.</p>"
+    )
+    if weights.get("files"):
+        weights_body += table(
+            "Files hashed locally",
+            [("File", "mono"), ("Bytes", "num"), ("SHA-256", "mono")],
+            [
+                [
+                    escape(str(item.get("path", ""))),
+                    escape(str(item.get("bytes", ""))),
+                    escape(str(item.get("sha256", "")) [:24]) + "…",
+                ]
+                for item in weights.get("files") or []
+            ],
+        )
+    weights_body += (
+        f"<form method='post' action='/actions/kronos-inspect-weights' class='stack' "
+        "style='margin-top:12px'>"
+        f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+        f"<input type='hidden' name='model_path' value='{escape(str(settings.get('model_path', '')))}'>"
+        "<div class='row'><button class='btn' type='submit'>Inspect and hash the model files</button>"
+        "</div></form>"
+    )
+    body.append(
+        card(
+            "Model, licence, and where the files come from",
+            weights_body,
+            hint="Licence and version are shown before anything is used; the weights' "
+            "licence is not something AXIOM can vouch for.",
+            right=chip("no automatic download", "warn"),
+        )
+    )
+
+    # -- history and outcomes -------------------------------------------
+    recent = [dict(item) for item in history.get("recent") or []]
+    history_rows = []
+    for item in recent:
+        outcome = dict(item.get("outcome") or {})
+        history_rows.append(
+            [
+                escape(str(item.get("created_at", ""))),
+                escape(f"{item.get('symbol', '')} {item.get('timeframe', '')}"),
+                escape(str(item.get("model_key", ""))),
+                escape(str((item.get("band_at_horizon") or {}).get("p50", ""))),
+                (
+                    chip("scored", "ok")
+                    + " · "
+                    + ("right" if outcome.get("direction_correct") else "wrong")
+                    + f" · error {escape(str(outcome.get('absolute_error', '')))}"
+                    if outcome
+                    else chip("waiting for its horizon", "muted")
+                ),
+            ]
+        )
+    body.append(
+        card(
+            "Recorded forecasts and what happened",
+            table(
+                "Most recent forecasts from kronos_forecasts.sqlite3",
+                [("Recorded", ""), ("Series", ""), ("Model", "mono"), ("Median", "num"), ("Outcome", "")],
+                history_rows,
+                empty=empty_state(
+                    "No forecast recorded yet",
+                    "Run one forecast, or start scheduled forecasting. Each result is "
+                    "stored with its settings fingerprint before it is shown.",
+                ),
+            )
+            + (
+                f"<div class='row' style='margin-top:12px'>"
+                f"{action_form('kronos-reconcile', nonce, 'Score forecasts whose horizon has passed')}"
+                "</div>"
+                if recent
+                else ""
+            )
+            + (
+                f"<p class='small muted' style='margin-top:10px'>{escape(str(summary.get('note', '')))}</p>"
+                if summary
+                else ""
+            ),
+            hint="Direction, absolute error and band coverage only. No trading costs are "
+            "included, so these are not profit figures.",
+        )
+    )
+
+    # -- benchmark -------------------------------------------------------
+    baselines = [dict(item) for item in view.get("baselines") or []]
+    benchmark_body = (
+        table(
+            "The configured comparison set",
+            [("Baseline", "mono"), ("What it does", "")],
+            [[escape(str(item.get("key", ""))), escape(str(item.get("note", "")))] for item in baselines],
+        )
+        + f"<form method='post' action='/actions/kronos-benchmark' class='stack' style='margin-top:12px'>"
+        f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+        "<div class='data-grid'>"
+        f"<label class='field'><span>Symbol</span><input type='text' name='symbol' value='{escape(str(settings.get('symbol', '')))}' autocomplete='off'></label>"
+        f"<label class='field'><span>Timeframe</span><select name='timeframe'>"
+        + "".join(
+            f"<option value='{escape(str(tf))}'{' selected' if str(tf) == str(settings.get('timeframe')) else ''}>{escape(str(tf))}</option>"
+            for tf in view.get("timeframes") or []
+        )
+        + "</select></label>"
+        "<label class='field'><span>Include Kronos</span><select name='include_kronos'>"
+        "<option value='yes'>yes, if it is loaded</option>"
+        "<option value='no'>no, baselines only</option></select></label>"
+        "</div>"
+        "<div class='row'><button class='btn btn--primary' type='submit'>Run the benchmark</button></div>"
+        "</form>"
+    )
+    if benchmark.get("scores"):
+        benchmark_body += (
+            "<h3 class='small muted' style='margin-top:18px'>The last run</h3>"
+            + dl(
+                [
+                    ("Ran at", escape(str(benchmark.get("ran_at", "")))),
+                    ("Series", escape(f"{benchmark.get('symbol', '')} {benchmark.get('timeframe', '')}")),
+                    ("Steps scored", escape(str(benchmark.get("steps", "")))),
+                ]
+            )
+            + table(
+                "Forecast error and spread-adjusted direction. Not profit.",
+                [("Model", "mono"), ("Observations", "num"), ("Direction", "num"), ("Mean abs error", "num"), ("Band coverage", "num"), ("Spread-adjusted move", "num")],
+                [
+                    [
+                        escape(str(row.get("key", ""))),
+                        escape(str(row.get("observations", ""))),
+                        escape(str(row.get("direction_rate", "—"))),
+                        escape(str(row.get("mean_absolute_error", "—"))),
+                        escape(str(row.get("band_coverage", "—") or "—")),
+                        escape(str(row.get("mean_spread_adjusted_move", "—") or "—")),
+                    ]
+                    for row in sorted(benchmark.get("scores") or [], key=lambda item: str(item.get("key", "")))
+                ],
+            )
+            + "<ul class='list'>"
+            + "".join(f"<li>{escape(str(note))}</li>" for note in benchmark.get("notes") or [])
+            + "</ul>"
+        )
+    body.append(
+        card(
+            "Compare against simple baselines",
+            benchmark_body,
+            hint="Chronological out-of-sample window only, nothing fitted on it. A "
+            "benchmark score is never evidence of profit.",
+        )
+    )
+
+    # -- mapping ---------------------------------------------------------
+    mapping = [dict(item) for item in view.get("mapping") or []]
+    body.append(
+        card(
+            "What is sent to the model",
+            table(
+                "The input mapping, field by field",
+                [("Kronos column", "mono"), ("AXIOM source", ""), ("Basis", "")],
+                [
+                    [escape(str(item.get("column", ""))), escape(str(item.get("source", ""))), chip(str(item.get("label", "")), "muted")]
+                    for item in mapping
+                ],
+            ),
+            hint="Mid prices are not tradable, and MT5 tick volume is a count of price "
+            "updates, not exchange volume. Nothing absent is invented.",
+        )
+    )
+
+    # -- unsupported -----------------------------------------------------
+    unsupported = [dict(item) for item in view.get("unsupported") or []]
+    body.append(
+        card(
+            "Settings Kronos does not support",
+            "<ul class='list'>"
+            + "".join(
+                f"<li><strong class='mono'>{escape(str(item.get('setting', '')))}</strong> "
+                f"{escape(str(item.get('why', '')))}</li>"
+                for item in unsupported
+            )
+            + "</ul>",
+            hint="Documented rather than invented. If you need one of these, it is not a "
+            "setting to add here -- it is a different model.",
+        )
+    )
+
+    # -- where a forecast may be used ------------------------------------
+    body.append(
+        card(
+            "How a forecast could ever reach an order",
+            "<p class='small muted'>A forecast is not a signal, and this page cannot "
+            "configure one. Using it in trading requires a separately specified "
+            "strategy, an explicit operator selection of that strategy, the existing "
+            "risk gate, a broker-side protective stop for every position, and a "
+            "PAPER/LIVE mode the operator chose. Until results exist on your broker's "
+            "data, any strategy built on it is labelled UNVALIDATED.</p>"
+            + "<ul class='list'>"
+            + "".join(f"<li>{escape(str(note))}</li>" for note in view.get("notes") or [])
+            + "</ul>",
+        )
+    )
+
+    return render_shell(ctx, "".join(body))
+
+
 def render_message(ctx: PageContext, *, tone: str, title: str, message: str, actions: str = "") -> str:
     body = (
         f"<div class='notice notice--{escape(tone)}' role='alert'><div><strong>{escape(title)}</strong>"
@@ -2830,6 +3476,7 @@ PAGES = {
     "data": render_data,
     "provider-setup": render_provider_setup,
     "live": render_live,
+    "kronos": render_kronos,
     "health": render_health,
 }
 
@@ -2850,6 +3497,7 @@ __all__ = [
     "render_provider_setup",
     "render_connecting",
     "render_health",
+    "render_kronos",
     "render_live",
     "render_message",
     "render_mode",

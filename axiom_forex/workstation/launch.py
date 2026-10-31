@@ -305,6 +305,41 @@ def _evaluation_platform_builder(args, app, settings_path: Path):
     return build
 
 
+def _wire_kronos(app):
+    """The forecasting panel, with a bar provider taken from the live leg.
+
+    The provider asks the live leg for *bars*.  It never receives the
+    order-capable adapter, and a missing leg, a disconnected terminal, or a
+    symbol the leg is not configured for is a refusal with a reason the page can
+    show.  The panel never falls back to synthetic prices.
+    """
+
+    try:
+        from axiom_forex.kronos.panel import KronosPanel
+    except Exception:  # pragma: no cover - the module ships with the repo
+        return None
+
+    def bars_provider(symbol: str, timeframe: str, count: int):
+        from axiom_forex.kronos.inputs import InputRefused
+
+        leg = getattr(app, "live", None)
+        if leg is None:
+            raise InputRefused(
+                "no_terminal",
+                "no live leg is attached to this workstation, so there are no broker "
+                "bars to forecast",
+            )
+        try:
+            return leg.bars(symbol, timeframe, count=count)
+        except Exception as exc:
+            raise InputRefused(
+                str(getattr(exc, "reason", "") or type(exc).__name__),
+                str(getattr(exc, "detail", "") or ""),
+            ) from exc
+
+    return KronosPanel(root=_repo_root(), bars_provider=bars_provider)
+
+
 def read_only_terminal(session):
     """The session's read-only terminal surface, or a typed refusal.
 
@@ -790,6 +825,11 @@ def main(argv: list[str] | None = None) -> int:
     app.live = _wire_live(args, app, settings=None if args.simulate else settings,
                           settings_path=settings_path)
 
+    # The optional forecasting panel. It is built here but loads nothing: a
+    # model is loaded only when the operator presses Load on /kronos, and the
+    # panel never downloads, installs, or trades.
+    app.kronos = _wire_kronos(app)
+
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and not args.simulate:
         print("Refusing to expose a real terminal session beyond this machine.", file=sys.stderr)
@@ -859,6 +899,11 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         if getattr(app, "runner", None) is not None:
             app.runner.close()
+        if getattr(app, "kronos", None) is not None:
+            try:
+                app.kronos.stop()
+            except Exception:
+                pass
     return 0
 
 

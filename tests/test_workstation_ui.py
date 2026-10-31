@@ -626,6 +626,22 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "live-disarm",
         "live-start",
         "live-stop",
+        # The optional Kronos panel. Every one of these changes what a
+        # *forecast* looks like, or records/inspects one. None of them can
+        # create an order, arm anything, change the mode, or edit a risk limit;
+        # the panel is a separate object the workstation is handed, and it holds
+        # no live or risk surface.
+        "kronos-save",
+        "kronos-load",
+        "kronos-stop",
+        "kronos-forecast",
+        "kronos-schedule-start",
+        "kronos-schedule-stop",
+        "kronos-preset-save",
+        "kronos-preset-load",
+        "kronos-reconcile",
+        "kronos-benchmark",
+        "kronos-inspect-weights",
     }
 
 

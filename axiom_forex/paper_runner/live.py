@@ -153,6 +153,22 @@ class LiveOutcome:
         return payload
 
 
+class LiveDataRefused(Exception):
+    """A read of the broker's data could not be served.  Carries a reason code.
+
+    Used by :meth:`LiveLeg.bars`, so the forecasting panel can ask this leg for
+    bars without ever being handed the order-capable adapter itself.
+    """
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(reason if not detail else f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+    def audit_view(self) -> dict[str, str]:
+        return {"reason": self.reason, "detail": self.detail}
+
+
 class LiveLeg:
     """One live order path, shared by every strategy that may trade live."""
 
@@ -194,6 +210,47 @@ class LiveLeg:
         self.last_reconciliation: dict[str, Any] = {}
 
     # -- read model ------------------------------------------------------
+
+    def bars(self, symbol: str, timeframe: str, *, count: int):
+        """Read the broker's bars for this leg's instrument.  Data only.
+
+        The forecasting panel needs bars and nothing else, so it asks this method
+        instead of being given the adapter: the object it receives here can read
+        prices and has no way to reach an order path.  Every refusal is a reason
+        code the page can show.
+        """
+
+        if self.adapter is None:
+            raise LiveDataRefused(
+                "no_terminal",
+                "no trading adapter is attached, so there are no broker bars",
+            )
+        wanted = str(getattr(self.spec, "canonical_pair", "") or getattr(self.spec, "pair", ""))
+        if str(symbol) != wanted:
+            raise LiveDataRefused(
+                "symbol_not_on_terminal",
+                f"this live leg is configured for {wanted}, not {symbol}",
+            )
+        from datetime import timedelta
+
+        from axiom_forex.kronos.settings import TIMEFRAMES
+
+        seconds = TIMEFRAMES.get(str(timeframe), 0)
+        if seconds <= 0:
+            raise LiveDataRefused("unsupported_timeframe", str(timeframe))
+        end = self.clock()
+        start = end - timedelta(seconds=seconds * (int(count) + 2))
+        try:
+            rows = list(self.adapter.bars(self.spec, str(timeframe), start=start, end=end))
+        except Exception as exc:
+            raise LiveDataRefused(
+                "bars_unavailable", str(getattr(exc, "reason", "") or type(exc).__name__)
+            ) from exc
+        if not rows:
+            raise LiveDataRefused(
+                "no_bars", "the terminal returned no completed bars for that window"
+            )
+        return rows
 
     @property
     def mode_name(self) -> str:
