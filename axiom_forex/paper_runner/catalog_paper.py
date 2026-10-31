@@ -937,9 +937,24 @@ class CatalogPaperTest:
         end = self._clock()
         start = end - timedelta(seconds=seconds * want * 3)
         try:
-            rows = self._quotes.rates(watch.symbol, watch.timeframe, start, end)
+            # Keyword arguments: the terminal's own signature is
+            # ``rates(symbol, timeframe, *, start, end)``.
+            rows = self._quotes.rates(watch.symbol, watch.timeframe, start=start, end=end)
         except Exception:
             return None
+        if not rows:
+            return None
+        now = self._clock()
+        rows = list(rows)
+        # The terminal reports the bar that is still forming.  A decision may only
+        # read *completed* bars, so the forming one is dropped, never half-used.
+        if rows:
+            last_stamp = rows[-1].get("timestamp") if isinstance(rows[-1], Mapping) else None
+            if isinstance(last_stamp, datetime):
+                if last_stamp.tzinfo is None:
+                    last_stamp = last_stamp.replace(tzinfo=timezone.utc)
+                if last_stamp + timedelta(seconds=seconds) > now:
+                    rows = rows[:-1]
         if not rows:
             return None
         rates = rows_from_rates(rows)

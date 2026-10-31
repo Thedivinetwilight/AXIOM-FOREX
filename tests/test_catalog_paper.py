@@ -52,6 +52,7 @@ class FakeTick:
 
 
 def _bars(closes, *, start: datetime, seconds: int = 900):
+
     rows = []
     previous = closes[0]
     for index, close in enumerate(closes):
@@ -99,7 +100,9 @@ class FakeQuotes:
     def rates(self, symbol, timeframe, start, end):
         if symbol not in self._symbols:
             raise LookupError("symbol unavailable")
-        return _bars(self._closes, start=NOW - timedelta(seconds=900 * len(self._closes)))
+        # One extra step: the newest bar in this feed has already *closed*, so no
+        # half-formed bar is ever handed to a decision.
+        return _bars(self._closes, start=NOW - timedelta(seconds=900 * (len(self._closes) + 1)))
 
 
 def _watch(candidate_id: str = ROW_CANDIDATE.candidate_id) -> Watch:
@@ -254,3 +257,33 @@ def test_symbol_facts_are_read_from_the_terminal_shaped_record_list(tmp_path):
     positions = test.snapshot()["positions"]
     assert positions, "the terminal-shaped record must still price a real fill"
     assert positions[0]["lots"] == 0.1
+
+
+def test_bars_are_requested_with_the_terminals_own_keyword_signature(tmp_path):
+    """The real terminal's ``rates`` takes ``start``/``end`` by keyword only."""
+
+    class KeywordOnlyQuotes(FakeQuotes):
+        def rates(self, symbol, timeframe, *, start, end):
+            return super().rates(symbol, timeframe, start, end)
+
+    quotes = KeywordOnlyQuotes(age_seconds=1.0)
+    test = _test(tmp_path, quotes)
+    test._cycle()
+    assert test.snapshot()["orders"], "keyword-only rates must still be read"
+
+
+def test_the_bar_that_is_still_forming_is_never_used_for_a_decision(tmp_path):
+    """Hand the test a bar that closes in the future: it must be dropped."""
+
+    class FormingBarQuotes(FakeQuotes):
+        def rates(self, symbol, timeframe, start, end):
+            rows = super().rates(symbol, timeframe, start=start, end=end)
+            rows.append(dict(rows[-1], timestamp=NOW))  # started now, still forming
+            return rows
+
+    quotes = FormingBarQuotes(age_seconds=1.0)
+    test = _test(tmp_path, quotes)
+    test._cycle()
+    series = test._fetch_bars(test.watches[0])
+    assert series is not None
+    assert series.timestamps[-1] < NOW, "the forming bar must not be in the series"
