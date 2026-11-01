@@ -255,6 +255,12 @@ entered. The card shows the exact broker symbol it applies to, the entered value
 distance in both points and price. Nothing is pre-filled, and the unit is a choice
 you have to make: a bare number is refused rather than read as points or pips.
 
+With a plan armed the card acts on that plan's symbol. Before a plan exists it asks
+you to name the symbol from the pairs your provider setup declares, because arming
+needs a usable stop and the stop control must not need an armed plan first; nothing
+is pre-selected either way. A distance is stored per symbol, and the pair you name
+is the only symbol it applies to.
+
 The value is judged against the connected terminal's own symbol record *before* it
 is written, and only the `protective_stops` section of `mt5_settings.local.json`
 changes — every other key keeps its value. The write is refused while trading is

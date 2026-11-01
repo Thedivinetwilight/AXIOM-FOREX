@@ -1607,6 +1607,15 @@ class WorkstationApp:
         pair = field("pair")
         distance = field("distance")
         unit = field("unit")
+        if not pair:
+            # An unnamed symbol is not a per-symbol distance.  Refused here rather
+            # than resolved against whatever the stack builder happens to return.
+            self._log("stop setting refused: no symbol chosen")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/live",
+                "Choose the symbol this distance applies to. Nothing was saved.",
+            )
         if unit not in {"points", "pips"}:
             self._log("stop setting refused: no unit chosen")
             return (

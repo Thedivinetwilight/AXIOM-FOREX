@@ -1275,9 +1275,18 @@ class LiveTrading:
 
         adapter = self.adapter
         pair = str((self.plan or {}).get("pair") or "")
+        # The symbols the provider setup declares.  With no plan armed there is no
+        # pair to fill in, and refusing to show the control would be a deadlock:
+        # arming needs a stop, and the stop would be unreachable without a plan.
+        # The operator names the symbol explicitly instead -- still no default.
+        try:
+            pairs = list(self.symbol_choices())
+        except Exception:
+            pairs = []
         base: dict[str, Any] = {
             "available": False,
             "pair": pair,
+            "pairs": pairs,
             "broker_symbol": "",
             "declared": "",
             "file_declared": "",
@@ -1312,6 +1321,8 @@ class LiveTrading:
             base["detail"] = type(exc).__name__
             return base
         result["available"] = True
+        result.setdefault("pairs", pairs)
+        result.setdefault("pair", pair)
         result["file_declared"] = file_text
         result["pending"] = bool(
             file_text and file_text.strip() != str(result.get("declared") or "").strip()
@@ -1380,6 +1391,13 @@ class LiveTrading:
 
         from ..config.mt5 import MT5SettingsFileError, write_protective_stop
 
+        if not str(pair or "").strip():
+            return {
+                "saved": False,
+                "reason": "live_symbol_unresolved",
+                "message": "Choose the symbol this distance applies to; a distance is "
+                "stored per symbol and none is guessed.",
+            }
         if (
             self.armed
             or bool(getattr(self.adapter, "armed", False))

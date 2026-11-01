@@ -3397,8 +3397,14 @@ def _broker_stop_settings_card(view: Mapping[str, Any], nonce: str) -> str:
             )
         )
 
+    pairs = [str(item) for item in (setting.get("pairs") or ())]
     rows = [
-        ("Pair", escape(pair) if pair else "<span class='small muted'>no plan yet</span>"),
+        (
+            "Pair",
+            escape(pair)
+            if pair
+            else "<span class='small muted'>not chosen yet</span>",
+        ),
         ("Broker symbol", present(symbol)),
         ("Entered value", (
             f"<span class='mono'>{escape(declared)}</span> "
@@ -3428,16 +3434,7 @@ def _broker_stop_settings_card(view: Mapping[str, Any], nonce: str) -> str:
                 + ". Reconnect for the file to be read; until then no live entry is sent.",
             )
         )
-    if not pair:
-        body.append(
-            notice(
-                "muted",
-                "Arm a plan first",
-                "This distance is configured per symbol, so the page needs a plan to know "
-                "which symbol LIVE will trade. Nothing is guessed from a symbol list.",
-            )
-        )
-    elif armed or running:
+    if armed or running:
         body.append(
             notice(
                 "warn",
@@ -3446,12 +3443,36 @@ def _broker_stop_settings_card(view: Mapping[str, Any], nonce: str) -> str:
                 "would be a knob that does nothing, so the write is refused.",
             )
         )
+    elif not pair and not pairs:
+        body.append(
+            notice(
+                "muted",
+                "No symbol to configure yet",
+                "Declare the pairs you trade in the provider setup, or arm a plan naming "
+                "one; this page will not invent a symbol for you.",
+            )
+        )
     else:
+        if pair:
+            choose = f"<input type='hidden' name='pair' value='{escape(pair)}'>"
+        else:
+            choose = (
+                "<label class='field'><span>Symbol this distance applies to</span>"
+                "<select name='pair' required>"
+                "<option value=''>Choose the symbol…</option>"
+                + "".join(
+                    f"<option value='{escape(item)}'>{escape(item)}</option>"
+                    for item in pairs
+                )
+                + "</select><span class='small muted'>No plan is armed, so nothing is "
+                "pre-selected: the distance is stored for the pair you name here.</span>"
+                "</label>"
+            )
         body.append(
             "<form method='post' action='/actions/live-stop-settings' class='stack'>"
             f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
-            f"<input type='hidden' name='pair' value='{escape(pair)}'>"
-            "<label class='field'><span>Distance</span>"
+            + choose
+            + "<label class='field'><span>Distance</span>"
             "<input type='text' name='distance' inputmode='decimal' autocomplete='off' "
             "placeholder='e.g. 20' required>"
             "<span class='small muted'>One positive number. Nothing is pre-filled and "

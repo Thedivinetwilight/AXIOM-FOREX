@@ -18,6 +18,7 @@ No terminal, account, or order is involved.
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -477,3 +478,70 @@ def test_the_note_about_the_watched_limit_never_denies_the_broker_stop():
     assert "sends no" not in text
     assert "broker-side stop" in text
     assert "separate" in text
+
+
+# -- the control is reachable before a plan exists --------------------------
+
+
+def test_without_a_plan_the_control_offers_the_declared_symbols():
+    """Arming needs a stop; the stop must not need an armed plan first."""
+
+    html = page(usable_setting(pair="", pairs=["EUR/USD", "GBP/USD"]))
+    assert "not chosen yet" in html
+    assert "<select name='pair' required>" in html
+    assert "<option value=''>Choose the symbol…</option>" in html
+    assert "<option value='EUR/USD'>EUR/USD</option>" in html
+    # Nothing is pre-selected, and no pair is smuggled in as a hidden field.
+    assert "selected='selected'" not in html
+    assert not re.search(r"<option[^>]*\bselected\b", html)
+    assert "name='pair' value=" not in html
+
+
+def test_with_a_plan_the_symbol_is_fixed_to_it():
+    html = page(usable_setting(pairs=["EUR/USD", "GBP/USD"]))
+    assert "<input type='hidden' name='pair' value='EUR/USD'>" in html
+    assert "<select name='pair'" not in html
+
+
+def test_with_neither_a_plan_nor_a_declared_symbol_the_control_says_so():
+    html = page(usable_setting(pair="", pairs=[]))
+    assert "No symbol to configure yet" in html
+    assert "action='/actions/live-stop-settings'" not in html
+
+
+def test_a_stop_can_be_saved_before_any_plan_exists(tmp_path):
+    """The order was: arm needs a stop, the stop needed a plan. Now it does not."""
+
+    path, _ = settings_document(tmp_path)
+    instance = LiveTrading(
+        adapter=StubAdapter(),
+        stack_builder=lambda pair: SimpleNamespace(spec=SPEC),
+        settings_path=tmp_path / "mt5_settings.local.json",
+        paired_symbols=["EUR/USD", "GBP/USD"],
+    )
+    assert instance.plan == {}
+    assert instance.stop_setting()["pairs"] == ["EUR/USD", "GBP/USD"]
+
+    result = instance.save_stop_setting("EUR/USD", "20 pips")
+
+    assert result["saved"] is True
+    assert json.loads(path.read_text(encoding="utf-8"))["protective_stops"]["EUR/USD"] == (
+        "20 pips"
+    )
+
+
+def test_the_action_refuses_an_empty_symbol_without_touching_the_file(tmp_path):
+    path, _ = settings_document(tmp_path)
+    before = path.read_text(encoding="utf-8")
+    app = workstation()
+    recording = RecordingLive()
+    recording.save_stop_setting = lambda pair, text: (_ for _ in ()).throw(
+        AssertionError("the workflow must not be asked to save an unnamed symbol")
+    )
+    app.live = recording
+    status, path_part, message = app.act(
+        "live-stop-settings", form(app, pair="", distance="20", unit="pips")
+    )
+    assert status == 303 and path_part == "/live"
+    assert "symbol" in message.lower()
+    assert path.read_text(encoding="utf-8") == before
