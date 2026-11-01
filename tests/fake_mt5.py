@@ -138,6 +138,12 @@ class FakeMT5:
         self.history_available = True
         self.last_error_value = (0, "ok")
         self.fail_symbols_get = False
+        #: Real ``symbols_get`` returns complete records; a wrapper in the wild may
+        #: return bare names, which is what this switch models.
+        self.symbols_get_names_only = False
+        #: Every ``symbol_select`` call, so a test can prove reading a specification
+        #: never writes to the operator's Market Watch.
+        self.symbol_select_calls: list[tuple[str, bool]] = []
         self.fail_ticks = False
         self.fail_history = False
         #: Called with the request inside ``order_send`` before answering.
@@ -206,11 +212,13 @@ class FakeMT5:
         if self.fail_symbols_get:
             self.last_error_value = (1, "symbols unavailable")
             return None
-        return tuple(
-            _ns(name=name) for name in sorted(self.symbols)
-        )
+        if self.symbols_get_names_only:
+            return tuple(_ns(name=name) for name in sorted(self.symbols))
+        # The official integration returns each symbol's whole record here.
+        return tuple(_ns(**self.symbols[name]) for name in sorted(self.symbols))
 
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
+        self.symbol_select_calls.append((symbol, bool(enable)))
         return symbol in self.symbols
 
     def symbol_info(self, symbol: str):

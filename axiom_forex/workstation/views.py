@@ -25,10 +25,15 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from . import guide
 from .context import PageContext, data_class_label
-from .symbols import build_catalogue, catalogue_message
+from .symbols import MAX_EXCLUDED_SHOWN, SymbolRead, build_catalogue, catalogue_message
 
 APP_NAME = "AXIOM"
 APP_SUBTITLE = "FOREX"
+
+#: How many symbol rows the research page draws.  The terminal can report a few
+#: thousand instruments and every one of them is read and classified; this bounds
+#: only the table, which says how many rows it left undrawn.
+MAX_SYMBOL_ROWS_SHOWN = 200
 
 #: Navigation, in order.  ``icon`` is an inline SVG path (no icon font).
 #: The whole navigation, in the order the sidebar shows it.  The guided start
@@ -1659,7 +1664,7 @@ def _symbol_facts_for_start(ctx: PageContext, catalog: Mapping[str, Any]) -> dic
             "select_all": int(counts.get("usable") or 0),
             "source": "catalog",
         }
-    catalogue = build_catalogue(_symbol_records(ctx.wizard.session), sample=ctx.terminal.simulated)
+    catalogue = _catalogue_of(ctx.wizard.session, sample=ctx.terminal.simulated)
     return {
         "available": bool(catalogue.available),
         "reported": int(catalogue.counts.get("reported") or 0),
@@ -2002,21 +2007,44 @@ def render_setup(ctx: PageContext) -> str:
     return render_shell(ctx, body)
 
 
-def _symbol_records(session: Any) -> tuple[Mapping[str, Any], ...]:
-    """The connected source's symbols, specification included.
+def _symbol_read(session: Any) -> SymbolRead:
+    """The connected source's symbols, specification *and* coverage included.
 
     Read on the page that needs it, so no other page pays for a symbol walk, and
     never raises into the page: a source that cannot describe its symbols simply
-    yields no records, and nothing is then treated as verified.
+    yields no records, and nothing is then treated as verified.  A source that only
+    offers ``symbol_records`` is wrapped so the page can still count what it read.
     """
 
+    reader = getattr(session, "symbol_read", None)
+    if callable(reader):
+        try:
+            read = reader()
+        except Exception:
+            read = None
+        if isinstance(read, SymbolRead):
+            return read
     reader = getattr(session, "symbol_records", None)
-    if not callable(reader):
-        return ()
-    try:
-        return tuple(reader() or ())
-    except Exception:
-        return ()
+    if callable(reader):
+        try:
+            records = tuple(reader() or ())
+        except Exception:
+            records = ()
+        return SymbolRead(records=records, reported=len(records), examined=len(records))
+    return SymbolRead()
+
+
+def _catalogue_of(session: Any, *, sample: bool) -> Any:
+    """Build the catalogue from a read, keeping its coverage counts honest."""
+
+    read = _symbol_read(session)
+    return build_catalogue(
+        read.records,
+        sample=sample,
+        reported_total=read.reported,
+        examined=read.examined,
+        specs_reported=read.bulk,
+    )
 
 
 def _symbol_picker(
@@ -2118,17 +2146,32 @@ def _symbol_picker(
 
     if catalogue.excluded:
         # Collapsed by default, and the list scrolls inside its own box once open:
-        # a broker can report a hundred instruments that are not forex pairs, and
-        # none of them should push the confirmation off the page.
+        # a broker can report thousands of instruments that are not forex pairs, and
+        # none of them should push the confirmation off the page.  Only the *drawn*
+        # rows are capped -- every reported symbol was classified, and the summary
+        # states how many rows are not drawn rather than hiding the cap.
+        shown = catalogue.excluded[:MAX_EXCLUDED_SHOWN]
+        hidden = len(catalogue.excluded) - len(shown)
+        summary = f"{len(catalogue.excluded)} reported symbol(s) not selectable — why"
+        if hidden:
+            summary += f" (first {len(shown)} shown)"
         body += (
             "<details class='disclosure'><summary>"
-            f"{len(catalogue.excluded)} reported symbol(s) not selectable — why</summary>"
+            f"{summary}</summary>"
             "<div class='scroll-list' tabindex='0' role='group' "
             "aria-label='Reported symbols that cannot be selected, with the reason'>"
             + _symbol_reason_list(
-                [(item["broker_symbol"], item["reason"]) for item in catalogue.excluded]
+                [(item["broker_symbol"], item["reason"]) for item in shown]
             )
-            + "</div></details>"
+            + "</div>"
+            + (
+                f"<p class='small muted' style='margin:6px 0 0'>The other {hidden} excluded "
+                "symbol(s) are counted but not drawn here, to keep this page usable. Every "
+                "reported symbol was classified.</p>"
+                if hidden
+                else ""
+            )
+            + "</details>"
         )
 
     if sample:
@@ -2221,7 +2264,7 @@ def render_account(ctx: PageContext) -> str:
             + "</p>"
         )
 
-    catalogue = build_catalogue(_symbol_records(ctx.wizard.session), sample=sample)
+    catalogue = _catalogue_of(ctx.wizard.session, sample=sample)
     selected = tuple(view["symbols_selected"])
     symbol_body = _symbol_picker(ctx, catalogue, selected, sample=sample)
 
@@ -2899,7 +2942,21 @@ def render_provider_setup(ctx: PageContext) -> str:
                     ("Leverage", escape(str(facts.get("leverage", ""))) or "—"),
                     ("Server", escape(str(facts.get("server", ""))) or "—"),
                     ("Margin mode", escape(str(facts.get("margin_mode", ""))) or "—"),
-                    ("Symbols in Market Watch", escape(str(len(facts.get("symbols") or [])))),
+                    (
+                        "Symbols in Market Watch",
+                        escape(
+                            str(
+                                facts.get("symbols_total")
+                                or len(facts.get("symbols") or [])
+                            )
+                        )
+                        + (
+                            f" ({len(facts.get('symbols') or [])} names carried here)"
+                            if int(facts.get("symbols_total") or 0)
+                            > len(facts.get("symbols") or [])
+                            else ""
+                        ),
+                    ),
                 ]
             ),
             hint="These are read from the terminal; they are the only fields AXIOM fills in for you.",
@@ -4586,6 +4643,10 @@ def render_quick_setup(ctx: PageContext) -> str:
         )
 
     if symbols:
+        counts = dict(view.get("symbol_counts") or {})
+        reported = int(counts.get("reported") or len(symbols))
+        examined = int(counts.get("examined") or len(symbols))
+        drawn = symbols[:MAX_SYMBOL_ROWS_SHOWN]
         symbol_rows = "".join(
             "<tr>"
             f"<td class='mono'>{escape(str(item.get('broker_symbol', '')))}</td>"
@@ -4596,21 +4657,37 @@ def render_quick_setup(ctx: PageContext) -> str:
             f"<td>{escape(str(item.get('swap_state', '')))}</td>"
             f"<td class='small muted'>{escape(', '.join(item.get('missing') or []) or 'nothing')}</td>"
             "</tr>"
-            for item in symbols
+            for item in drawn
         )
+        hint = (
+            "A pair is named only when the terminal reported both currency legs. A "
+            "broker's suffix never becomes part of the pair name."
+        )
+        if examined < reported:
+            hint += (
+                f" {examined} of {reported} reported names were read; the other "
+                f"{reported - examined} could not be, so they were not classified."
+            )
+        if len(symbols) > len(drawn):
+            hint += (
+                f" This table draws the first {len(drawn)} of the {len(symbols)} "
+                "symbols that were read, to keep the page usable."
+            )
         body.append(
             card(
-                "The symbols your terminal reported",
+                "The symbols your terminal reported"
+                + (
+                    f" — first {len(drawn)} of {len(symbols)}"
+                    if len(symbols) > len(drawn)
+                    else ""
+                ),
                 "<div class='table-wrap'><table><thead><tr>"
                 "<th scope='col'>Broker symbol</th><th scope='col'>Pair</th>"
                 "<th scope='col'>Min volume</th><th scope='col'>Step</th>"
                 "<th scope='col'>Stops level</th><th scope='col'>Swap</th>"
                 "<th scope='col'>Not reported</th>"
                 f"</tr></thead><tbody>{symbol_rows}</tbody></table></div>",
-                hint=(
-                    "A pair is named only when the terminal reported both currency "
-                    "legs. A broker's suffix never becomes part of the pair name."
-                ),
+                hint=hint,
             )
         )
     else:
@@ -5126,18 +5203,22 @@ def render_catalog_section(ctx: PageContext) -> str:
     # 2. the forex-only symbol offer
     if symbols.get("available"):
         counted = dict(symbols.get("counts") or {})
-        body.append(
-            notice(
-                "ok",
-                "Forex symbols from your terminal",
-                f"{counted.get('forex_pairs', 0)} currency pair(s) of "
-                f"{counted.get('reported', 0)} reported symbol(s); "
-                f"{counted.get('excluded', 0)} excluded as not a pair (metals, share "
-                "CFDs, indices). Majors first: "
-                + ", ".join(symbols.get("majors") or ())
-                + ".",
-            )
+        note = (
+            f"{counted.get('forex_pairs', 0)} currency pair(s) of "
+            f"{counted.get('reported', 0)} reported symbol(s); "
+            f"{counted.get('excluded', 0)} excluded as not a pair (metals, share "
+            "CFDs, indices). Majors first: "
+            + ", ".join(symbols.get("majors") or ())
+            + "."
         )
+        not_examined = int(counted.get("not_examined", 0) or 0)
+        if not_examined:
+            note += (
+                f" Only {counted.get('examined', 0)} of those names could be read from "
+                f"this terminal wrapper, so {not_examined} name(s) were not classified "
+                "and are not counted above."
+            )
+        body.append(notice("ok", "Forex symbols from your terminal", note))
         choices = [dict(item) for item in symbols.get("choices") or []]
         body.append(
             "<p class='small'>Recommended now: "
@@ -5157,7 +5238,13 @@ def render_catalog_section(ctx: PageContext) -> str:
             ]
             body.append(
                 table(
-                    "Forex symbols the terminal reports",
+                    "Forex symbols the terminal reports"
+                    + (
+                        f" — first {len(rows)} of the "
+                        f"{counted.get('choices_shown', len(choices))} this page carries"
+                        if len(choices) > len(rows)
+                        else ""
+                    ),
                     (
                         ("broker_symbol", "Symbol"),
                         ("pair", "Pair"),
@@ -5176,6 +5263,15 @@ def render_catalog_section(ctx: PageContext) -> str:
                     f"{escape(str(item.get('broker_symbol', '')))}"
                     f" ({escape(str(item.get('kind', '')))})"
                     for item in excluded[:10]
+                )
+                + (
+                    # The count comes from the classification, not from the capped
+                    # list this page carries, so it names every excluded symbol.
+                    f" — and {int(counted.get('excluded', len(excluded))) - 10} more, all "
+                    "counted; every excluded symbol and its reason is on the Account "
+                    "and symbols page."
+                    if int(counted.get("excluded", len(excluded))) > 10
+                    else ""
                 )
                 + "</p>"
             )

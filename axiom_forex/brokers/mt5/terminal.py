@@ -161,6 +161,46 @@ def _utc(value: Any) -> datetime | None:
         return None
 
 
+#: The specification fields the symbol catalogue needs.  ``symbols_get`` returns
+#: all of them in one call, so nothing has to be read one symbol at a time.
+#: ``workstation/symbols.py`` keeps its own copy of the subset it renders; the two
+#: must agree on the currency legs, which is asserted by a test.
+SYMBOL_SPEC_FIELDS: tuple[str, ...] = (
+    "description",
+    "currency_base",
+    "currency_profit",
+    "digits",
+    "point",
+    "trade_contract_size",
+    "trade_mode",
+    "volume_min",
+    "volume_step",
+    "volume_max",
+)
+
+
+def _mapping_of(value: Any) -> Mapping[str, Any]:
+    """A symbol record's fields as a mapping, from a namedtuple, dict or object."""
+
+    if isinstance(value, str) or value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return value
+    fields = getattr(value, "_asdict", None)
+    if callable(fields):
+        try:
+            mapping = fields()
+        except Exception:
+            mapping = None
+        if isinstance(mapping, Mapping):
+            return mapping
+    return {
+        field: getattr(value, field)
+        for field in SYMBOL_SPEC_FIELDS
+        if hasattr(value, field)
+    }
+
+
 def _decimal(value: Any, default: Decimal | None = None) -> Decimal | None:
     if value is None:
         return default
@@ -495,6 +535,49 @@ class MT5Terminal:
                 names.append(name.strip())
         return sorted(set(names))
 
+    def symbol_snapshots(self, group: str | None = None) -> list[dict[str, Any]]:
+        """Every reported symbol with its specification, from one terminal call.
+
+        ``symbols_get`` returns complete symbol records, so the currency legs, the
+        point size and the trade mode for the *whole* symbol list arrive together.
+        That single call is the point of this method: the symbol page used to keep
+        only the names from it and then read specifications for the first N names in
+        alphabetical order, so on a real broker -- thousands of CFD tickers before
+        ``EURUSD`` -- only the alphabetically earliest pairs were ever examined and
+        every other pair was invisible.
+
+        A wrapper that returns bare names produces name-only snapshots; the caller
+        then falls back to per-symbol reads.  Either way no field is invented and no
+        name is rewritten.
+        """
+
+        self._require_connection()
+        try:
+            result = (
+                self.module.symbols_get(group) if group else self.module.symbols_get()
+            )
+        except Exception as exc:
+            raise MT5DataRefused("mt5_symbols_unavailable", type(exc).__name__) from exc
+        snapshots: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in _sequence(result):
+            name = entry.strip() if isinstance(entry, str) else _field(entry, "name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            name = name.strip()
+            if name in seen:
+                continue
+            seen.add(name)
+            record: dict[str, Any] = {"name": name}
+            fields = _mapping_of(entry)
+            for field in SYMBOL_SPEC_FIELDS:
+                value = fields.get(field)
+                if value is not None:
+                    record[field] = value
+            snapshots.append(record)
+        snapshots.sort(key=lambda item: item["name"])
+        return snapshots
+
     def symbol_info(self, symbol: str) -> MT5SymbolInfo:
         self._require_connection()
         try:
@@ -503,11 +586,11 @@ class MT5Terminal:
             raise MT5DataRefused("mt5_symbol_info_failed", type(exc).__name__) from exc
         if info is None:
             raise MT5DataRefused("mt5_symbol_not_found", symbol)
-        # Some brokers hide a symbol until it is selected in Market Watch.
-        try:
-            self.module.symbol_select(symbol, True)
-        except Exception:
-            pass
+        # Reading a specification does NOT require the symbol to be in Market
+        # Watch, and this used to call ``symbol_select(symbol, True)`` here -- a
+        # write that silently added a hundred-odd symbols to the operator's own
+        # Market Watch every time the symbol page was opened.  Reading is now
+        # read-only: nothing in this method changes the terminal or the account.
         point = _decimal(_field(info, "point"))
         contract = _decimal(_field(info, "trade_contract_size"))
         volume_min = _decimal(_field(info, "volume_min"))

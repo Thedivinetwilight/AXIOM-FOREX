@@ -93,7 +93,13 @@ class ResearchPanel:
     runner: Any = None
     #: Frames to read from the terminal per symbol: a year of 1m bars is large,
     #: so the panel refuses rather than truncating (see ``history.MAX_ROWS``).
-    symbol_limit: int = 60
+    #:
+    #: ``None`` means "every symbol the terminal reports".  It used to mean the first
+    #: 60 *names*, which is an alphabetical window rather than a symbol policy: on a
+    #: real broker the equity CFDs sort ahead of the forex board, so the forty-odd
+    #: pairs behind them were never read.  The terminal adapter now returns
+    #: specifications in bulk, and a bounded fallback reports what it did not reach.
+    symbol_limit: int | None = None
     budget_seconds: float = 540.0
 
     _report: SweepReport | None = field(default=None, init=False, repr=False)
@@ -174,6 +180,15 @@ class ResearchPanel:
         view: dict[str, Any] = {
             "available": True,
             "facts": facts.audit_view(),
+            #: How many symbols the terminal reported, how many were classified, and
+            #: the size of any gap between the two.  A page must not present the
+            #: second number as the first.
+            "symbol_counts": {
+                "reported": facts.symbols_seen,
+                "examined": facts.symbols_examined or len(facts.symbols),
+                "not_examined": facts.not_examined,
+                "bulk": facts.symbols_bulk,
+            },
             "symbols": [
                 {
                     "broker_symbol": item.broker_symbol,

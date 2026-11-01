@@ -129,7 +129,10 @@ def test_nothing_is_read_from_the_terminal_without_a_symbol_list():
         def symbol_names(self):
             raise RuntimeError("terminal said no")
 
-    assert records_from_terminal(Silent(), 10) == ()
+    read = records_from_terminal(Silent(), 10)
+
+    assert read.records == ()
+    assert read.reported == 0 and read.examined == 0
 
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ zero commission is a claim, and it would make every result look better.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
@@ -299,9 +299,32 @@ class TerminalFacts:
     leverage: Fact = field(default_factory=lambda: Fact("account_leverage"))
     account_mode: Fact = field(default_factory=lambda: Fact("account_mode"))
     symbols: tuple[SymbolFacts, ...] = ()
+    #: Names the terminal reported, and how many of them were classified.  The two
+    #: differ only when the reader could not return specifications in bulk; the
+    #: difference is then reported rather than hidden.
+    symbols_reported: int = 0
+    symbols_examined: int = 0
+    #: True when one terminal call carried the specifications.
+    symbols_bulk: bool = False
     read_at: str = ""
     error: str = ""
     notes: tuple[str, ...] = ()
+
+    @property
+    def symbols_seen(self) -> int:
+        """How many symbols the terminal reported."""
+
+        return self.symbols_reported or len(self.symbols)
+
+    @property
+    def not_examined(self) -> int:
+        """How many reported names were never read.  Zero unless the read was cut."""
+
+        return max(0, self.symbols_seen - (self.symbols_examined or len(self.symbols)))
+
+    @property
+    def symbols_truncated(self) -> bool:
+        return self.not_examined > 0
 
     @property
     def state(self) -> str:
@@ -350,6 +373,10 @@ class TerminalFacts:
             "leverage": self.leverage.audit_view(),
             "account_mode": self.account_mode.audit_view(),
             "symbols": [item.audit_view() for item in self.symbols],
+            "symbols_reported": self.symbols_seen,
+            "symbols_examined": self.symbols_examined or len(self.symbols),
+            "symbols_truncated": self.symbols_truncated,
+            "symbols_bulk": self.symbols_bulk,
             "read_at": self.read_at,
             "error": self.error,
             "state": self.state,
@@ -368,11 +395,64 @@ UNKNOWN_NOTES: tuple[str, ...] = (
 )
 
 
-def observe_terminal(reader: Any, *, symbol_limit: int = 300) -> TerminalFacts:
+#: Fields whose presence proves a bulk answer described symbols rather than naming
+#: them.  An empty value is an answer ("not a pair"); a missing key is not.
+SYMBOL_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "currency_base",
+    "currency_profit",
+    "digits",
+    "point",
+    "trade_mode",
+)
+
+#: How many per-name reads a *fallback* may make when a reader cannot return
+#: specifications in bulk.  It is a safety bound, not a policy: the result reports
+#: exactly how many names it did not reach, so a bounded read is never mistaken for
+#: the whole symbol list.
+MAX_FALLBACK_READS = 300
+
+
+def _carries_specifications(snapshots: Any) -> bool:
+    """True when a bulk answer described symbols, not just named them."""
+
+    return any(
+        field in entry
+        for entry in (snapshots or ())
+        if isinstance(entry, Mapping)
+        for field in SYMBOL_EVIDENCE_FIELDS
+    )
+
+
+def _symbols_from_snapshots(snapshots: Any, *, state: str) -> tuple[SymbolFacts, ...]:
+    """Facts for every symbol in one bulk answer.  No field is invented."""
+
+    symbols: list[SymbolFacts] = []
+    for entry in snapshots or ():
+        if not isinstance(entry, Mapping) and not hasattr(entry, "_asdict"):
+            continue
+        row = dict(entry._asdict()) if hasattr(entry, "_asdict") else dict(entry)
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        captured = symbol_facts(row, state=state)
+        if not captured.broker_symbol:
+            captured = replace(captured, broker_symbol=name)
+        symbols.append(captured)
+    return tuple(symbols)
+
+
+def observe_terminal(reader: Any, *, symbol_limit: int | None = None) -> TerminalFacts:
     """Read account facts and symbol specifications.  Never raises.
 
     ``reader`` is anything exposing ``status()``, ``symbol_names()`` and
-    ``symbol_info(name)`` -- the read-only terminal in production, a fake in tests.
+    ``symbol_info(name)`` -- the read-only terminal in production, a fake in tests --
+    and ideally ``symbol_snapshots()``, which returns every reported symbol *with* its
+    specification in one call.  That path is tried first, because reading names first
+    and then the first N specifications is an alphabetical window: on a real broker,
+    whose equity CFDs sort ahead of the forex board, it hides every pair after them.
+
+    ``symbol_limit`` bounds the fallback path only, and a bounded read says so through
+    ``symbols_reported`` / ``symbols_examined``.  Nothing here writes anywhere.
     """
 
     if reader is None:
@@ -410,6 +490,47 @@ def observe_terminal(reader: Any, *, symbol_limit: int = 300) -> TerminalFacts:
         "the terminal did not report whether this is a demo or a real account",
     )
 
+    # -- symbols: one bulk call first -------------------------------------
+    bulk_reader = getattr(reader, "symbol_snapshots", None)
+    if callable(bulk_reader):
+        try:
+            snapshots = list(bulk_reader() or ())
+        except Exception:
+            snapshots = []
+        if _carries_specifications(snapshots):
+            # An explicit caller bound is honoured here too, and reported the same
+            # way: the count of what the terminal reported comes from the full answer,
+            # never from the slice.
+            reported = len(snapshots)
+            kept = snapshots if symbol_limit is None else snapshots[: max(1, int(symbol_limit))]
+            symbols = _symbols_from_snapshots(
+                kept, state=SIMULATED if simulated else OBSERVED
+            )
+            if symbols:
+                notes = list(UNKNOWN_NOTES)
+                if len(symbols) < reported:
+                    notes.append(
+                        f"The read was limited to {len(symbols)} of {reported} reported "
+                        "names by the caller, so the rest were not classified."
+                    )
+                return TerminalFacts(
+                    source_kind=kind,
+                    connected=bool(_read(status, "connected")),
+                    simulated=simulated,
+                    company=company,
+                    server=server,
+                    account_fingerprint=fingerprint,
+                    currency=currency,
+                    leverage=leverage,
+                    account_mode=mode,
+                    symbols=symbols,
+                    symbols_reported=reported,
+                    symbols_examined=len(symbols),
+                    symbols_bulk=True,
+                    read_at=_utc().isoformat(),
+                    notes=tuple(notes),
+                )
+
     names: Iterable[Any] = ()
     try:
         names = reader.symbol_names() or ()
@@ -429,8 +550,18 @@ def observe_terminal(reader: Any, *, symbol_limit: int = 300) -> TerminalFacts:
             notes=UNKNOWN_NOTES,
         )
 
+    listed = [name for name in list(names) if str(name).strip()]
+    bound = MAX_FALLBACK_READS if symbol_limit is None else max(1, int(symbol_limit))
     symbols: list[SymbolFacts] = []
-    for name in list(names)[: max(1, int(symbol_limit))]:
+    notes = list(UNKNOWN_NOTES)
+    reached = listed[:bound]
+    if len(reached) < len(listed):
+        notes.append(
+            f"This reader could not return symbol specifications in bulk, so only "
+            f"{len(reached)} of {len(listed)} reported names were read. The rest were "
+            "not classified."
+        )
+    for name in reached:
         text = str(name).strip()
         if not text:
             continue
@@ -456,14 +587,19 @@ def observe_terminal(reader: Any, *, symbol_limit: int = 300) -> TerminalFacts:
         leverage=leverage,
         account_mode=mode,
         symbols=tuple(symbols),
+        symbols_reported=len(listed),
+        symbols_examined=len(reached),
+        symbols_bulk=False,
         read_at=_utc().isoformat(),
-        notes=UNKNOWN_NOTES,
+        notes=tuple(notes),
     )
 
 
 __all__ = [
     "Fact",
+    "MAX_FALLBACK_READS",
     "OBSERVED",
+    "SYMBOL_EVIDENCE_FIELDS",
     "SIMULATED",
     "SWAP_CURRENCY_DEPOSIT",
     "SWAP_CURRENCY_MARGIN",

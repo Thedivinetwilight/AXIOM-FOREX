@@ -46,8 +46,16 @@ CONNECTING = "CONNECTING"
 CONNECTED = "CONNECTED"
 ERROR = "ERROR"
 
-#: How many symbols the snapshot carries to the browser.
+#: How many symbol *names* the status snapshot carries to the browser.  This is a
+#: payload cap for one JSON field only: it never limits what is classified, because
+#: the symbol catalogue reads the whole reported list.
 MAX_SYMBOLS = 120
+
+#: How many per-symbol specification reads the fallback path may make when a
+#: terminal adapter cannot return specifications in bulk.  Generous on purpose --
+#: it exists so a pathological symbol list cannot stall the page, and the page says
+#: how many names it did not reach rather than pretending the list ended there.
+MAX_SYMBOL_READS = 1000
 
 
 def _utc_now() -> datetime:
@@ -178,20 +186,29 @@ class MT5ObservationSource:
             return None
         return self._terminal
 
-    def symbol_records(self) -> Sequence[dict[str, Any]]:
-        """The terminal's symbols, with the specification fields it reports.
+    def symbol_read(self) -> Any:
+        """The terminal's whole symbol list with its specifications, read-only.
 
-        Read-only, and never filled in: a symbol the terminal returns without a
-        specification comes back with just its name, so the page can say it could
-        not be verified instead of guessing what it is.  Broker names are kept
-        byte for byte, suffixes included.
+        Returns the :class:`~.symbols.SymbolRead`, which carries the records *and*
+        how much of the reported list they cover.  Read-only, and never filled in: a
+        symbol the terminal returns without a specification comes back with just its
+        name, so the page can say it could not be verified instead of guessing what
+        it is.  Broker names are kept byte for byte, suffixes included, and no call
+        here selects anything in Market Watch or changes the account.
         """
 
         if self._terminal is None or not self._terminal.connected:
-            return ()
+            from .symbols import SymbolRead
+
+            return SymbolRead()
         from .symbols import records_from_terminal
 
-        return records_from_terminal(self._terminal, MAX_SYMBOLS)
+        return records_from_terminal(self._terminal, MAX_SYMBOL_READS)
+
+    def symbol_records(self) -> Sequence[dict[str, Any]]:
+        """The same read as :meth:`symbol_read`, without its coverage counts."""
+
+        return self.symbol_read().records
 
     def market_data(self, freshness: Any) -> Any:
         """The terminal's quote surface, wrapped for paper execution.
@@ -229,8 +246,16 @@ class MT5ObservationSource:
             return {"connected": False, "error": exc.reason}
         symbols: list[dict[str, Any]] = []
         symbol_error = ""
+        #: How many symbols the terminal reported.  ``MAX_SYMBOLS`` caps only the names
+        #: carried in this JSON payload, so the count has to come from the list itself:
+        #: presenting the capped length as the total told an operator with a few
+        #: thousand instruments that they had 120.
+        symbols_reported = 0
         try:
-            for name in self._terminal.symbol_names()[:MAX_SYMBOLS]:
+            names = [str(name).strip() for name in self._terminal.symbol_names()]
+            names = [name for name in names if name]
+            symbols_reported = len(names)
+            for name in names[:MAX_SYMBOLS]:
                 symbols.append({"name": name, "tradable": None, "digits": None})
         except MT5DataRefused as exc:
             symbol_error = exc.reason
@@ -264,6 +289,9 @@ class MT5ObservationSource:
                 "balance_reporting": "withheld",
             },
             "symbols": symbols,
+            #: What the terminal reported, next to what this payload carried.
+            "symbols_reported": symbols_reported,
+            "symbols_carried": len(symbols),
             "symbol_error": symbol_error,
             "observed_at": status.time if hasattr(status, "time") else None,
         }
@@ -339,6 +367,8 @@ class SimulatedObservationSource:
             "account": dict(SIMULATED_ACCOUNT),
             "sample": True,
             "symbols": [dict(item) for item in SIMULATED_SYMBOLS],
+            "symbols_reported": len(SIMULATED_SYMBOLS),
+            "symbols_carried": len(SIMULATED_SYMBOLS),
             "symbol_error": "",
             "observed_at": clock(),
         }
@@ -501,6 +531,45 @@ class ObservationSession:
     def symbols(self) -> Sequence[Mapping[str, Any]]:
         return self.snapshot_data.get("symbols", ()) if self.connected else ()
 
+    def symbols_reported(self) -> int:
+        """How many symbols the source reported, which may exceed ``symbols()``.
+
+        The snapshot carries a capped number of names to keep the payload small; this
+        is the count the source actually reported.  It never exceeds what was read, so
+        a capped payload cannot pass itself off as the whole list.
+        """
+
+        if not self.connected:
+            return 0
+        reported = self.snapshot_data.get("symbols_reported")
+        if isinstance(reported, int) and not isinstance(reported, bool):
+            return max(0, reported)
+        return len(self.symbols())
+
+    def symbol_read(self) -> Any:
+        """What the source read, with how much of its list that covers.
+
+        Delegates to a source that can report its own coverage (the MT5 adapter
+        does), so the page can say how many reported names were examined.  A
+        source that only offers records is wrapped, and then nothing is claimed
+        about names it may hold beyond them.
+        """
+
+        from .symbols import SymbolRead
+
+        if not self.connected:
+            return SymbolRead()
+        reader = getattr(self.source, "symbol_read", None)
+        if callable(reader):
+            try:
+                read = reader()
+            except Exception:
+                read = None
+            if isinstance(read, SymbolRead):
+                return read
+        records = self.symbol_records()
+        return SymbolRead(records=tuple(records), reported=len(records), examined=len(records))
+
     def symbol_records(self) -> Sequence[Mapping[str, Any]]:
         """What the connected source reports for each symbol, for verification.
 
@@ -611,6 +680,7 @@ __all__ = [
     "DISCONNECTED",
     "ERROR",
     "MAX_SYMBOLS",
+    "MAX_SYMBOL_READS",
     "MT5ObservationSource",
     "ObservationSession",
     "ObservationSource",

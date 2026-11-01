@@ -14,6 +14,7 @@ from axiom_forex.paper_runner.catalog_paper import (
     REASON_ALREADY_RUNNING,
     REASON_NO_WATCHES,
     REASON_SYMBOL_UNAVAILABLE,
+    REASON_TOO_MANY,
     STOPPED,
     Watch,
     watches_from_rows,
@@ -288,3 +289,30 @@ def test_the_bar_that_is_still_forming_is_never_used_for_a_decision(tmp_path):
     assert series is not None
     assert series.timestamps[-1] < NOW, "the forming bar must not be in the series"
 
+
+
+def test_the_watch_cap_says_how_many_rows_it_did_not_follow():
+    """A bounded paper test must not present its cap as the whole screened set."""
+
+    many = [
+        {"candidate_id": item.candidate_id, "symbol": "EURUSD.pro", "timeframe": "15m"}
+        for item in catalog()[:20]
+    ]
+    watches, refused = watches_from_rows(many, symbol_names=["EURUSD.pro"], limit=5)
+
+    assert len(watches) == 5
+    capped = [item for item in refused if item["reason"] == REASON_TOO_MANY]
+    assert len(capped) == 1
+    assert "15 more stored row(s) were not followed" in capped[0]["detail"]
+    assert "at most 5" in capped[0]["detail"]
+
+
+def test_a_build_that_reaches_the_last_row_reports_no_cap():
+    rows = [
+        {"candidate_id": item.candidate_id, "symbol": "EURUSD.pro", "timeframe": "15m"}
+        for item in catalog()[:5]
+    ]
+    watches, refused = watches_from_rows(rows, symbol_names=["EURUSD.pro"], limit=5)
+
+    assert len(watches) == 5
+    assert not [item for item in refused if item["reason"] == REASON_TOO_MANY]

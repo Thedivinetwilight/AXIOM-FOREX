@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -31,8 +31,13 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import dataclasses
 
 from axiom_forex.config.fx_symbols import MAJOR_PAIRS, forex_symbols, recommended
-from axiom_forex.config.terminal_facts import SymbolFacts, symbol_facts
+from axiom_forex.config.terminal_facts import (
+    SYMBOL_EVIDENCE_FIELDS,
+    SymbolFacts,
+    symbol_facts,
+)
 from axiom_forex.paper_runner.catalog_paper import (
+    REASON_TOO_MANY,
     CatalogPaperTest,
     summarise,
     watches_from_rows,
@@ -73,6 +78,19 @@ MAX_RECORD_AGE_SECONDS = 14 * 24 * 3600.0
 MAX_EVAL_SYMBOLS = 3
 MAX_EVAL_SECONDS = 420.0
 
+#: How many per-name reads the *fallback* may make when a terminal adapter cannot
+#: return specifications in bulk.  A safety bound, not a symbol policy: the offer
+#: reports how many reported names it did not reach, so a bounded read never passes
+#: for the whole list.  The bulk path ignores it.
+MAX_FALLBACK_READS = 300
+
+#: How many choices and how many refusals the catalog page draws.  These are
+#: *rendering* caps: every symbol the terminal reports is classified, and the counts
+#: on the page say how many there are, so a capped list can never read as the whole
+#: list.
+MAX_CHOICES_SHOWN = 60
+MAX_EXCLUDED_SHOWN = 20
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -94,21 +112,121 @@ class _EvaluationRun:
         return self.thread is not None and self.thread.is_alive()
 
 
-def _facts_from_terminal(terminal: Any, limit: int = 200) -> tuple[SymbolFacts, ...]:
-    """Read the terminal's symbol facts, read-only, and never invent one."""
+@dataclass(frozen=True)
+class SymbolFactsRead:
+    """What a symbol read covered: the facts, and how much of the list."""
+
+    facts: tuple[SymbolFacts, ...] = ()
+    #: Names the terminal reported, whether or not each one was read.
+    reported: int = 0
+    #: Names that were read.
+    examined: int = 0
+    #: True when one terminal call carried the specifications.
+    bulk: bool = False
+    #: Empty, or why the read stopped before the end of the reported list.
+    reason: str = ""
+
+    @property
+    def truncated(self) -> bool:
+        """True when fewer names were read than the terminal reported."""
+
+        return 0 < self.examined < self.reported
+
+
+def _carries_specifications(snapshots: Any) -> bool:
+    """True when the bulk answer described symbols, not just named them.
+
+    ``SYMBOL_EVIDENCE_FIELDS`` is shared with the other readers, so the three of them
+    cannot disagree about what counts as a specification.
+    """
+
+    return any(
+        field in entry
+        for entry in (snapshots or ())
+        if isinstance(entry, Mapping)
+        for field in SYMBOL_EVIDENCE_FIELDS
+    )
+
+
+def _facts_from_snapshots(snapshots: Any) -> tuple[SymbolFacts, ...]:
+    """Facts for every symbol in one bulk answer.  Nothing is invented."""
+
+    facts: list[SymbolFacts] = []
+    for entry in snapshots or ():
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            captured = symbol_facts(dict(entry))
+        except Exception:
+            continue
+        if not captured.broker_symbol:
+            captured = replace(captured, broker_symbol=name)
+        facts.append(captured)
+    return tuple(facts)
+
+
+def _facts_from_terminal(terminal: Any, limit: int | None = None) -> SymbolFactsRead:
+    """Read the terminal's symbol facts, read-only, and never invent one.
+
+    The bulk call comes first: ``symbol_snapshots()`` returns every reported symbol
+    with its specification from a single terminal call, so nothing depends on where a
+    name sorts.  This used to read the first ``limit`` *names* only, which on a real
+    broker -- whose equity CFDs sort ahead of the forex board -- hid every pair later
+    in the alphabet, so the offer looked like seven AUD pairs and nothing else.
+
+    A wrapper that can only offer bare names falls back to one ``symbol_info`` read
+    per name.  Only that fallback is bounded, and the returned coverage counts let the
+    caller say how many names it did not reach.  Nothing here writes to the terminal.
+    """
 
     if terminal is None:
-        return ()
+        return SymbolFactsRead()
+
+    bulk_reader = getattr(terminal, "symbol_snapshots", None)
+    if callable(bulk_reader):
+        try:
+            snapshots = bulk_reader()
+        except Exception:
+            snapshots = None
+        if _carries_specifications(snapshots):
+            captured = _facts_from_snapshots(snapshots)
+            if captured:
+                return SymbolFactsRead(
+                    facts=captured,
+                    reported=len(captured),
+                    examined=len(captured),
+                    bulk=True,
+                )
+
     try:
-        names = list(terminal.symbol_names())[:limit]
+        names = [str(raw or "").strip() for raw in terminal.symbol_names()]
     except Exception:
-        return ()
-    facts: list[SymbolFacts] = []
-    for name in names:
+        return SymbolFactsRead()
+    names = [name for name in names if name]
+    # The caller's ``limit`` is an extra bound on top of the safety bound; the bulk
+    # path above ignores both, because one call already carries every symbol.
+    bound = MAX_FALLBACK_READS if limit is None else max(0, int(limit))
+    chosen = names[:bound]
+    facts = []
+    for name in chosen:
         captured = _symbol_facts(terminal, name)
         if captured is not None:
             facts.append(captured)
-    return tuple(facts)
+    return SymbolFactsRead(
+        facts=tuple(facts),
+        reported=len(names),
+        examined=len(chosen),
+        bulk=False,
+        reason=(
+            "the terminal adapter cannot return specifications in bulk, so only the "
+            "first names were read"
+            if len(chosen) < len(names)
+            else ""
+        ),
+    )
 
 
 def _symbol_facts(terminal: Any, symbol: str) -> SymbolFacts | None:
@@ -164,7 +282,8 @@ class CatalogPanel:
 
     def fx_choices(self) -> dict[str, Any]:
         terminal = self._terminal()
-        facts = _facts_from_terminal(terminal)
+        read = _facts_from_terminal(terminal)
+        facts = read.facts
         if not facts:
             return {
                 "available": False,
@@ -184,17 +303,28 @@ class CatalogPanel:
             for item in (_classify_all(facts))
             if item.kind != "FOREX_PAIR"
         ]
+        shown_choices = choices[:MAX_CHOICES_SHOWN]
+        shown_excluded = excluded[:MAX_EXCLUDED_SHOWN]
         return {
             "available": True,
             "counts": {
-                "reported": len(facts),
+                # What the terminal reported, how much of it was classified, and how
+                # much of *that* is drawn.  A capped table must never read as the
+                # whole list, and a bounded read must never read as the whole list.
+                "reported": read.reported,
+                "examined": read.examined,
+                "not_examined": max(0, read.reported - read.examined),
                 "forex_pairs": len(choices),
                 "usable": sum(1 for item in choices if item.usable),
                 "excluded": len(excluded),
+                "choices_shown": len(shown_choices),
+                "excluded_shown": len(shown_excluded),
             },
+            "bulk": read.bulk,
+            "truncated": read.truncated,
             "majors": list(MAJOR_PAIRS),
-            "choices": [item.audit_view() for item in choices[:60]],
-            "excluded": excluded[:20],
+            "choices": [item.audit_view() for item in shown_choices],
+            "excluded": shown_excluded,
             "recommended": list(recommended(facts)),
             "timeframes": list(EVAL_TIMEFRAMES),
             "default_timeframe": DEFAULT_EVAL_TIMEFRAME,
@@ -723,12 +853,15 @@ class CatalogPanel:
                 clock=self.clock,
             )
             self._paper_watches = watches
-        return self._ok(
+        message = (
             f"Built a paper test over {len(watches)} screened row(s): "
             + ", ".join(sorted({watch.symbol for watch in watches}))
-            + ". Press Start to begin.",
-            path="/quick-setup",
+            + ". Press Start to begin."
         )
+        capped = [item for item in refused if item.get("reason") == REASON_TOO_MANY]
+        if capped:
+            message += " " + str(capped[0].get("detail") or "")
+        return self._ok(message, path="/quick-setup")
 
     def _paper_start(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -876,7 +1009,11 @@ __all__ = [
     "DEFAULT_BARS",
     "DEFAULT_EVAL_TIMEFRAME",
     "EVAL_TIMEFRAMES",
+    "MAX_CHOICES_SHOWN",
     "MAX_EVAL_SYMBOLS",
+    "MAX_EXCLUDED_SHOWN",
+    "MAX_FALLBACK_READS",
     "MAX_RECORD_AGE_SECONDS",
+    "SymbolFactsRead",
     "paper_row_key",
 ]

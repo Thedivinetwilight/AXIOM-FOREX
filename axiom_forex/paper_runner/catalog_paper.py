@@ -225,7 +225,7 @@ def watches_from_rows(
     chosen: list[Watch] = []
     refused: list[dict[str, str]] = []
     seen: set[str] = set()
-    for row in rows:
+    for position, row in enumerate(rows):
         candidate_id = str(row.get("candidate_id") or "")
         symbol = str(row.get("symbol") or "")
         timeframe = str(row.get("timeframe") or "")
@@ -267,6 +267,21 @@ def watches_from_rows(
         seen.add(watch.key)
         chosen.append(watch)
         if len(chosen) >= max(0, limit):
+            # A paper test follows a bounded number of rows at a time.  Stopping here
+            # used to drop the rest of the screened rows in silence, so the page said
+            # "a paper test over 12 rows" as if 12 were all there were.  The rows left
+            # over are now named.
+            remaining = len(rows) - position - 1
+            if remaining > 0:
+                refused.append(
+                    {
+                        "reason": REASON_TOO_MANY,
+                        "detail": (
+                            f"{remaining} more stored row(s) were not followed: one paper "
+                            f"test follows at most {max(0, limit)} at a time."
+                        ),
+                    }
+                )
             break
     return tuple(chosen), tuple(refused)
 

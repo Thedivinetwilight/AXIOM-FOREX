@@ -19,6 +19,15 @@ The two bulk controls are defined here as data, not as UI state:
 ``select_all``   every verified forex pair the account can actually trade
 ``clear``        the empty selection
 
+**Everything the terminal reports is classified; only what is drawn is capped.**
+The list used to be cut to the first N names in alphabetical order *before* any
+specification was read, so on a real broker -- whose CFD tickers sort ahead of the
+forex board -- the walk stopped shortly after the ``AUD`` block and no pair later in
+the alphabet was ever examined.  The read now asks the terminal for the whole symbol
+list in one call, classifies every reported name, and caps only the rows the page
+draws, saying how many it did not draw.  A symbol is never dropped from the audit
+counts because of a rendering limit.
+
 Selecting an instrument the broker reports as not tradable (or without a full
 specification) would put a symbol into the observed set that no order could ever
 use, so ``select_all`` skips those and the page lists what it skipped and why.
@@ -30,7 +39,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..config.fx_symbols import FX_PAIR, METAL, SymbolChoice, UNCLASSIFIED, classify
-from ..config.terminal_facts import SymbolFacts, symbol_facts
+from ..config.terminal_facts import SYMBOL_EVIDENCE_FIELDS, SymbolFacts, symbol_facts
 
 #: Both currency legs are what make a symbol a *pair*.  Without them the terminal
 #: has not said what the symbol is, and AXIOM will not read it off the ticker text.
@@ -46,6 +55,15 @@ REASON_TRADE_MODE_NOT_REPORTED = (
 )
 #: Why nothing may be selected at all.
 REASON_NO_FOREX = "the terminal reported no symbol AXIOM can verify as a currency pair"
+#: Why the count of reported names is larger than the count of names read.
+REASON_READ_CAPPED = (
+    "the terminal adapter could not return specifications in bulk, so only the first "
+    "names were read"
+)
+
+#: How many excluded symbols the page draws.  Purely a rendering cap: every reported
+#: symbol is still classified and counted, and the page says how many it left undrawn.
+MAX_EXCLUDED_SHOWN = 200
 
 
 def _name_of(record: Mapping[str, Any]) -> str:
@@ -87,10 +105,25 @@ class SymbolCatalogue:
     select_all: tuple[str, ...]
     skipped_by_select_all: tuple[dict[str, str], ...]
     counts: dict[str, int]
+    #: Names the terminal reported whose specification was actually read.  Equal to
+    #: ``len(reported)`` unless the adapter could not read specifications in bulk;
+    #: every name in ``reported`` is classified in that case, never silently skipped.
+    examined: int = 0
 
     @property
     def available(self) -> bool:
         return bool(self.reported)
+
+    @property
+    def truncated(self) -> bool:
+        """True when fewer names were read than the terminal reported.
+
+        ``reported`` holds the names that *were* classified, so the gap is read from
+        the counts: it is non-zero only when the adapter could not return
+        specifications in bulk and the read had to stop early.
+        """
+
+        return int(self.counts.get("not_examined", 0) or 0) > 0
 
     @property
     def select_all_available(self) -> bool:
@@ -136,6 +169,8 @@ class SymbolCatalogue:
             "select_all": list(self.select_all),
             "skipped_by_select_all": [dict(item) for item in self.skipped_by_select_all],
             "counts": dict(self.counts),
+            "examined": self.examined,
+            "truncated": self.truncated,
         }
 
 
@@ -179,25 +214,109 @@ def _snapshot_of(info: Any) -> Mapping[str, Any] | None:
     return None
 
 
-def records_from_terminal(terminal: Any, limit: int) -> tuple[dict[str, Any], ...]:
-    """Read ``symbol_names()`` and each name's specification, read-only.
+@dataclass(frozen=True)
+class SymbolRead:
+    """What a symbol read saw: the records, and how much of the list it covered."""
 
-    A symbol whose specification the terminal does not return keeps its name and
-    nothing else, so the page reports it as unverifiable.  No field is filled in
-    from the ticker, and the broker's name is never rewritten.
+    records: tuple[dict[str, Any], ...] = ()
+    #: Names the terminal reported, whether or not their spec was read.
+    reported: int = 0
+    #: Names whose specification was read.
+    examined: int = 0
+    #: True when one terminal call carried the specifications.
+    bulk: bool = False
+    #: Empty, or why the read stopped before the end of the reported list.
+    reason: str = ""
+
+    @property
+    def truncated(self) -> bool:
+        return 0 < self.examined < self.reported
+
+
+def _record_from(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One record for the catalogue, keeping only fields the terminal reported."""
+
+    name = _name_of(entry)
+    if not name:
+        return None
+    record: dict[str, Any] = {"name": name}
+    for field in RECORD_FIELDS:
+        if field in entry:
+            record[field] = entry[field]
+    return record
+
+
+def _carries_specifications(records: Sequence[dict[str, Any]]) -> bool:
+    """True when the bulk answer described symbols, not just named them.
+
+    The field list is shared with the other readers, so none of them can disagree
+    about what counts as a specification.  Their *values* are not the test: a broker
+    that reports no currency legs on a CFD still reported the field, and an empty leg
+    is an answer -- "not a pair" -- while a missing key means the adapter only knows
+    names.
+    """
+
+    return any(
+        field in record for record in records for field in SYMBOL_EVIDENCE_FIELDS
+    )
+
+
+def records_from_terminal(terminal: Any, limit: int | None = None) -> SymbolRead:
+    """Read the terminal's symbols *and* their specifications, read-only.
+
+    The bulk call comes first: ``symbol_snapshots()`` returns every symbol with its
+    specification fields from a single terminal call, so the whole reported list is
+    classified and nothing depends on where a name sorts.  A wrapper that can only
+    offer bare names falls back to one ``symbol_info`` read per name, and only that
+    fallback is bounded by ``limit`` -- the returned :class:`SymbolRead` then says so,
+    and the page reports how many names it did not reach.
+
+    Nothing is written to the terminal, and no field is filled in from the ticker:
+    a symbol whose specification the terminal does not return keeps its name and
+    nothing else, so the page reports it as unverifiable.
     """
 
     if terminal is None:
-        return ()
+        return SymbolRead()
+
+    bulk_reader = getattr(terminal, "symbol_snapshots", None)
+    if callable(bulk_reader):
+        try:
+            snapshots = bulk_reader()
+        except Exception:
+            snapshots = None
+        records = [
+            record
+            for record in (
+                _record_from(entry) for entry in (snapshots or ()) if isinstance(entry, Mapping)
+            )
+            if record is not None
+        ]
+        if records and _carries_specifications(records):
+            return SymbolRead(
+                records=tuple(records),
+                reported=len(records),
+                examined=len(records),
+                bulk=True,
+            )
+        # A name-only or empty bulk answer is not a specification; fall through to
+        # the per-name read rather than declaring every symbol unverifiable.
+
     try:
-        names = list(terminal.symbol_names())[:limit]
+        names = [str(raw or "").strip() for raw in terminal.symbol_names()]
     except Exception:
-        return ()
-    records: list[dict[str, Any]] = []
-    for raw in names:
-        name = str(raw or "").strip()
-        if not name:
-            continue
+        return SymbolRead()
+    names = [name for name in names if name]
+    reported = len(names)
+    if limit is not None and limit >= 0:
+        examined_names = names[:limit]
+        reason = REASON_READ_CAPPED if len(examined_names) < reported else ""
+    else:
+        examined_names = names
+        reason = ""
+
+    records = []
+    for name in examined_names:
         record: dict[str, Any] = {"name": name}
         try:
             info = _snapshot_of(terminal.symbol_info(name))
@@ -207,13 +326,36 @@ def records_from_terminal(terminal: Any, limit: int) -> tuple[dict[str, Any], ..
             if info is not None and field in info:
                 record[field] = info[field]
         records.append(record)
-    return tuple(records)
+    return SymbolRead(
+        records=tuple(records),
+        reported=reported,
+        examined=len(records),
+        bulk=False,
+        reason=reason,
+    )
 
 
 def build_catalogue(
-    records: Iterable[Mapping[str, Any]] | None, *, sample: bool = False
+    records: Iterable[Mapping[str, Any]] | None,
+    *,
+    sample: bool = False,
+    reported_total: int | None = None,
+    examined: int | None = None,
+    specs_reported: bool | None = None,
 ) -> SymbolCatalogue:
-    """Classify the terminal's reported symbols.  Never invents an entry."""
+    """Classify the terminal's reported symbols.  Never invents an entry.
+
+    ``records`` are the names whose specification was read; ``reported_total`` and
+    ``examined`` carry the read's own counts when the adapter could not read the
+    whole list, so the page can say what it did not reach instead of implying the
+    list ended there.  ``reported`` on the result stays the number of names actually
+    classified, so a crafted record cannot inflate the counts.
+
+    ``specs_reported`` says whether the terminal described its symbols at all.  A
+    read that came back in bulk did: every record carried ``digits``, ``point`` and
+    the rest.  That is what makes it honest to say "no symbol here is a pair"
+    instead of "these are names only".
+    """
 
     rows = [dict(item) for item in (records or ()) if isinstance(item, Mapping)]
     reported: list[str] = []
@@ -268,7 +410,7 @@ def build_catalogue(
         if not item.usable
     )
 
-    verified = facts_seen > 0
+    verified = facts_seen > 0 or bool(specs_reported)
     if not reported:
         reason = "no_terminal_symbols"
     elif not verified:
@@ -277,6 +419,11 @@ def build_catalogue(
         reason = "no_verified_forex_pair"
     else:
         reason = ""
+
+    examined_rows = len(reported) if examined is None else max(0, int(examined))
+    examined_rows = min(examined_rows, len(reported))
+    claimed = len(reported) if reported_total is None else max(len(reported), int(reported_total))
+    unexamined = claimed - examined_rows
 
     return SymbolCatalogue(
         verified=verified,
@@ -288,11 +435,17 @@ def build_catalogue(
         select_all=tuple(item.broker_symbol for item in usable),
         skipped_by_select_all=skipped,
         counts={
-            "reported": len(reported),
+            # What the terminal said it has, and how much of it was classified.
+            # The two differ only when the adapter could not read specifications in
+            # bulk, and then the difference is stated rather than hidden.
+            "reported": claimed,
+            "examined": examined_rows,
             "verified_forex_pairs": len(pairs),
             "selectable_for_all": len(usable),
             "excluded": len(excluded),
+            "not_examined": max(0, unexamined),
         },
+        examined=examined_rows,
     )
 
 
@@ -305,27 +458,39 @@ def catalogue_message(catalogue: SymbolCatalogue) -> str:
             "connected and reports its Market Watch."
         )
     counts = catalogue.counts
+    lead = (
+        f"{counts['reported']} symbol(s) reported, {catalogue.examined} examined"
+        if catalogue.truncated
+        else f"{counts['reported']} symbol(s) reported"
+    )
     if not catalogue.verified:
         return (
-            f"{counts['reported']} symbol(s) reported by name only. AXIOM will not guess "
-            "which of these are currency pairs."
+            f"{lead} by name only. AXIOM will not guess which of these are currency pairs."
         )
     if not catalogue.pairs:
         trailing = REASON_NO_FOREX[0].upper() + REASON_NO_FOREX[1:]
-        return f"{counts['reported']} symbol(s) reported. {trailing}."
-    return (
-        f"{counts['reported']} symbol(s) reported: {counts['verified_forex_pairs']} verified "
-        f"forex pair(s), {counts['excluded']} excluded."
+        return f"{lead}: {trailing}."
+    sentence = (
+        f"{lead}: {counts['verified_forex_pairs']} verified forex pair(s), "
+        f"{counts['excluded']} excluded."
     )
+    if catalogue.truncated:
+        sentence += (
+            f" {counts['not_examined']} name(s) were not reached: {REASON_READ_CAPPED}."
+        )
+    return sentence
 
 
 __all__ = [
+    "MAX_EXCLUDED_SHOWN",
     "RECORD_FIELDS",
+    "REASON_READ_CAPPED",
     "REASON_TRADE_MODE_NOT_REPORTED",
     "REASON_NO_FOREX",
     "REASON_NO_SPEC_REPORTED",
     "SPEC_FIELDS",
     "SymbolCatalogue",
+    "SymbolRead",
     "build_catalogue",
     "catalogue_message",
     "records_from_terminal",

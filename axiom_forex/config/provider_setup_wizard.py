@@ -235,6 +235,9 @@ class TerminalFacts:
     server: str = ""
     margin_mode: str = ""
     symbols: tuple[str, ...] = ()
+    #: How many symbols the terminal reported.  ``symbols`` may be a capped carrier
+    #: list, so its length must not be shown as the total.
+    symbols_total: int = 0
     reason: str = ""
 
     def audit_view(self) -> dict[str, Any]:
@@ -245,6 +248,7 @@ class TerminalFacts:
             "server": self.server,
             "margin_mode": self.margin_mode,
             "symbols": list(self.symbols),
+            "symbols_total": self.symbols_total or len(self.symbols),
             "reason": self.reason,
         }
 
@@ -260,6 +264,13 @@ def terminal_facts(session: Any) -> TerminalFacts:
         for item in (session.symbols() or ())
         if isinstance(item, Mapping) and item.get("name")
     )
+    reader = getattr(session, "symbols_reported", None)
+    total = len(symbols)
+    if callable(reader):
+        try:
+            total = max(total, int(reader()))
+        except Exception:
+            total = len(symbols)
     return TerminalFacts(
         connected=True,
         currency=str(account.get("currency") or ""),
@@ -267,6 +278,7 @@ def terminal_facts(session: Any) -> TerminalFacts:
         server=str(account.get("server") or ""),
         margin_mode=str(account.get("margin_mode") or ""),
         symbols=symbols,
+        symbols_total=total,
     )
 
 
