@@ -204,6 +204,29 @@ def _paper_state(
             "produces is a broker fill.",
             (),
         )
+    # A runner that refused to start is the most useful thing on the page: it
+    # knows exactly which guard stopped it, and the operator needs that reason
+    # rather than a generic "not started".
+    runner_state = str(runner.get("state") or "").upper()
+    runner_blockers = tuple(
+        f"{message}{' ' + hint if hint else ''}".strip()
+        for message, hint in (
+            (
+                str(item.get("message") or item.get("reason") or "").strip(),
+                str(item.get("hint") or "").strip(),
+            )
+            for item in (runner.get("blockers") or ())
+            if isinstance(item, Mapping)
+        )
+        if message
+    )
+    if runner_state == "BLOCKED" and runner_blockers:
+        return (
+            BLOCKED,
+            "BLOCKED (PAPER RUNNER)",
+            runner_blockers[0],
+            runner_blockers,
+        )
     if status == "BLOCKED":
         return BLOCKED, "BLOCKED", (blockers[0] if blockers else "The paper session is blocked."), blockers
     if status == "STOPPED":

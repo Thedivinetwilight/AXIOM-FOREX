@@ -92,6 +92,7 @@ REASON_CYCLE_LIMIT = "cycle_limit_reached"
 REASON_CYCLE_FAILED = "cycle_failed"
 REASON_LIVE_NOT_CONFIGURED = "live_path_not_configured"
 REASON_LIVE_NOT_READY = "live_not_ready"
+REASON_MISSING_RISK_LIMIT = "missing_risk_limit"
 
 #: Reasons that stop the loop and require an operator decision.
 STOPPING_REASONS = frozenset(
@@ -134,6 +135,35 @@ class RunnerBlocker:
 
     def audit_view(self) -> dict[str, Any]:
         return {"reason": self.reason, "message": self.message, "hint": self.hint}
+
+
+#: How each unusable-risk-limit reason is explained, and what clears it.  The
+#: wording is deliberately about the *limit*, never about the market: an automated
+#: run may not begin while the size of a position has no declared ceiling.
+_RISK_LIMIT_BLOCKERS: dict[str, tuple[str, str, str]] = {
+    "ENTRY_LIMIT_NOT_CONFIGURED": (
+        REASON_MISSING_RISK_LIMIT,
+        "No entry-exposure limit is declared, so there is no ceiling on how much "
+        "the runner could commit. Automated trading does not start without one.",
+        "Declare an entry-exposure limit in your broker-terms profile (Advanced), "
+        "then start the runner again. A missing limit is refused, never read as "
+        "unlimited.",
+    ),
+    "ENTRY_LIMIT_INVALID": (
+        REASON_MISSING_RISK_LIMIT,
+        "The declared entry-exposure limit is not a finite positive number, so it "
+        "cannot cap anything.",
+        "Correct the limit amount in your broker-terms profile: it must be a finite, "
+        "positive number in the account currency.",
+    ),
+    "ENTRY_LIMIT_INCOMPATIBLE": (
+        REASON_MISSING_RISK_LIMIT,
+        "The declared entry-exposure limit is in a different currency from the "
+        "account, so comparing it with an order's notional would be meaningless.",
+        "Declare the limit in the account currency, then start the runner again. "
+        "Nothing is converted or guessed on your behalf.",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -284,6 +314,31 @@ class PaperStrategyRunner:
         mode_name = str(getattr(self.mode, "mode", "") or "").upper()
         return mode_name == "LIVE" and bool(getattr(self.mode, "live_effective", False))
 
+    def _risk_limit_block_reason(self) -> str | None:
+        """Why the declared risk limit cannot cap an order, or ``None``.
+
+        The reservation book already refuses a *new entry* without a usable cap,
+        but that only fires on the first order the strategy happens to want.  An
+        automated run whose ceiling is missing, non-finite, or in another currency
+        must not appear to be trading at all, so the same question is asked here,
+        before the loop starts.  Closes still never depend on it.
+        """
+
+        book = getattr(self.lane.paper_execution, "reservations", None)
+        if book is None:
+            # Process-local bookkeeping only: there is no durable cap to consult,
+            # which is the same situation as having declared none.
+            return "ENTRY_LIMIT_NOT_CONFIGURED"
+        try:
+            reason = book.entry_limit_block_reason()
+        except Exception:  # an unreadable limit is not a usable one
+            return "ENTRY_LIMIT_INVALID"
+        if reason is None:
+            return None
+        # Any reason the book invents is still a refusal; name it as an unusable
+        # limit rather than letting an unknown code escape the mapping below.
+        return reason if reason in _RISK_LIMIT_BLOCKERS else "ENTRY_LIMIT_INVALID"
+
     def guard_blockers(self) -> tuple[RunnerBlocker, ...]:
         """Everything that must be true before an order may be placed."""
 
@@ -394,6 +449,19 @@ class PaperStrategyRunner:
                     "Check whether that order exists in the ledger; if it does not, the "
                     "intent is stale and this run needs an operator decision before trading "
                     "again.",
+                )
+            )
+
+        # Book integrity comes first (an in-doubt order invalidates every number
+        # below it); the declared ceiling comes next, because a run with no cap
+        # must never look like it is trading.
+        risk_reason = self._risk_limit_block_reason()
+        if risk_reason is not None:
+            blockers.append(
+                RunnerBlocker(
+                    *_RISK_LIMIT_BLOCKERS.get(
+                        risk_reason, _RISK_LIMIT_BLOCKERS["ENTRY_LIMIT_INVALID"]
+                    )
                 )
             )
         return tuple(blockers)
@@ -1216,6 +1284,7 @@ __all__ = [
     "REASON_JOURNAL_FAILED",
     "REASON_LIVE_MODE_ACTIVE",
     "REASON_MARKET_CLOSED",
+    "REASON_MISSING_RISK_LIMIT",
     "REASON_MODE_UNKNOWN",
     "REASON_NO_ACTION",
     "REASON_NO_EXECUTION_PRICE",

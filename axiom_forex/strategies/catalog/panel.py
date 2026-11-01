@@ -21,6 +21,7 @@ terminal and a bar provider; both are data.
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -611,12 +612,19 @@ class CatalogPanel:
             return None
         point = facts.point
         contract = facts.contract_size
-        if point is None or contract is None or float(point) <= 0 or float(contract) <= 0:
+        # ``nan`` compares false against ``<= 0``, so the finiteness test is the
+        # one that actually matters here.
+        useful = all(
+            value is not None and math.isfinite(float(value)) and float(value) > 0
+            for value in (point, contract)
+        )
+        if not useful:
             return None
         # The account's currency is not part of a symbol record; leaving it out
         # keeps every account-currency cost labelled as unconvertible instead of
         # guessed, which is exactly what the report should say.
-        return cost_model_for(facts, account_currency="")
+        model = cost_model_for(facts, account_currency="")
+        return None if model.unusable else model
 
     # -- the paper test ----------------------------------------------------
 

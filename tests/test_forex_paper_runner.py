@@ -47,6 +47,7 @@ from axiom_forex.paper_runner.runner import (
     REASON_HOLD,
     REASON_INTENT_UNMATCHED,
     REASON_LIVE_NOT_CONFIGURED,
+    REASON_MISSING_RISK_LIMIT,
     REASON_MARKET_CLOSED,
     REASON_MODE_UNKNOWN,
     REASON_NO_EXECUTION_PRICE,
@@ -918,3 +919,109 @@ def test_an_unresolved_paper_order_blocks_the_start(platform):
     assert view["state"] == BLOCKED
     assert view["reason"] == "unresolved_order_present"
     assert view["blockers"][0]["hint"]
+
+
+# ---------------------------------------------------------------------------
+# 7. an automated run needs a declared, finite risk ceiling before it starts
+# ---------------------------------------------------------------------------
+
+
+def _lane_with_limit(platform, limit, *, currency=None):
+    """The same fixture lane, but with the entry cap this test chooses.
+
+    The fixture platform is built fresh for every test, so replacing its
+    reservation book here touches nothing another test can see.
+    """
+
+    from axiom_forex.execution.reservations import OrderReservationBook
+
+    existing = platform.paper_execution.reservations
+    book = OrderReservationBook(
+        platform.repository,
+        entry_limit=limit,
+        account_currency=currency or existing.account_currency,
+    )
+    platform.paper_execution.reservations = book
+    return lane_from_platform(platform)
+
+
+def _runner_on(lane, *, candidate=None):
+    chosen = candidate or candidate_for()
+    return PaperStrategyRunner(
+        lane=lane,
+        feed=ReplayBarFeed(bars=make_bars(mid_series())),
+        strategy=chosen.build(),
+        candidate=chosen,
+        config=RunnerConfig(
+            run_id="risk-limit-run",
+            symbol=PAIR,
+            quantity=Decimal("0.10"),
+            pause_seconds=0,
+        ),
+        mode=Mode(),
+    )
+
+
+def test_a_runner_with_no_declared_entry_limit_never_starts(platform):
+    runner = _runner_on(_lane_with_limit(platform, None))
+
+    view = runner.start()
+
+    assert view["state"] == BLOCKED
+    assert view["reason"] == REASON_MISSING_RISK_LIMIT
+    assert view["running"] is False
+    # The message says what is missing and what clears it -- not "unlimited".
+    blocker = view["blockers"][0]
+    assert "no entry-exposure limit is declared" in blocker["message"].lower()
+    assert "never read as unlimited" in blocker["hint"].lower()
+    # Starting refused, so not one cycle ran and nothing was filled.
+    assert runner.counters["cycles"] == 0
+    assert runner.counters["fills"] == 0
+    assert view["fills"] == []
+
+
+def test_a_runner_with_a_non_finite_entry_limit_never_starts(platform):
+    from axiom_forex.risk.entry_limits import EntryExposureLimit
+
+    limit = EntryExposureLimit(
+        limit_account=Decimal("NaN"),
+        account_currency=platform.paper_execution.reservations.account_currency,
+        version="test-v1",
+        source="TEST",
+    )
+    runner = _runner_on(_lane_with_limit(platform, limit))
+
+    view = runner.start()
+
+    assert view["state"] == BLOCKED
+    assert view["reason"] == REASON_MISSING_RISK_LIMIT
+    assert runner.counters["fills"] == 0
+
+
+def test_a_runner_whose_entry_limit_is_in_another_currency_never_starts(platform):
+    from axiom_forex.risk.entry_limits import EntryExposureLimit
+
+    account = platform.paper_execution.reservations.account_currency
+    other = "ZZZ" if account != "ZZZ" else "YYY"
+    limit = EntryExposureLimit(
+        limit_account=Decimal("250"),
+        account_currency=other,
+        version="test-v1",
+        source="TEST",
+    )
+    runner = _runner_on(_lane_with_limit(platform, limit))
+
+    view = runner.start()
+
+    assert view["state"] == BLOCKED
+    assert view["reason"] == REASON_MISSING_RISK_LIMIT
+    assert "different currency" in view["blockers"][0]["message"].lower()
+
+
+def test_a_declared_finite_limit_still_starts_the_runner(platform):
+    runner = _runner_on(lane_from_platform(platform))
+
+    view = runner.start()
+
+    assert view["state"] == RUNNING
+    assert view["running"] is True

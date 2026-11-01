@@ -643,6 +643,41 @@ def test_a_running_paper_runner_is_reported_as_running_not_as_not_trading(tmp_pa
     assert "catalog-paper-stop" not in steps["paper"]["body"]
 
 
+def test_a_blocked_paper_runner_states_its_own_reason_on_the_start_page(tmp_path):
+    """A runner that refused to start must say why, not just "not started"."""
+
+    class Runner:
+        running = False
+        state = "BLOCKED"
+
+        def view(self):
+            return {
+                "state": "BLOCKED",
+                "running": False,
+                "available": True,
+                "blockers": [
+                    {
+                        "reason": "missing_risk_limit",
+                        "message": "No entry-exposure limit is declared.",
+                        "hint": "Declare one in your broker-terms profile.",
+                    }
+                ],
+            }
+
+    app = _app(tmp_path, connect=True, symbols=True)
+    app.runner = Runner()
+
+    html = _page(app)
+    text = _text(html)
+    steps = _steps(html)
+
+    assert "BLOCKED (PAPER RUNNER)" in text
+    assert "No entry-exposure limit is declared." in text
+    # The hint is the direct action, so it is on the page next to the reason.
+    assert "Declare one in your broker-terms profile." in text
+    assert steps["paper"]["state"] == "blocked"
+
+
 def test_every_navigation_link_is_grouped_rendered_and_has_an_icon():
     from axiom_forex.workstation import views
 

@@ -448,14 +448,18 @@ class ResearchPanel:
         for symbol in setup.selected():
             if symbol.broker_symbol not in {key[0] for key in series_by_key}:
                 continue
-            if not symbol.point or not symbol.contract_size:
-                continue
-            costs[symbol.broker_symbol] = cost_model_for(
+            model = cost_model_for(
                 symbol,
                 account_currency=setup.facts.currency.value or "",
                 commission_per_lot=float(setup.costs.commission_per_lot),
                 slippage_pips=float(setup.costs.slippage_pips),
             )
+            # A symbol whose point, contract size, slippage or commission is not
+            # a real number cannot be priced; skipping it keeps ``nan`` out of
+            # every figure instead of reporting a meaningless one.
+            if model.unusable:
+                continue
+            costs[symbol.broker_symbol] = model
         if not costs:
             raise ResearchRefused(
                 "specs_unknown",

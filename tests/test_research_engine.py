@@ -33,6 +33,7 @@ from axiom_forex.research.engine import (
     SPLIT,
     STATUS_COMPLETE,
     STATUS_TIMEOUT,
+    UNKNOWN,
     CostModel,
     cost_model_for,
     record_attempts,
@@ -463,3 +464,88 @@ def test_the_same_bars_produce_the_same_dataset_fingerprint():
     assert engine_module.series_identity(one) == engine_module.series_identity(two)
     other = make_series(300, seed=4)
     assert engine_module.series_identity(other)[1] != engine_module.series_identity(one)[1]
+
+
+def test_a_non_finite_cost_term_is_named_and_makes_the_model_unusable():
+    """``nan`` compares false against every bound, so it must never slip through.
+
+    A symbol whose point size or contract size arrives as ``nan`` used to pass a
+    plain ``<= 0`` guard and turn every figure in the run into ``nan``.  It is now
+    reported as a defect, the model is marked unusable, and the callers refuse to
+    price with it.
+    """
+
+    class Broken:
+        point = Decimal("NaN")
+        contract_size = Decimal("NaN")
+        profit_currency = "USD"
+        swap_long = Decimal("NaN")
+        swap_short = None
+        swap_state = "POINTS"
+
+    model = cost_model_for(Broken(), account_currency="USD")
+
+    assert model.unusable is True
+    assert any("point size" in item for item in model.defects)
+    assert any("contract size" in item for item in model.defects)
+    # A non-finite swap is unknown financing, not zero financing.
+    assert any("swap" in item for item in model.defects)
+    assert model.swap_state == UNKNOWN
+    assert model.swap_long is None
+    # The unpriceable terms are reported, and the model carries no number that a
+    # caller could mistake for a price.
+    notes = model.incomplete()
+    assert any("point size" in note and "usable number" in note for note in notes)
+    assert model.point == 0.0 and model.contract_size == 0.0
+
+
+def test_an_infinite_slippage_or_commission_is_a_defect_not_zero():
+    class Symbol:
+        point = Decimal("0.0001")
+        contract_size = Decimal("100000")
+        profit_currency = "USD"
+        swap_long = None
+        swap_short = None
+        swap_state = UNKNOWN
+
+    model = cost_model_for(
+        Symbol(),
+        account_currency="USD",
+        slippage_pips=float("inf"),
+        commission_per_lot=float("nan"),
+    )
+
+    assert model.unusable is True
+    assert any("slippage" in item for item in model.defects)
+    assert any("commission" in item for item in model.defects)
+
+
+def test_a_sound_cost_model_is_not_marked_unusable():
+    class Symbol:
+        point = Decimal("0.00001")
+        contract_size = Decimal("100000")
+        profit_currency = "USD"
+        swap_long = Decimal("-1.2")
+        swap_short = Decimal("-0.8")
+        swap_state = "POINTS"
+
+    model = cost_model_for(Symbol(), account_currency="USD")
+
+    assert model.unusable is False
+    assert model.defects == ()
+    assert model.pip_value(1) == pytest.approx(1.0)
+
+
+def test_scaled_keeps_the_defects_it_was_built_with():
+    class Broken:
+        point = Decimal("NaN")
+        contract_size = Decimal("100000")
+        profit_currency = "USD"
+        swap_long = None
+        swap_short = None
+        swap_state = UNKNOWN
+
+    model = cost_model_for(Broken(), account_currency="USD")
+
+    assert model.scaled(2.0).unusable is True
+    assert model.scaled(2.0).defects == model.defects

@@ -38,6 +38,7 @@ The fill convention, stated once:
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -139,8 +140,20 @@ class CostModel:
     swap_state: str = UNKNOWN
     rollover_utc_hours: tuple[int, ...] = ()
     conversion_rate: float | None = None  # account units per one quote-currency unit
+    #: Terms the symbol reported that are empty, non-finite, or non-positive.
+    #: Any entry here means this model cannot price a trade: the caller must
+    #: refuse the run rather than carry ``nan`` into a result.
+    defects: tuple[str, ...] = ()
 
     # -- derivation -------------------------------------------------------
+
+    @property
+    def unusable(self) -> bool:
+        """True when a term that every cost depends on is not a real number."""
+
+        return bool(self.defects) or not _finite_positive(self.point) or not _finite_positive(
+            self.contract_size
+        )
 
     @property
     def conversion_known(self) -> bool:
@@ -214,7 +227,7 @@ class CostModel:
     def incomplete(self) -> tuple[str, ...]:
         """The parts of the cost stack that are not observed, with their effect."""
 
-        out: list[str] = []
+        out: list[str] = [f"{item} is not a usable number" for item in self.defects]
         if self.slippage_state != OBSERVED:
             out.append(
                 f"slippage is an {self.slippage_state.lower()} of "
@@ -293,6 +306,7 @@ class CostModel:
             swap_state=self.swap_state,
             rollover_utc_hours=self.rollover_utc_hours,
             conversion_rate=self.conversion_rate,
+            defects=self.defects,
         )
 
 
@@ -474,6 +488,28 @@ def segment_stats(
     )
 
 
+def _finite_positive(value: Any) -> bool:
+    """A real, positive, finite number -- the only kind a price term may be."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number > 0
+
+
+def _finite(value: Any) -> float | None:
+    """``value`` as a finite float, or ``None`` when it is not one."""
+
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def cost_model_for(
     symbol: Any,
     *,
@@ -497,24 +533,59 @@ def cost_model_for(
     state = observed if observed in ("POINTS", "CURRENCY", "DISABLED") else observed
     swap_long = getattr(symbol, "swap_long", None)
     swap_short = getattr(symbol, "swap_short", None)
+
+    # Every term is checked for finiteness before it reaches the arithmetic.
+    # ``nan`` compares false against everything, so a bare ``<= 0`` test would
+    # let it straight through and quietly turn each result into ``nan``.
+    defects: list[str] = []
+    point = _finite(getattr(symbol, "point", None))
+    if point is None or point <= 0:
+        defects.append("the symbol's point size")
+        point = 0.0
+    contract_size = _finite(getattr(symbol, "contract_size", None))
+    if contract_size is None or contract_size <= 0:
+        defects.append("the symbol's contract size")
+        contract_size = 0.0
+    slippage = _finite(slippage_pips)
+    if slippage is None or slippage < 0:
+        defects.append("the slippage assumption")
+        slippage = 0.0
+    commission = _finite(commission_per_lot)
+    if commission is None or commission < 0:
+        defects.append("the commission per lot")
+        commission = 0.0
+    conversion = _finite(conversion_rate)
+    if conversion_rate is not None and conversion is None:
+        defects.append("the account-currency conversion rate")
+    # A non-finite swap figure is unknown financing, not zero financing.
+    swap_long_value = _finite(swap_long)
+    swap_short_value = _finite(swap_short)
+    if (swap_long is not None and swap_long_value is None) or (
+        swap_short is not None and swap_short_value is None
+    ):
+        defects.append("the reported swap rate")
+        state = UNKNOWN
+        swap_long_value = swap_short_value = None
+
     return CostModel(
-        point=float(getattr(symbol, "point", 0) or 0),
-        contract_size=float(getattr(symbol, "contract_size", 0) or 0),
+        point=point,
+        contract_size=contract_size,
         account_currency=str(account_currency or "").strip().upper(),
         quote_currency=quote,
-        slippage_pips=float(slippage_pips or 0),
+        slippage_pips=slippage,
         slippage_state=ESTIMATE,
-        commission_per_lot=float(commission_per_lot or 0),
+        commission_per_lot=commission,
         commission_state=(
             ASSUMED_ZERO
-            if float(commission_per_lot or 0) == 0 and commission_state == ASSUMED_ZERO
+            if commission == 0 and commission_state == ASSUMED_ZERO
             else commission_state
         ),
-        swap_long=None if swap_long is None else float(swap_long),
-        swap_short=None if swap_short is None else float(swap_short),
+        swap_long=swap_long_value,
+        swap_short=swap_short_value,
         swap_state=state,
         rollover_utc_hours=tuple(int(hour) for hour in rollover_utc_hours or ()),
-        conversion_rate=conversion_rate,
+        conversion_rate=conversion,
+        defects=tuple(defects),
     )
 
 

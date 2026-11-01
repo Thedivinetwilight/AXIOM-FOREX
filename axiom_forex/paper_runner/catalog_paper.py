@@ -26,6 +26,7 @@ simulated fill from a real broker quote, labelled as such.
 from __future__ import annotations
 
 import json
+import math
 import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -116,6 +117,13 @@ def _decimal(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _finite_positive(value: Any) -> bool:
+    """A real, positive, finite number -- the only kind a price term may be."""
+
+    number = _decimal(value)
+    return number is not None and math.isfinite(number) and number > 0
 
 
 @dataclass(frozen=True)
@@ -867,9 +875,12 @@ class CatalogPaperTest:
             return None
         point = _decimal(getattr(facts, "point", None)) or 0.0
         contract = _decimal(getattr(facts, "contract_size", None)) or 0.0
-        if point <= 0 or contract <= 0:
+        if not _finite_positive(point) or not _finite_positive(contract):
             return None
-        return cost_model_for(facts, account_currency=str(getattr(facts, "account_currency", "") or ""))
+        model = cost_model_for(
+            facts, account_currency=str(getattr(facts, "account_currency", "") or "")
+        )
+        return None if getattr(model, "unusable", False) else model
 
     def _fresh_quote(self, symbol: str) -> Any:
         try:
