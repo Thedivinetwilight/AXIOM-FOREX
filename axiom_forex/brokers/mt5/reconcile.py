@@ -240,6 +240,40 @@ def history_orders(
 # -- reconciliation ---------------------------------------------------------
 
 
+def unprotected_positions(
+    positions: Sequence[MT5Position], *, magic: int | None = None
+) -> tuple[dict[str, Any], ...]:
+    """Positions this deployment is responsible for that carry no stop loss.
+
+    ``magic`` scopes the report to positions this deployment placed; positions
+    belonging to another expert advisor are not this build's to judge.  A stop
+    loss of ``0`` is what MetaTrader reports for "none", so both ``None`` and
+    zero count as unprotected.  This is a defect to report, never a position to
+    fix silently.
+    """
+
+    unprotected: list[dict[str, Any]] = []
+    for position in positions:
+        if magic is not None and int(position.magic) != int(magic):
+            continue
+        stop = position.stop_loss
+        if stop is not None and Decimal(stop) > 0:
+            continue
+        unprotected.append(
+            {
+                "ticket": position.ticket,
+                "symbol": position.symbol,
+                "side": position.side,
+                "volume": position.volume,
+                "price_open": position.price_open,
+                "magic": position.magic,
+                "stop_loss": stop,
+                "reason": "stop_loss_missing",
+            }
+        )
+    return tuple(unprotected)
+
+
 @dataclass(frozen=True)
 class PositionReconciliation:
     matched: tuple[dict[str, Any], ...]
@@ -249,6 +283,10 @@ class PositionReconciliation:
     side_mismatch: tuple[dict[str, Any], ...]
     broker_positions: int
     ledger_positions: int
+    #: Positions this deployment placed that the broker reports without a stop
+    #: loss.  Kept separate from ``reconciled``: an open, unprotected position is
+    #: not a ledger/broker disagreement, it is a risk condition.
+    unprotected: tuple[dict[str, Any], ...] = ()
 
     @property
     def reconciled(self) -> bool:
@@ -258,6 +296,12 @@ class PositionReconciliation:
             or self.volume_mismatch
             or self.side_mismatch
         )
+
+    @property
+    def stops_confirmed(self) -> bool:
+        """True only when every position this deployment owns has a stop loss."""
+
+        return not self.unprotected
 
     def audit_view(self) -> dict[str, Any]:
         return {
@@ -269,6 +313,8 @@ class PositionReconciliation:
             "broker_only": list(self.broker_only),
             "volume_mismatch": list(self.volume_mismatch),
             "side_mismatch": list(self.side_mismatch),
+            "unprotected_positions": list(self.unprotected),
+            "stops_confirmed": self.stops_confirmed,
             "source": "mt5_position_reconciliation",
         }
 
@@ -278,6 +324,7 @@ def reconcile_positions(
     ledger_positions: Iterable[Mapping[str, Any]],
     *,
     pair_for_symbol: Mapping[str, str] | None = None,
+    magic: int | None = None,
 ) -> PositionReconciliation:
     """Compare broker positions with the ledger, by pair.
 
@@ -372,6 +419,7 @@ def reconcile_positions(
         side_mismatch=tuple(side_mismatch),
         broker_positions=len(broker_positions),
         ledger_positions=sum(len(items) for items in ledger_by_pair.values()),
+        unprotected=unprotected_positions(broker_positions, magic=magic),
     )
 
 

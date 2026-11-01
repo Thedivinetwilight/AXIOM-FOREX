@@ -34,6 +34,7 @@ def build_live_workflow(
     feed_factory: Callable[[Any], Any],
     terminal_getter: Callable[[], Any],
     provider_setup_path: str | Path | None,
+    settings_path: str | Path | None = None,
     interval_seconds: int = 60,
     quote_age_seconds: str = "5",
     candidates: Sequence[Any] = (),
@@ -143,6 +144,11 @@ def build_live_workflow(
         session_factory=session_factory,
         armed_strategy=armed_strategy,
         audit_log=audit_log,
+        # The bar interval this stack's feed reads.  The plan's timeframe is
+        # compared with it, so a plan that would decide on other bars than the
+        # ones its evidence came from is refused rather than silently run.
+        live_interval_seconds=int(interval_seconds or 0),
+        settings_path=settings_path,
     )
 
 

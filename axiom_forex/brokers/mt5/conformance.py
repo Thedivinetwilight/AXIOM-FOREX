@@ -19,6 +19,7 @@ MT5_CONFORMANCE_REQUIREMENTS: tuple[str, ...] = (
     "account currency, leverage, margin mode, and margin requirement read from the terminal (broker)",
     "netting vs hedging position accounting verified for the account (broker)",
     "order_check before order_send; a failed check sends nothing",
+    "every entry carries a broker-side stop loss sized from the symbol's point and stops_level; the broker's own position record must echo that price back, and an unconfirmed stop disarms and blocks the next entry (broker)",
     "every retcode classified; unknown codes treated as unknown outcomes",
     "partial fills recorded with the unfilled remainder, never rounded away",
     "unknown outcomes persisted, trading disarmed, and reconciled from order/deal history before any resend",
@@ -36,6 +37,7 @@ BROKER_DEPENDENT_REQUIREMENTS: tuple[str, ...] = (
     "account currency, leverage, margin mode, and margin requirement read from the terminal (broker)",
     "netting vs hedging position accounting verified for the account (broker)",
     "swap/commission/rollover terms captured per broker before costs are trusted (broker)",
+    "every entry carries a broker-side stop loss sized from the symbol's point and stops_level; the broker's own position record must echo that price back, and an unconfirmed stop disarms and blocks the next entry (broker)",
 )
 
 

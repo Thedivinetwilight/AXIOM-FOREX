@@ -159,6 +159,7 @@ def build_adapter(
         magic=26081001,
         deviation_points=10,
         max_price_drift_points=20,
+        protective_stops={"EUR/USD": "200 points"},
     )
     store = MT5PasswordStore(
         settings=settings, vault=vault or FakeVault(), audit_log=audit

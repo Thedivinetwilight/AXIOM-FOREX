@@ -158,9 +158,13 @@ def values(**overrides):
     base = {
         "candidate_id": CANDIDATE,
         "pair": PAIR,
+        # The bar size the strategy was evaluated on, and the protective stop the
+        # operator accepts.  Neither has a default anywhere in the flow.
+        "timeframe": "15m",
         "quantity": "0.10",
         "max_open_positions": "1",
         "max_daily_loss_account": "100",
+        "protective_stop_pips": "25",
     }
     base.update(overrides)
     return base
@@ -305,9 +309,11 @@ def test_an_empty_plan_names_every_missing_field(live):
     assert paths == {
         "plan.candidate_id",
         "plan.pair",
+        "plan.timeframe",
         "plan.quantity",
         "plan.max_open_positions",
         "plan.max_daily_loss_account",
+        "plan.protective_stop_pips",
     }
     # Nothing was defaulted into a document.
     assert live.plan == {}
@@ -351,6 +357,8 @@ def test_arming_writes_the_plan_and_sends_no_order(live, fake):
     assert document["schema"] == plans.SCHEMA
     assert document["candidate_id"] == CANDIDATE
     assert document["pair"] == PAIR
+    assert document["timeframe"] == "15m"
+    assert document["protective_stop_pips"] == "25"
     assert document["quantity"] == "0.10"
     assert document["max_open_positions"] == 1
     assert document["max_daily_loss_account"] == "100"
@@ -379,9 +387,11 @@ def test_the_plan_file_never_carries_a_credential(tmp_path):
         "created_at": START.isoformat(),
         "candidate_id": CANDIDATE,
         "pair": PAIR,
+        "timeframe": "15m",
         "quantity": "0.10",
         "max_open_positions": 1,
         "max_daily_loss_account": "100",
+        "protective_stop_pips": "25",
         "password": "hunter2",
     }
     with pytest.raises(plans.PlanError) as excinfo:
@@ -520,9 +530,11 @@ def test_the_session_refuses_to_start_unarmed(tmp_path, fake, terminal, setup_do
                 "created_at": START.isoformat(),
                 "candidate_id": CANDIDATE,
                 "pair": PAIR,
+                "timeframe": "15m",
                 "quantity": "0.10",
                 "max_open_positions": 1,
                 "max_daily_loss_account": "100",
+                "protective_stop_pips": "25",
                 "account_currency": "USD",
             },
             terminal=terminal,
@@ -623,12 +635,21 @@ def test_the_live_page_says_when_the_next_signal_will_send():
     status, html = app.page("/live")
     assert int(status) == 200
     assert "The next strategy signal WILL send a real order" in html
-    assert "STOP and disarm" in html
+    # The stop control is labelled as what it is: an emergency stop that closes
+    # nothing.  A label that could be read as "flatten the account" would be wrong.
+    assert "EMERGENCY STOP" in html
+    assert "does not close them" in html or "closes nothing" in html
 
 
 def test_the_live_actions_need_the_nonce():
     app = _app(None)
-    for action in ("live-arm", "live-disarm", "live-start", "live-stop"):
+    for action in (
+        "live-arm",
+        "live-disarm",
+        "live-start",
+        "live-stop",
+        "live-stop-settings",
+    ):
         status, _, _ = app.act(action, {})
         assert int(status) == 403, action
 

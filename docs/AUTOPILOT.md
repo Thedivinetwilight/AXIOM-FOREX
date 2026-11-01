@@ -144,14 +144,17 @@ built. It is a *front door*, not a second order path:
   the review acknowledgement, the account fingerprint and the phrase
   `ENABLE LIVE TRADING` all stay on `/live`. The bridge only reads the plan that was
   already written there.
-* **It refuses when the plan is not the selected strategy.** If the armed plan's
-  `candidate_id` does not match the running selection, submission stays disabled and
-  the card names both ids.
+* **It refuses unless the plan is the selected strategy, on its symbol, at its bar
+  size.** A strategy is (rule, symbol, timeframe), so each of the three is compared
+  and each disagreement is its own named blocker: `plan_not_for_selected_strategy`
+  when the `candidate_id` differs, `plan_pair_not_selected` when the symbol differs,
+  `plan_timeframe_not_selected` when the bar size differs. The card names both
+  values. Nothing is re-timed, re-symbolised or averaged to make a start possible.
 * **PAPER can never send.** A paper lane has no live leg at all, and the card's
   "sending" chip requires the live path's own verdict *and* a LIVE mode.
 * **A signal still passes every per-order check**: the execution gate, the risk
-  limits, the exact-account confirmation, the stop requirement and the
-  unresolved-order lockout. A refusal is displayed with its reason code and is not
+  limits, the exact-account confirmation, the plan's watched stop, the broker-side
+  stop this build attaches and verifies, and the unresolved-order lockout. A refusal is displayed with its reason code and is not
   retried; an order whose outcome is unknown stops the session instead of resending.
 * **Stopping disarms and leaves positions open.** The message says so, and the open
   positions are listed on the card.
@@ -161,6 +164,8 @@ What the card shows, all of it read from the live path rather than inferred:
 | Field | Where it comes from |
 | --- | --- |
 | Active strategy, pair, broker symbol, timeframe | the armed plan, plus the running selection |
+| Plan protective stop | the armed plan, with the sentence that it is a limit AXIOM watches, not a broker stop |
+| Broker-side stop loss | the MT5 adapter's verification of the stop the broker echoes back, and the tickets it reports as unprotected |
 | Signal, and what became of it | the runner's `last_signal` and the live leg's history |
 | Order result or refusal | `LiveOutcome.as_result()` — status, reason code, unresolved flag |
 | Feed freshness | the running feed's newest accepted quote, with its age |
@@ -173,8 +178,12 @@ measured itself.
 
 The blockers are shown one at a time and would each switch submission off on their
 own: no selection, a selection that is not running, missing live wiring, no written
-plan, a plan for another strategy, the mode not being LIVE, the adapter not
-connected, the plan not armed, and every blocker the live page itself reports.
+plan, a plan for another strategy, a plan for another symbol, a plan on another bar
+size, the mode not being LIVE, the adapter not connected, the plan not armed, and
+every blocker the live page itself reports -- including a missing protective stop, a
+bar size this stack does not read, a position beyond the declared stop, a position
+the broker reports without a stop loss, and a symbol with no usable per-symbol
+distance in `protective_stops`.
 
 Passing the screen on history is not a live readiness verdict, and neither is this
 bridge: it decides *whether a session may start*, not whether a strategy is good.

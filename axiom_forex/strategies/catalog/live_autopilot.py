@@ -75,6 +75,11 @@ NOT_CONNECTED = "mt5_not_connected"
 NOT_ARMED = "strategy_not_armed"
 PLAN_MISSING = "plan_missing"
 PLAN_NOT_SELECTED = "plan_not_for_selected_strategy"
+#: The plan and the selection must agree on the *whole* identity of a strategy:
+#: which one, which symbol, and on which bars.  Two of the three matching is a
+#: different strategy, so each disagreement is its own blocker.
+PLAN_PAIR_MISMATCH = "plan_pair_not_selected"
+PLAN_TIMEFRAME_MISMATCH = "plan_timeframe_not_selected"
 STACK_UNAVAILABLE = "live_stack_unavailable"
 
 FLAT = "flat"
@@ -446,6 +451,9 @@ class LiveAutopilot:
             "strategy_label": str(plan.get("strategy_label") or ""),
             "pair": str(plan.get("pair") or ""),
             "broker_symbol": str(plan.get("broker_symbol") or ""),
+            "timeframe": str(plan.get("timeframe") or ""),
+            "protective_stop_pips": str(plan.get("protective_stop_pips") or ""),
+            "protective_stop_note": str(plan.get("protective_stop_note") or ""),
             "quantity": str(plan.get("quantity") or ""),
             "max_open_positions": plan.get("max_open_positions"),
             "max_daily_loss_account": str(plan.get("max_daily_loss_account") or ""),
@@ -543,6 +551,29 @@ class LiveAutopilot:
                     "Arm a plan for the selected strategy; this page will not start another one.",
                 )
             )
+        if plan:
+            plan_pair = str(plan.get("pair") or "")
+            selected_pair = str(selection.get("pair") or "")
+            if selected_pair and plan_pair and plan_pair != selected_pair:
+                found.append(
+                    Blocker(
+                        PLAN_PAIR_MISMATCH,
+                        f"The armed plan trades {plan_pair}, but the selected strategy is on "
+                        f"{selected_pair}. Arm a plan for the selected symbol.",
+                    )
+                )
+            plan_timeframe = str(plan.get("timeframe") or "")
+            selected_timeframe = str(selection.get("timeframe") or "")
+            if selected_timeframe and plan_timeframe and plan_timeframe != selected_timeframe:
+                found.append(
+                    Blocker(
+                        PLAN_TIMEFRAME_MISMATCH,
+                        f"The armed plan decides on {plan_timeframe} bars, but the selected "
+                        f"strategy was evaluated on {selected_timeframe}. LIVE never re-times "
+                        "a strategy to make it fit.",
+                        "Arm a plan with the selected timeframe, then start from here.",
+                    )
+                )
         if plan and not bool(live.get("armed", False)):
             found.append(
                 Blocker(
@@ -708,7 +739,9 @@ class LiveAutopilot:
         """
 
         symbol = str(strategy.get("pair") or "")
-        timeframe = str(self.selection().get("timeframe") or "")
+        timeframe = str(
+            strategy.get("timeframe") or self.selection().get("timeframe") or ""
+        )
         from_session = self._feed_from_session(symbol, timeframe, runner or {})
         if from_session is not None:
             return from_session
@@ -884,7 +917,7 @@ class LiveAutopilot:
             selection=selection,
             pair=str(strategy.get("pair") or selection.get("pair") or ""),
             broker_symbol=str(strategy.get("broker_symbol") or ""),
-            timeframe=str(selection.get("timeframe") or ""),
+            timeframe=str(strategy.get("timeframe") or selection.get("timeframe") or ""),
             blockers=self._live_blockers(live, runner) if running else self.blockers(),
             feed=self._feed(strategy, runner),
             signal=self._signal(runner, live),
@@ -994,6 +1027,8 @@ __all__ = [
     "PAPER_NOT_RUNNING",
     "PLAN_MISSING",
     "PLAN_NOT_SELECTED",
+    "PLAN_PAIR_MISMATCH",
+    "PLAN_TIMEFRAME_MISMATCH",
     "REFUSED",
     "RUNNING",
     "SELECTION_NOT_APPLIED",

@@ -148,6 +148,15 @@ class FakeMT5:
         self.fail_history = False
         #: Called with the request inside ``order_send`` before answering.
         self.on_send: Callable[[Mapping[str, Any]], None] | None = None
+        #: When true (the default), an accepted entry deal is mirrored into
+        #: ``positions_get`` exactly as the request described it -- including the
+        #: stop loss, so a caller that verifies the broker's echo has something
+        #: real to verify.  Set it false to model a broker that reports positions
+        #: it does not show (the unprotected case).
+        self.mirror_sent_orders = True
+        #: When false, an entry is mirrored *without* its requested stop loss --
+        #: the broker accepted the order and silently ignored ``sl``.
+        self.mirror_stop = True
 
     # -- session --------------------------------------------------------
 
@@ -300,7 +309,42 @@ class FakeMT5:
             result["volume"] = request.get("volume", 0.0)
         if result.get("price") is None and "price" in request:
             result["price"] = request["price"]
+        if self.mirror_sent_orders and result.get("retcode") in (10008, 10009, 10010):
+            self._mirror_entry(request, result)
         return _ns(**result)
+
+    def _mirror_entry(self, request: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+        """Record the position an accepted entry deal would create.
+
+        A close (``position`` set) removes nothing here on purpose: modelling
+        settlement is the repository's job, and the fake only answers what the
+        broker would answer about *this* request.  A caller that wants a closing
+        broker position must say so with ``positions=``.
+        """
+
+        if request.get("action") != 1 or "position" in request:
+            return
+        symbol = str(request.get("symbol", ""))
+        if not symbol:
+            return
+        self.positions.append(
+            {
+                "ticket": int(result.get("order") or 0),
+                "symbol": symbol,
+                "type": int(request.get("type", 0)),
+                "volume": float(result.get("volume") or request.get("volume") or 0.0),
+                "price_open": float(result.get("price") or request.get("price") or 0.0),
+                "price_current": float(result.get("price") or request.get("price") or 0.0),
+                "sl": float(request.get("sl") or 0.0) if self.mirror_stop else 0.0,
+                "tp": float(request.get("tp") or 0.0),
+                "swap": 0.0,
+                "profit": 0.0,
+                "magic": int(request.get("magic", 0) or 0),
+                "comment": str(request.get("comment", "") or ""),
+                "identifier": int(result.get("order") or 0),
+                "time": 1_772_000_000,
+            }
+        )
 
     def positions_get(self, *, symbol: str | None = None, ticket: int | None = None):
         rows = []
@@ -435,6 +479,8 @@ def make_position(
     comment: str = "",
     identifier: int | None = None,
     time: datetime | int = 1_772_000_000,
+    sl: float | None = None,
+    tp: float | None = None,
 ) -> dict[str, Any]:
     return {
         "ticket": ticket,
@@ -443,8 +489,8 @@ def make_position(
         "volume": volume,
         "price_open": price_open,
         "price_current": price_current,
-        "sl": 0.0,
-        "tp": 0.0,
+        "sl": 0.0 if sl is None else float(sl),
+        "tp": 0.0 if tp is None else float(tp),
         "swap": 0.0,
         "profit": 0.0,
         "magic": magic,

@@ -15,11 +15,13 @@ saved for one account can never be silently reused for another.
 from __future__ import annotations
 
 import json
+import tempfile
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from app.common.validation import ValidationResult
 
@@ -68,6 +70,57 @@ def _is_path(value: Any) -> bool:
     return "/" in str(value) or "\\" in str(value)
 
 
+#: The units a protective-stop distance may be declared in.  A value without a
+#: unit is refused: the unit is never guessed, because points and pips differ by
+#: a factor of ten on a five-digit symbol.
+STOP_UNITS: tuple[str, ...] = ("points", "pips")
+
+
+def normalise_pair_key(value: Any) -> str:
+    """``"eurusd"``/``"EUR/USD"``/``"EUR USD"`` -> ``"EUR/USD"``; ``""`` if unusable.
+
+    This normalises a *settings key*, not a broker symbol: resolving a pair to the
+    broker's own symbol is the adapter's job and is never guessed here.
+    """
+
+    text = "".join(character for character in str(value or "").upper() if character.isalnum())
+    if len(text) != 6 or not text.isalpha():
+        return ""
+    return f"{text[:3]}/{text[3:]}"
+
+
+def parse_stop_distance(value: Any) -> tuple[Decimal, str] | None:
+    """``"20 pips"`` -> ``(Decimal('20'), 'pips')``; ``None`` when unreadable.
+
+    Exactly one positive number and exactly one unit.  A bare number has no unit
+    and is refused rather than read as points or pips.
+    """
+
+    parts = str(value or "").strip().lower().split()
+    if len(parts) != 2:
+        return None
+    number, unit = parts
+    # Only the four spellings a person actually writes.  "20 pipss" is a typo, not
+    # a unit, and a unit this code guesses at is a distance it guessed at.
+    if unit not in ("point", "points", "pip", "pips"):
+        return None
+    unit = unit.rstrip("s")
+    try:
+        distance = Decimal(number)
+    except (InvalidOperation, ValueError):
+        return None
+    if not distance.is_finite() or distance <= 0:
+        return None
+    return distance, unit + "s"
+
+
+def format_stop_distance(distance: Decimal, unit: str) -> str:
+    """The canonical text stored in the settings document."""
+
+    text = format(Decimal(distance).normalize(), "f")
+    return f"{text} {unit}"
+
+
 def _looks_like_path(value: Any) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
@@ -109,6 +162,18 @@ class MT5Settings:
     #: Largest distance (in points) the live price may drift from the price the
     #: gate approved before the order is refused instead of chased.
     max_price_drift_points: int = 20
+    #: Per-symbol distance at which a broker-side stop loss is attached to every new
+    #: entry, keyed by pair and written with its unit: ``{"EUR/USD": "20 pips"}``.
+    #: A pair with no entry has no usable stop, and an entry for it is **refused**:
+    #: an unprotected position must never be opened, and a stop this build cannot
+    #: attach must never be described as a broker stop.  Per-symbol rather than one
+    #: global number, because 200 points is 20 pips on EUR/USD and 2 pips on USD/JPY.
+    protective_stops: Mapping[str, str] = field(default_factory=dict)
+    #: Legacy single distance in points.  Still accepted in an existing document so
+    #: that a file written by an older build keeps loading, but it is **not used for
+    #: entries**: one global number cannot be a consistent risk distance across
+    #: pairs.  ``protective_stops`` above is the only source of a live stop.
+    protective_stop_points: int = 0
     #: Seconds to wait for a trade terminal to answer before treating an
     #: outcome as unknown.
     timeout_ms: int = 60_000
@@ -194,6 +259,34 @@ class MT5Settings:
             errors.append("invalid_max_price_drift")
         elif self.max_price_drift_points < 0:
             errors.append("invalid_max_price_drift")
+        if not isinstance(self.protective_stop_points, int) or isinstance(
+            self.protective_stop_points, bool
+        ):
+            errors.append("invalid_protective_stop")
+        elif self.protective_stop_points < 0:
+            errors.append("invalid_protective_stop")
+        if not isinstance(self.protective_stops, Mapping):
+            errors.append("invalid_protective_stops")
+        else:
+            seen: set[str] = set()
+            for key, value in self.protective_stops.items():
+                pair = normalise_pair_key(key)
+                if not pair:
+                    errors.append(f"invalid_protective_stop_key:{key}")
+                    continue
+                if pair in seen:
+                    # Two spellings of one pair would make the distance ambiguous.
+                    errors.append(f"duplicate_protective_stop_pair:{pair}")
+                    continue
+                seen.add(pair)
+                parsed = parse_stop_distance(value)
+                if parsed is None:
+                    errors.append(f"invalid_protective_stop_value:{pair}")
+                    continue
+                distance, unit = parsed
+                if unit == "points" and distance != distance.to_integral_value():
+                    # MetaTrader stop levels are whole points.
+                    errors.append(f"fractional_protective_stop_points:{pair}")
         if not isinstance(self.timeout_ms, int) or isinstance(self.timeout_ms, bool):
             errors.append("invalid_timeout")
         elif self.timeout_ms <= 0:
@@ -239,11 +332,42 @@ class MT5Settings:
             "magic": self.magic,
             "deviation_points": self.deviation_points,
             "max_price_drift_points": self.max_price_drift_points,
+            "protective_stops": self.protective_stop_view(),
+            "protective_stop_points": self.protective_stop_points,
+            # A legacy global value is reported, not silently obeyed: entries read
+            # the per-symbol distance only.
+            "protective_stop_points_ignored": bool(self.protective_stop_points),
             "timeout_ms": self.timeout_ms,
             "credential_storage": "os_credential_vault",
             "plaintext_fallback": False,
             "data_class": self.data_class,
         }
+
+    def stop_text_for(self, pair: Any) -> str:
+        """The declared distance for ``pair``, exactly as written, or ``""``."""
+
+        wanted = normalise_pair_key(pair)
+        if not wanted:
+            return ""
+        for key, value in dict(self.protective_stops or {}).items():
+            if normalise_pair_key(key) == wanted:
+                return str(value or "").strip()
+        return ""
+
+    def stop_distance_for(self, pair: Any) -> tuple[Decimal, str] | None:
+        """``(distance, unit)`` for ``pair``, or ``None`` when there is no usable one."""
+
+        return parse_stop_distance(self.stop_text_for(pair))
+
+    def protective_stop_view(self) -> dict[str, str]:
+        """The configured distances, keys normalised, values as written."""
+
+        view: dict[str, str] = {}
+        for key, value in dict(self.protective_stops or {}).items():
+            pair = normalise_pair_key(key)
+            if pair:
+                view[pair] = str(value or "").strip()
+        return view
 
     def mode_label(self) -> str:
         if self.mode_value == MT5ExecutionMode.DISABLED.value:
@@ -514,6 +638,8 @@ _ALLOWED_KEYS = {
     "magic",
     "deviation_points",
     "max_price_drift_points",
+    "protective_stops",
+    "protective_stop_points",
     "timeout_ms",
 }
 
@@ -537,27 +663,38 @@ def mt5_settings_document(settings: MT5Settings) -> dict[str, Any]:
         "magic": settings.magic,
         "deviation_points": settings.deviation_points,
         "max_price_drift_points": settings.max_price_drift_points,
+        "protective_stops": dict(settings.protective_stop_view()),
         "timeout_ms": settings.timeout_ms,
         "note": (
             "No secret belongs in this file.  The MT5 password is stored only in "
             "the operating-system credential vault via "
-            "`axiom-forex mt5 --mt5-action set-password`."
+            "`axiom-forex mt5 --mt5-action set-password`.  "
+            "`protective_stops` maps a pair to a distance *with its unit*, e.g. "
+            '{"EUR/USD": "20 pips"}; a live entry for a pair with no usable distance '
+            "is refused rather than sent unprotected.  The older single "
+            "`protective_stop_points` value is accepted but not used for entries."
         ),
     }
 
 
-def load_settings_file(path: str | Path) -> MT5Settings | None:
-    """Read the local document.  ``None`` when the file does not exist."""
+def _stops_from_document(document: Mapping[str, Any]) -> dict[str, str]:
+    """The per-symbol distances in a document, exactly as written.
 
-    location = Path(path)
-    if not location.exists():
-        return None
-    try:
-        document = json.loads(location.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise MT5SettingsFileError("mt5_settings_file_unreadable", type(exc).__name__) from exc
-    if not isinstance(document, dict):
-        raise MT5SettingsFileError("mt5_settings_file_not_an_object")
+    A malformed section is refused rather than repaired: a stop this build cannot
+    read is a stop that cannot be attached.
+    """
+
+    raw = document.get("protective_stops")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise MT5SettingsFileError("mt5_settings_file_invalid", "protective_stops")
+    return {str(key): str(value if value is not None else "") for key, value in raw.items()}
+
+
+def check_document_keys(document: Mapping[str, Any]) -> None:
+    """Refuse a document that carries a secret or a key this build does not know."""
+
     for key in document:
         lowered = str(key).lower()
         if any(fragment in lowered for fragment in _SECRET_KEY_FRAGMENTS):
@@ -567,6 +704,12 @@ def load_settings_file(path: str | Path) -> MT5Settings | None:
             )
         if lowered not in _ALLOWED_KEYS and lowered != "note":
             raise MT5SettingsFileError("mt5_settings_file_unknown_key", str(key))
+
+
+def settings_from_document(document: Mapping[str, Any]) -> MT5Settings:
+    """Build and validate settings from a document, or raise ``MT5SettingsFileError``."""
+
+    check_document_keys(document)
     try:
         settings = MT5Settings(
             terminal_path=str(document.get("terminal_path", "")),
@@ -590,6 +733,10 @@ def load_settings_file(path: str | Path) -> MT5Settings | None:
             max_price_drift_points=int(
                 document.get("max_price_drift_points", 20) or 0
             ),
+            protective_stop_points=int(
+                document.get("protective_stop_points", 0) or 0
+            ),
+            protective_stops=_stops_from_document(document),
             timeout_ms=int(document.get("timeout_ms", 60_000) or 0),
         )
     except (TypeError, ValueError) as exc:
@@ -598,6 +745,84 @@ def load_settings_file(path: str | Path) -> MT5Settings | None:
     if not result.valid:
         raise MT5SettingsFileError("mt5_settings_invalid", result.reason)
     return settings
+
+
+def write_protective_stop(
+    path: str | Path, *, pair: Any, distance: Any
+) -> dict[str, Any]:
+    """Set one per-symbol stop distance in the local document.
+
+    Only ``protective_stops`` is touched: every other key keeps its value and its
+    position, and the result is re-read through the same validator the launcher
+    uses before a single byte replaces the file.  Nothing is written when the
+    document is missing, carries a secret, or would not load afterwards.
+    """
+
+    location = Path(path)
+    if not location.exists():
+        raise MT5SettingsFileError("mt5_settings_file_missing", str(location.name))
+    try:
+        document = json.loads(location.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise MT5SettingsFileError("mt5_settings_file_unreadable", type(exc).__name__) from exc
+    if not isinstance(document, dict):
+        raise MT5SettingsFileError("mt5_settings_file_not_an_object")
+    normalised = normalise_pair_key(pair)
+    if not normalised:
+        raise MT5SettingsFileError("invalid_protective_stop_key", str(pair))
+    parsed = parse_stop_distance(distance)
+    if parsed is None:
+        raise MT5SettingsFileError("invalid_protective_stop_value", f"{pair}={distance}")
+    text = format_stop_distance(*parsed)
+
+    existing = dict(document.get("protective_stops") or {})
+    # Drop any other spelling of the same pair so the file cannot hold two.
+    existing = {
+        key: value
+        for key, value in existing.items()
+        if normalise_pair_key(key) != normalised
+    }
+    existing[normalised] = text
+    candidate = dict(document)
+    candidate["protective_stops"] = existing
+    # Validate before writing: an unreadable file is worse than an unwritten one.
+    settings_from_document(candidate)
+
+    # Written beside the document and renamed over it, so a reader never sees half
+    # a file.  No shell-out, no environment, no network: just the one path.
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix=location.name + ".",
+        suffix=".tmp",
+        dir=str(location.parent),
+        delete=False,
+        encoding="utf-8",
+    )
+    temporary = Path(handle.name)
+    try:
+        with handle as stream:
+            json.dump(candidate, stream, indent=2)
+            stream.write("\n")
+        temporary.replace(location)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {"pair": normalised, "distance": text, "document": candidate}
+
+
+def load_settings_file(path: str | Path) -> MT5Settings | None:
+    """Read the local document.  ``None`` when the file does not exist."""
+
+    location = Path(path)
+    if not location.exists():
+        return None
+    try:
+        document = json.loads(location.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise MT5SettingsFileError("mt5_settings_file_unreadable", type(exc).__name__) from exc
+    if not isinstance(document, dict):
+        raise MT5SettingsFileError("mt5_settings_file_not_an_object")
+    return settings_from_document(document)
 
 
 def make_password_store(

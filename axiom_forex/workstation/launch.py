@@ -912,6 +912,7 @@ def _wire_live(args, app, *, settings, settings_path: Path, extra_candidates: An
         feed_factory=feed_factory,
         terminal_getter=lambda: read_only_terminal(app.wizard.session),
         provider_setup_path=provider_setup or None,
+        settings_path=settings_path,
         interval_seconds=max(int(args.paper_runner_interval), 1),
         quote_age_seconds=str(args.paper_runner_quote_age),
         candidates=tuple(candidate_family()) + tuple(extra_candidates or ()),

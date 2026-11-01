@@ -13,7 +13,12 @@ Order of gates, in the order they are checked on every submission:
    that matches the one being submitted, field for field;
 7. **instrument terms** -- catalog spec agrees with the broker's symbol;
 8. **price and margin** -- fresh tick within the drift allowance, margin
-   computable and coverable.
+   computable and coverable;
+9. **protective stop** -- a configured broker-side stop distance, no open
+   position of ours left unprotected, and, after the send, the broker's own
+   position record echoing that stop back.  An entry whose stop cannot be
+   attached is refused; one whose stop the broker does not report is recorded
+   as unconfirmed, trading is disarmed, and no further entry is sent.
 
 Only then is the write-ahead record persisted, exactly one ``order_send`` is
 issued, and the answer is classified.  An unanswered order is recorded as
@@ -42,6 +47,8 @@ from ...config.mt5 import (
     MT5Settings,
     MT5SettingsError,
     MT5TradingNotAuthorised,
+    normalise_pair_key,
+    parse_stop_distance,
 )
 from .conformance import conformance_requirements
 from .account import AccountTerms, account_terms, margin_for_order
@@ -56,7 +63,10 @@ from .orders import (
     filling_for,
     netting_conflict,
     open_positions,
+    protective_stop_price,
     send_order,
+    stop_distance_points,
+    stop_loss_confirmed,
 )
 from .reconcile import (
     MT5_BLOCKING_STATES,
@@ -729,6 +739,136 @@ class MT5TradingAdapter:
     def positions(self, *, symbol: str | None = None) -> list[MT5Position]:
         return open_positions(self.terminal, symbol=symbol)
 
+    def stop_requirement(
+        self,
+        spec: CurrencyPairSpec,
+        *,
+        text: str | None = None,
+        symbol: str | None = None,
+        info: Any = None,
+    ) -> dict[str, Any]:
+        """Everything needed to judge (and show) one symbol's broker-side stop.
+
+        ``valid`` is true only when a distance is declared *with its unit*, it
+        converts to a whole number of the broker's points, and it is at least the
+        broker's own ``stops_level``.  Nothing is defaulted: a pair with no entry
+        in ``protective_stops`` has no usable distance, however small the risk
+        looks.
+        """
+
+        pair = str(
+            getattr(spec, "canonical_pair", "") or getattr(spec, "pair", "") or ""
+        )
+        declared = (
+            str(text).strip()
+            if text is not None
+            else self.settings.stop_text_for(pair)
+        )
+        legacy = int(getattr(self.settings, "protective_stop_points", 0) or 0)
+        result: dict[str, Any] = {
+            "pair": pair,
+            "broker_symbol": str(symbol or ""),
+            "declared": declared,
+            "unit": "",
+            "distance": "",
+            "distance_points": None,
+            "distance_price": None,
+            "point": None,
+            "digits": None,
+            "pip_size": None,
+            "broker_min_points": None,
+            "broker_min_price": None,
+            "valid": False,
+            "reason": "",
+            "detail": "",
+            "source": "settings" if text is None else "operator_input",
+            "legacy_global_points_ignored": legacy,
+            "connected": bool(getattr(self, "connected", False)),
+        }
+        parsed = parse_stop_distance(declared)
+        if parsed is not None:
+            result["distance"], result["unit"] = (
+                format(Decimal(parsed[0]).normalize(), "f"),
+                parsed[1],
+            )
+        if not declared:
+            result["reason"] = "mt5_protective_stop_not_configured_for_symbol"
+            result["detail"] = (
+                f"no distance is declared for {normalise_pair_key(pair) or pair}"
+            )
+            return result
+        if parsed is None:
+            result["reason"] = "mt5_protective_stop_invalid"
+            result["detail"] = "a distance needs one number and one unit (points or pips)"
+            return result
+        if not result["connected"]:
+            result["reason"] = "mt5_not_connected"
+            result["detail"] = "the broker's point size and minimum are unread"
+            return result
+        try:
+            if symbol is None or info is None:
+                resolved_symbol, resolved_info = self.symbol_info(spec)
+                symbol = symbol or resolved_symbol
+                info = info or resolved_info
+        except Exception as exc:
+            result["reason"] = str(getattr(exc, "reason", "") or "mt5_symbol_unresolved")
+            result["detail"] = type(exc).__name__
+            return result
+        result["broker_symbol"] = str(symbol)
+        point = getattr(info, "point", None)
+        digits = int(getattr(info, "digits", 0) or 0)
+        pip_size = None
+        try:
+            pip_size = spec.pip_size_decimal()
+        except Exception:
+            pip_size = None
+        result.update(
+            {
+                "point": None if point is None else str(point),
+                "digits": digits,
+                "pip_size": None if pip_size is None else str(pip_size),
+            }
+        )
+        points, problem = stop_distance_points(
+            parsed[0], parsed[1], point=point, pip_size=pip_size
+        )
+        broker_min = int(getattr(info, "stops_level", 0) or 0)
+        result["broker_min_points"] = broker_min
+        if point is not None:
+            result["broker_min_price"] = str(
+                (Decimal(point) * Decimal(broker_min)).normalize()
+            )
+        if points is None:
+            result["reason"] = problem
+            result["detail"] = (
+                f"{result['distance']} {result['unit']} cannot be expressed in the "
+                f"broker's points (point={result['point']}, pip={result['pip_size']})"
+            )
+            return result
+        result["distance_points"] = points
+        result["distance_price"] = (
+            None if point is None else str((Decimal(point) * Decimal(points)).normalize())
+        )
+        if broker_min and points < broker_min:
+            result["reason"] = "mt5_protective_stop_below_broker_minimum"
+            result["detail"] = (
+                f"{points} point(s) is inside the broker's minimum of {broker_min}"
+            )
+            return result
+        result["valid"] = True
+        return result
+
+    def unprotected_positions(self) -> list[dict[str, Any]]:
+        """Positions this deployment placed that the broker reports without a stop.
+
+        Raised, not swallowed: an unreadable position list is not evidence that
+        every position is protected.
+        """
+
+        from .reconcile import unprotected_positions as _unprotected
+
+        return list(_unprotected(self.positions(), magic=int(self.settings.magic)))
+
     # -- recover --------------------------------------------------------
 
     def _record_account_fingerprint(self, record: Mapping[str, Any]) -> str:
@@ -880,7 +1020,12 @@ class MT5TradingAdapter:
             for row in ledger_positions
             if not row.get("account_id") or str(row.get("account_id")) == current
         ]
-        return reconcile_positions(broker, scoped, pair_for_symbol=mapping)
+        return reconcile_positions(
+            broker,
+            scoped,
+            pair_for_symbol=mapping,
+            magic=int(self.settings.magic),
+        )
 
     def history(
         self, *, start: datetime, end: datetime
@@ -918,6 +1063,46 @@ class MT5TradingAdapter:
         side = intent.side.value if hasattr(intent.side, "value") else str(intent.side).upper()
         tick = self.terminal.tick(symbol)
         price = tick.ask if side == "BUY" else tick.bid
+        # A close never carries a new stop: it removes the exposure the stop was
+        # protecting.  An entry must carry one, sized from the declared settings.
+        entry = intent.close_position_id is None
+        stop_price: Decimal | None = None
+        stop_points = 0
+        stop_declared = ""
+        if entry:
+            requirement = self.stop_requirement(spec, symbol=symbol, info=info)
+            stop_declared = str(requirement.get("declared", ""))
+            if not requirement.get("valid"):
+                stop_problem = requirement.get("reason") or "mt5_protective_stop_unavailable"
+                self._audit(
+                    "MT5_ORDER_STOP_REFUSED",
+                    allowed=False,
+                    request_id=intent.request_id,
+                    reason=stop_problem,
+                    protective_stop=stop_declared,
+                    live=False,
+                )
+                raise MT5SubmitRefused(stop_problem, requirement.get("detail", ""))
+            stop_points = int(requirement["distance_points"])
+            stop_price, stop_problem = protective_stop_price(
+                side=side,
+                reference=price,
+                point=info.point,
+                digits=info.digits,
+                points=stop_points,
+                stops_level=int(info.stops_level or 0),
+            )
+            if stop_price is None:
+                self._audit(
+                    "MT5_ORDER_STOP_REFUSED",
+                    allowed=False,
+                    request_id=intent.request_id,
+                    reason=stop_problem,
+                    protective_stop=stop_declared,
+                    protective_stop_points=stop_points,
+                    live=False,
+                )
+                raise MT5SubmitRefused(stop_problem or "mt5_protective_stop_unavailable")
         request = build_market_request(
             symbol=symbol,
             side=side,
@@ -928,6 +1113,7 @@ class MT5TradingAdapter:
             comment=intent.request_id,
             filling=filling,
             position_ticket=close_ticket,
+            stop_loss=stop_price,
         )
         check: MT5OrderCheck = check_order(self.terminal, request)
         if not check.allowed:
@@ -972,6 +1158,15 @@ class MT5TradingAdapter:
             "filling": filling_name,
             "order_ticket": 0,
             "decision_id": str(preflight.get("decision_id", "")),
+            "protective_stop": {
+                "declared": stop_declared,
+                "requested": "" if stop_price is None else str(stop_price),
+                "points": stop_points if entry else 0,
+                "verified": None,
+                "broker_stop_loss": "",
+                "detail": "" if entry else "not_an_entry",
+                "ticket": 0,
+            },
         }
         try:
             self.repository.save_orders([record])
@@ -1028,6 +1223,47 @@ class MT5TradingAdapter:
             volume_filled=outcome.volume_filled,
             live=True,
         )
+        if entry:
+            record["protective_stop"] = self._verify_stop(
+                symbol=symbol,
+                side=side,
+                expected=stop_price,
+                points=stop_points,
+                declared=stop_declared,
+                point=info.point,
+                outcome=outcome,
+            )
+            try:
+                self.repository.save_orders([record])
+            except Exception:
+                # The unverified record is already visible through the audit
+                # event below; the SUBMITTING/FILLED row still holds the stop
+                # request, so recovery can compare it with the broker.
+                pass
+            if record["protective_stop"].get("verified") is not True:
+                self._audit(
+                    "MT5_ORDER_STOP_UNCONFIRMED",
+                    allowed=False,
+                    request_id=intent.request_id,
+                    state=state,
+                    reason=record["protective_stop"].get("detail", ""),
+                    protective_stop_points=stop_points,
+                    protective_stop=str(record["protective_stop"].get("requested", "")),
+                    live=True,
+                )
+                # A position this build cannot prove is protected must not be
+                # joined by another: disarm, and reconcile before anything else.
+                self.disarm(reason="protective_stop_unconfirmed")
+            else:
+                self._audit(
+                    "MT5_ORDER_STOP_VERIFIED",
+                    allowed=True,
+                    request_id=intent.request_id,
+                    state=state,
+                    protective_stop_points=stop_points,
+                    protective_stop=str(record["protective_stop"].get("requested", "")),
+                    live=True,
+                )
         if outcome.unknown or state in {"UNRESOLVED"}:
             # Fail closed: no further live order until reconciled.
             self.disarm(reason="unknown_order_outcome")
@@ -1189,6 +1425,35 @@ class MT5TradingAdapter:
                 f"required={margin} free={self._terms.margin_free}",
             )
 
+        # Protection is a property of the account, not only of the new order: a
+        # position this deployment placed without a stop blocks the next entry
+        # until it is dealt with.  Refusing here means the write-ahead row and
+        # the order itself are never created.
+        stop = {
+            "declared": "",
+            "distance_points": None,
+            "valid": True,
+            "reason": "",
+        }
+        if intent.close_position_id is None:
+            stop = self.stop_requirement(spec, symbol=symbol, info=info)
+            if not stop.get("valid"):
+                raise MT5SubmitRefused(
+                    stop.get("reason") or "mt5_protective_stop_unavailable",
+                    stop.get("detail", ""),
+                )
+            try:
+                unprotected = self.unprotected_positions()
+            except Exception as exc:
+                raise MT5SubmitRefused(
+                    "mt5_positions_unavailable", type(exc).__name__
+                ) from exc
+            if unprotected:
+                raise MT5SubmitRefused(
+                    "mt5_unprotected_position_present",
+                    ",".join(str(row.get("ticket", 0)) for row in unprotected),
+                )
+
         return {
             "decision_id": str(getattr(decision, "audit_event", {}).get("event_id", "")),
             "request_id": intent.request_id,
@@ -1205,6 +1470,8 @@ class MT5TradingAdapter:
             "margin_required": margin,
             "margin_free": self._terms.margin_free,
             "close_position_ticket": close_ticket,
+            "protective_stop": dict(stop),
+            "protective_stop_points": stop.get("distance_points") or 0,
             "checks": [
                 "settings_valid",
                 "trading_enabled",
@@ -1222,8 +1489,64 @@ class MT5TradingAdapter:
                 "price_drift_within_limit",
                 "volume_valid",
                 "margin_covered",
+                "protective_stop_configured",
+                "protective_stop_above_broker_minimum",
+                "no_unprotected_position",
             ],
         }
+
+    def _verify_stop(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        expected: Decimal | None,
+        points: int,
+        declared: str,
+        point: Decimal | None,
+        outcome: MT5OrderOutcome,
+    ) -> dict[str, Any]:
+        """Ask the broker what stop the position actually carries.
+
+        The answer is never inferred from the request: a stop that was sent but
+        is not visible on the broker's position record is ``verified: False``.
+        """
+
+        record: dict[str, Any] = {
+            "declared": declared,
+            "requested": "" if expected is None else str(expected),
+            "points": int(points),
+            "verified": False,
+            "broker_stop_loss": "",
+            "detail": "",
+            "ticket": 0,
+        }
+        if not outcome.accepted:
+            record["detail"] = "order_not_accepted"
+            return record
+        try:
+            positions = self.positions(symbol=symbol)
+        except Exception as exc:
+            record["detail"] = f"positions_unavailable:{type(exc).__name__}"
+            return record
+        candidates = [
+            position
+            for position in positions
+            if position.symbol.upper() == str(symbol).upper()
+            and position.side == str(side).upper()
+            and int(position.magic) == int(self.settings.magic)
+        ]
+        position = max(candidates, key=lambda item: item.ticket) if candidates else None
+        tolerance = Decimal(point) if point is not None else Decimal(0)
+        confirmed, detail = stop_loss_confirmed(position, expected, tolerance=tolerance)
+        record["verified"] = bool(confirmed)
+        record["detail"] = detail
+        if position is not None:
+            record["ticket"] = int(position.ticket)
+            record["broker_stop_loss"] = (
+                "" if position.stop_loss is None else str(position.stop_loss)
+            )
+        return record
 
     # -- auditing -------------------------------------------------------
 
@@ -1259,6 +1582,8 @@ class MT5TradingAdapter:
             "trade_allowed",
             "mode",
             "evidence",
+            "protective_stop",
+            "protective_stop_points",
             "live",
         ):
             if key in fields:

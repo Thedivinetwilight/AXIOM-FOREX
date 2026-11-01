@@ -105,6 +105,9 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
 #:   * ``imports-refresh`` / ``ticks-convert`` / ``dataset-evaluate`` -- the
 #:     data workflow.  They touch local files and the research database, and
 #:     nothing else: no connection, no order, no arming, no mode change.
+#:   * ``live-stop-settings`` -- write one per-symbol broker-side stop distance
+#:     into the local MT5 settings document, judged against the connected
+#:     terminal's own symbol record first.  It writes no plan and sends nothing.
 #:   * ``live-arm`` / ``live-disarm`` / ``live-start`` / ``live-stop`` -- the
 #:     live execution workflow.  Arming writes the operator's plan and arms the
 #:     broker adapter (it sends nothing); starting begins the strategy loop;
@@ -200,6 +203,8 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "live-disarm",
         "live-start",
         "live-stop",
+        "live-stop-settings",
+        "catalog-audit",
     }
 )
 
@@ -333,6 +338,9 @@ class WorkstationApp:
     catalog: Any = None
     #: The last catalog action's result, shown once on the next render.
     catalog_result: dict[str, Any] = field(default_factory=dict)
+    #: The last full-catalog audit this process produced, if any.  It is a report
+    #: of the stored evaluation: reading it evaluates nothing and promotes nothing.
+    catalog_audit: dict[str, Any] = field(default_factory=dict)
 
     #: The autopilot: evaluate, select, then follow the selection as a paper test.
     #: ``None`` means this process has no autopilot and the page says so. It holds
@@ -780,6 +788,68 @@ class WorkstationApp:
             self._log(f"strategy funnel failed: {type(exc).__name__}")
             return {"available": False, "reason": "funnel_unavailable"}
 
+    def _catalog_audit(self) -> tuple[int, str, str]:
+        """Account for every declared candidate, from the record already on disk.
+
+        This reads the stored evaluation and writes a report.  It evaluates
+        nothing, re-ranks nothing, and cannot promote anything; a run that never
+        reached a candidate is reported as skipped with the reason it gives.
+        """
+
+        from pathlib import Path as _Path
+
+        from axiom_forex.strategies.catalog import audit as catalog_audit
+
+        if self.catalog is None:
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "/quick-setup",
+                "This workstation has no catalog panel, so there is no evaluation to "
+                "audit.",
+            )
+        payload = None
+        try:
+            record = self.catalog._record()
+            payload = dict(getattr(record, "payload", None) or {}) or None
+        except Exception as exc:  # a read model never raises into the page
+            self._log(f"catalog audit could not read the record: {type(exc).__name__}")
+        try:
+            document = catalog_audit.build_audit(payload)
+            path = catalog_audit.write_audit(
+                document,
+                _Path(self.catalog.store.path).parent / catalog_audit.AUDIT_RECORD,
+            )
+        except Exception as exc:
+            self._log(f"catalog audit failed: {type(exc).__name__}")
+            return (
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "/quick-setup",
+                "The audit could not be written. Nothing was evaluated and nothing "
+                "was changed.",
+            )
+        self.catalog_audit = document
+        summary = dict(document.get("summary") or {})
+        self.catalog_result = {
+            "ok": True,
+            "action": "audit",
+            "message": (
+                f"Audited {summary.get('declared', 0)} declared candidate(s): "
+                f"{summary.get('tested', 0)} tested, {summary.get('skipped', 0)} skipped, "
+                f"{summary.get('failed', 0)} failed, "
+                f"{summary.get('not_considered', 0)} not considered. Written to {path.name}. "
+                "A historical evaluation, not a forecast."
+            ),
+        }
+        self._log(
+            f"catalog audit written: {summary.get('tested', 0)} tested / "
+            f"{summary.get('skipped', 0)} skipped / {summary.get('failed', 0)} failed"
+        )
+        return (
+            HTTPStatus.SEE_OTHER,
+            "/quick-setup",
+            str(self.catalog_result["message"]),
+        )
+
     def catalog_view(self) -> dict[str, Any]:
         """The catalog panel's own view, or an honest "not wired" state."""
 
@@ -795,6 +865,17 @@ class WorkstationApp:
                 "message": "The catalog panel could not be read. Nothing was run.",
             }
         view.setdefault("available", True)
+        audit = getattr(self, "catalog_audit", None)
+        if audit:
+            from axiom_forex.strategies.catalog import audit as catalog_audit
+
+            view["audit"] = {
+                **catalog_audit.summarise(audit),
+                "candidates": [
+                    dict(item) for item in (audit.get("candidates") or ())[:60]
+                ],
+                "candidates_total": len(audit.get("candidates") or ()),
+            }
         if self.catalog_result:
             view["result"] = dict(self.catalog_result)
             self.catalog_result = {}
@@ -1133,6 +1214,10 @@ class WorkstationApp:
         if action.startswith("autopilot-"):
             return self._autopilot_action(action, form)
         if action.startswith("catalog-"):
+            # The audit reads the panel's stored record and writes a report; it is
+            # not a panel action, so it is dispatched before the panel sees it.
+            if action == "catalog-audit":
+                return self._catalog_audit()
             return self._catalog_action(action, form)
         if action.startswith("strategy-"):
             return self._strategies_action(action, form)
@@ -1298,7 +1383,13 @@ class WorkstationApp:
             )
         if action == "provider-setup-save":
             return self._provider_setup_save(form)
-        if action in {"live-arm", "live-disarm", "live-start", "live-stop"}:
+        if action in {
+            "live-arm",
+            "live-disarm",
+            "live-start",
+            "live-stop",
+            "live-stop-settings",
+        }:
             return self._live_action(action, form)
         if action in {"imports-refresh", "ticks-convert", "dataset-evaluate"}:
             return self._data_action(action, form)
@@ -1413,9 +1504,11 @@ class WorkstationApp:
             values = {
                 "candidate_id": field("candidate_id"),
                 "pair": field("pair"),
+                "timeframe": field("timeframe"),
                 "quantity": field("quantity"),
                 "max_open_positions": field("max_open_positions"),
                 "max_daily_loss_account": field("max_daily_loss_account"),
+                "protective_stop_pips": field("protective_stop_pips"),
             }
             result = live.arm(
                 values,
@@ -1451,7 +1544,7 @@ class WorkstationApp:
             )
 
         if action == "live-disarm":
-            self._stop_live(detail="operator disarm", close=True)
+            self._stop_live(detail="operator disarm", close=False)
             self._log("live plan disarmed")
             return (
                 HTTPStatus.SEE_OTHER,
@@ -1476,14 +1569,65 @@ class WorkstationApp:
                 f"{outcome.get('message', '')} Nothing was sent.",
             )
 
-        # live-stop: the prominent control.  Always allowed, never refused.
-        live.stop_session(reason="operator_stop", close=True)
+        if action == "live-stop-settings":
+            return self._save_stop_setting(live, field)
+
+        # live-stop: the prominent control.  Always allowed, never refused, and it
+        # closes nothing: stopping the loop is not the same act as flattening the
+        # account, and the page must never do the second one silently.
+        live.stop_session(reason="operator_stop", close=False)
         self._log("live session stopped and disarmed")
+        try:
+            open_positions = len((live.view() or {}).get("positions") or [])
+        except Exception:
+            open_positions = 0
         return (
             HTTPStatus.SEE_OTHER,
             "/live",
-            "Stopped and disarmed. No further order can be sent from this session.",
+            "Stopped and disarmed: no further order can be sent from this session. "
+            "No position was closed"
+            + (
+                f"; {open_positions} position(s) are still open in MetaTrader 5 and are "
+                "yours to manage."
+                if open_positions
+                else "."
+            ),
         )
+
+    def _save_stop_setting(self, live: Any, field: Any) -> tuple[int, str, str]:
+        """Set one per-symbol broker-side stop distance, judged by the broker.
+
+        The value is checked against the connected terminal's own symbol record
+        before anything is written, and the write is refused while trading is armed
+        or a session is running.  Only ``protective_stops`` in the local settings
+        document changes; nothing here touches the plan, the mode, the account, or
+        any order.
+        """
+
+        pair = field("pair")
+        distance = field("distance")
+        unit = field("unit")
+        if unit not in {"points", "pips"}:
+            self._log("stop setting refused: no unit chosen")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/live",
+                "Choose the unit explicitly: points or pips. Nothing was saved.",
+            )
+        if not distance:
+            self._log("stop setting refused: empty distance")
+            return HTTPStatus.SEE_OTHER, "/live", "Enter a distance. Nothing was saved."
+        text = f"{distance} {unit}"
+        result = live.save_stop_setting(pair, text)
+        if not result.get("saved"):
+            self._log(f"stop setting refused: {result.get('reason')}")
+            return (
+                HTTPStatus.SEE_OTHER,
+                "/live",
+                f"Not saved: {result.get('message', result.get('reason', ''))}",
+            )
+        self._log(f"stop setting saved: {result.get('pair')} {result.get('distance')}")
+        return HTTPStatus.SEE_OTHER, "/live", str(result.get("message", "Saved."))
 
     def _stop_live(self, *, detail: str, close: bool = True) -> None:
         """Stop the live session and disarm, swallowing nothing a page needs."""

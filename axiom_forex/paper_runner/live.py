@@ -61,6 +61,8 @@ ROUTE_REFUSED = "live_route_refused"
 SUBMIT_REFUSED = "live_submit_refused"
 BOOKING_FAILED = "live_fill_not_booked"
 STATUS_UNREADABLE = "live_status_unreadable"
+PROTECTIVE_STOP_MISSING = "live_protective_stop_missing"
+PROTECTIVE_STOP_UNCONFIGURED = "live_protective_stop_unconfigured"
 
 #: Reasons that mean "the broker may have an order we cannot account for".
 BLOCKING_REASONS = frozenset({UNRESOLVED_ORDER, "live_order_outcome_unknown"})
@@ -357,6 +359,29 @@ class LiveLeg:
                     "relaxed to make an order possible.",
                 )
             )
+        requirement = None
+        if self.adapter is not None and getattr(self, "spec", None) is not None:
+            try:
+                requirement = self.adapter.stop_requirement(self.spec)
+            except Exception:
+                requirement = None
+        if requirement is not None and not requirement.get("valid"):
+            declared = str(requirement.get("declared") or "")
+            symbol = str(requirement.get("broker_symbol") or "")
+            blockers.append(
+                LiveBlocker(
+                    PROTECTIVE_STOP_UNCONFIGURED,
+                    (
+                        f"No usable broker-side stop distance for {symbol or 'this symbol'}"
+                        + (f" (declared: {declared})" if declared else " (none declared)")
+                        + f": {requirement.get('reason', '')}. Live entries are refused."
+                    ),
+                    "Set the distance, with its unit, under Broker-side stop on the "
+                    "Live execution page (for example a pair entry of \"20 pips\"). "
+                    "Nothing is guessed for you, and a build that cannot attach a stop "
+                    "does not send unprotected orders.",
+                )
+            )
         if status.get("unresolved_orders"):
             blockers.append(
                 LiveBlocker(
@@ -402,14 +427,33 @@ class LiveLeg:
             if ledger_positions is not None
             else self._ledger_rows()
         )
+        unprotected: list[dict[str, Any]] = []
         if rows is not None:
             try:
                 comparison = self.adapter.reconcile(rows)
                 reconciled = bool(getattr(comparison, "reconciled", False))
                 detail = "" if reconciled else _differences(comparison)
+                unprotected = [
+                    dict(row) for row in getattr(comparison, "unprotected", ()) or ()
+                ]
             except Exception as exc:
                 reconciled = False
                 detail = type(exc).__name__
+            if unprotected:
+                blockers.append(
+                    LiveBlocker(
+                        PROTECTIVE_STOP_MISSING,
+                        f"{len(unprotected)} open position(s) placed by this deployment "
+                        "carry no broker-side stop loss ("
+                        + ", ".join(
+                            f"ticket {row.get('ticket', 0)}" for row in unprotected
+                        )
+                        + ").",
+                        "AXIOM refuses new entries while a position is unprotected, and "
+                        "will not invent a stop for it. Close the position, or set the "
+                        "stop in the terminal, then reconcile.",
+                    )
+                )
             if not reconciled:
                 blockers.append(
                     LiveBlocker(

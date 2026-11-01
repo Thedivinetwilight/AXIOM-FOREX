@@ -69,9 +69,13 @@ class FakeAutopilot:
         reason: str = "",
         kronos_policy: str = "OFF",
         raise_on_status: bool = False,
+        pair: str = PAIR,
+        timeframe: str = "1h",
     ) -> None:
         self.state = state
         self.selected = selected
+        self.pair = pair
+        self.timeframe = timeframe
         self.reason = reason
         self.kronos_policy = kronos_policy
         self.raise_on_status = raise_on_status
@@ -91,7 +95,8 @@ class FakeAutopilot:
 
     def handoff(self) -> dict[str, Any]:
         proposed = [
-            {"candidate_id": item, "pair": PAIR, "timeframe": "1h"} for item in self.selected
+            {"candidate_id": item, "pair": self.pair, "timeframe": self.timeframe}
+            for item in self.selected
         ]
         return {"available": False, "enabled": False, "proposed": proposed, "blockers": []}
 
@@ -104,8 +109,12 @@ def plan(**overrides: Any) -> dict[str, Any]:
         "strategy_label": "SMA cross, bracket exit",
         "pair": PAIR,
         "broker_symbol": BROKER_SYMBOL,
+        # The fakes' selection is declared on 1h bars, so the standing plan matches
+        # it: a mismatch in a test has to be asked for explicitly.
+        "timeframe": "1h",
         "quantity": "0.10",
         "max_open_positions": 1,
+        "protective_stop_pips": "25",
         "max_daily_loss_account": "50",
         "account_currency": "USD",
         "evidence_state": "UNVALIDATED",
@@ -705,9 +714,11 @@ def _arm(case, *, candidate: str = LIVE_CANDIDATE):
     )
 
 
-def _pilot(case, *, selected: str = LIVE_CANDIDATE):
+def _pilot(case, *, selected: str = LIVE_CANDIDATE, timeframe: str = "15m"):
+    # The fixture's plan is armed on 15m bars, so an agreeing selection is the
+    # baseline: a mismatch has to be asked for explicitly.
     return LiveAutopilot(
-        autopilot=FakeAutopilot(selected=(selected,)),
+        autopilot=FakeAutopilot(selected=(selected,), timeframe=timeframe),
         trading=case.controller,
         clock=lambda: NOW,
     )
@@ -793,3 +804,82 @@ def test_the_bridge_refuses_an_unreadable_live_path(live_case) -> None:
 
     assert module.PLAN_MISSING in reasons(view)
     assert module.NO_LIVE_WORKFLOW not in reasons(view)
+
+
+# -- the plan and the selection must agree on the whole identity ------------
+#
+# A strategy is (which rule, which symbol, which bars).  Two of the three matching
+# is a different strategy, so each disagreement is its own named blocker rather
+# than something a page silently averages away.
+
+
+def test_a_plan_for_another_symbol_is_not_the_selected_strategy() -> None:
+    view = build(trading=FakeTrading(plan_doc=plan(pair="GBP/USD", timeframe="1h"))).view()
+
+    assert module.PLAN_PAIR_MISMATCH in reasons(view)
+    assert "GBP/USD" in view.blockers[0].message or any(
+        "GBP/USD" in item.message for item in view.blockers
+    )
+
+
+def test_a_plan_on_another_bar_size_is_not_the_selected_strategy() -> None:
+    view = build(trading=FakeTrading(plan_doc=plan(timeframe="5m"))).view()
+
+    assert module.PLAN_TIMEFRAME_MISMATCH in reasons(view)
+
+
+def test_a_plan_that_agrees_on_rule_symbol_and_bars_has_no_mismatch() -> None:
+    view = build(trading=FakeTrading(plan_doc=plan(timeframe="1h"))).view()
+
+    assert module.PLAN_TIMEFRAME_MISMATCH not in reasons(view)
+    assert module.PLAN_PAIR_MISMATCH not in reasons(view)
+    # What the page shows is the bar size the plan will actually decide on.
+    assert view.timeframe == "1h"
+    assert view.strategy["protective_stop_pips"] == "25"
+
+
+def test_the_bridge_refuses_a_plan_whose_bar_size_is_not_the_stacks(live_case) -> None:
+    """The stack's own interval is the ground truth, and it is not negotiable."""
+
+    _arm(live_case)
+    # The plan was armed on 15m bars; this stack reads hourly bars.
+    live_case.controller.live_interval_seconds = 3600
+
+    view = _pilot(live_case).start()
+
+    assert view.state == BLOCKED
+    assert "live_plan_timeframe_mismatch" in reasons(view)
+    assert live_case.controller.session is None
+    assert live_case.fake.send_requests == []
+
+
+def test_a_matching_bar_size_leaves_no_timeframe_blocker(live_case) -> None:
+    _arm(live_case)
+    live_case.controller.live_interval_seconds = 900
+
+    found = _pilot(live_case).blockers()
+
+    assert "live_plan_timeframe_mismatch" not in [item.reason for item in found]
+
+
+def test_a_missing_protective_stop_keeps_the_bridge_disabled(live_case) -> None:
+    values = live_values()
+    values.pop("protective_stop_pips")
+    result = live_case.controller.arm(
+        values,
+        confirmation=PHRASE,
+        reviewed=True,
+        account_confirmation=live_case.controller.confirmed_account_fingerprint(),
+    )
+
+    assert result.armed is False
+    # The missing stop is named as the field that needs a value, not folded into a
+    # generic "invalid plan".
+    assert any(
+        "protective_stop_pips" in str(getattr(item, "message", ""))
+        for item in result.blockers
+    )
+    view = _pilot(live_case).start()
+    assert view.state == BLOCKED
+    assert live_case.controller.session is None
+    assert live_case.fake.send_requests == []

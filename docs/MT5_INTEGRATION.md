@@ -100,6 +100,20 @@ It is not:
    are refused rather than silently normalized, so a typo cannot quietly become a
    different identifier.
 
+   A **live entry** also needs a broker-side stop distance for the pair it trades,
+   declared per symbol with its unit:
+
+   ```json
+   "protective_stops": { "EUR/USD": "20 pips", "USD/JPY": "15 pips" }
+   ```
+
+   A bare number, an unknown unit, or a distance inside the broker's own minimum
+   (`stops_level`) is refused, and **no entry is sent** for a symbol without a
+   usable distance: this build does not open a position it cannot protect. The
+   in-app control (Live execution → Broker-side stop settings) validates the value
+   against the connected symbol record before writing it, and shows the point size,
+   the unit, and the broker's minimum. Detail: `docs/LIVE_EXECUTION.md`.
+
 4. **Store the password in the OS credential vault.** It is prompted, never
    echoed, never an argument, never an environment variable:
 

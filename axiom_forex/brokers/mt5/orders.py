@@ -9,14 +9,18 @@ The rules encoded here are the ones that keep a live integration honest:
 * an outcome whose classification is ``UNKNOWN`` sets ``permits_resend=False``
   and must be reconciled from broker history before anything else is sent;
 * opposite-side handling differs between netting and hedging accounts, and a
-  mismatch is refused instead of silently flipping a position.
+  mismatch is refused instead of silently flipping a position;
+* an entry must carry a broker-side stop loss, and the stop is only ever
+  "confirmed" when the broker's own position record echoes the price back.  A
+  stop this build cannot size, or one the broker does not report, is recorded
+  as unconfirmed -- never presented as protection the account has.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Sequence
 
 from .retcodes import RetcodeClass, classify, is_definitive_rejection, label
@@ -260,7 +264,16 @@ def build_market_request(
     comment: str,
     filling: int,
     position_ticket: int | None = None,
+    stop_loss: Decimal | None = None,
 ) -> dict[str, Any]:
+    """Build one ``order_send`` request.
+
+    ``stop_loss`` is the *broker-side* protective stop.  It is written into the
+    request only when a caller supplies it, so a request without one can never
+    be mistaken for a protected order -- :func:`protective_stop_price` is what
+    decides the price, and the caller must verify the broker's echo afterwards.
+    """
+
     request: dict[str, Any] = {
         "action": TRADE_ACTION_DEAL,
         "symbol": symbol,
@@ -276,7 +289,104 @@ def build_market_request(
         request["price"] = float(price)
     if position_ticket is not None:
         request["position"] = int(position_ticket)
+    if stop_loss is not None:
+        request["sl"] = float(stop_loss)
     return request
+
+
+def stop_distance_points(
+    distance: Decimal | None,
+    unit: str | None,
+    *,
+    point: Decimal | None,
+    pip_size: Decimal | None,
+) -> tuple[int | None, str]:
+    """``(points, reason)`` for a declared distance, in the broker's own unit.
+
+    MetaTrader expresses ``stops_level``, ``point`` and a stop's distance in
+    *points*, so a declared distance is converted once, here, from the symbol's
+    verified ``point`` and the catalog's ``pip_size``.  A distance that does not
+    land on a whole point is refused rather than rounded: rounding would move the
+    stop the operator asked for without saying so.
+    """
+
+    if distance is None or unit not in ("points", "pips"):
+        return None, "mt5_protective_stop_not_configured"
+    declared = Decimal(distance)
+    if not declared.is_finite() or declared <= 0:
+        return None, "mt5_protective_stop_invalid"
+    if point is None or Decimal(point) <= 0:
+        return None, "mt5_symbol_point_unavailable"
+    if unit == "points":
+        exact = declared
+    else:
+        if pip_size is None or Decimal(pip_size) <= 0:
+            return None, "mt5_symbol_pip_size_unavailable"
+        exact = declared * Decimal(pip_size) / Decimal(point)
+    if exact != exact.to_integral_value():
+        return None, "mt5_protective_stop_not_on_point_grid"
+    points = int(exact)
+    if points <= 0:
+        return None, "mt5_protective_stop_invalid"
+    return points, ""
+
+
+def protective_stop_price(
+    *,
+    side: str,
+    reference: Decimal,
+    point: Decimal | None,
+    digits: int,
+    points: int,
+    stops_level: int = 0,
+) -> tuple[Decimal | None, str]:
+    """``(price, reason)`` for a stop ``points`` away from ``reference``.
+
+    ``reason`` is empty when a price is returned.  Every uncertainty is a
+    refusal rather than a guess: an unknown point size, a distance inside the
+    broker's ``stops_level``, or a non-positive result all yield ``None``.
+    """
+
+    if not isinstance(points, int) or isinstance(points, bool) or points <= 0:
+        return None, "mt5_protective_stop_not_configured"
+    if point is None or Decimal(point) <= 0:
+        return None, "mt5_symbol_point_unavailable"
+    if stops_level and points < int(stops_level):
+        return None, "mt5_protective_stop_too_close"
+    distance = Decimal(point) * Decimal(int(points))
+    if str(side).upper() == "BUY":
+        price = Decimal(reference) - distance
+    else:
+        price = Decimal(reference) + distance
+    if price <= 0:
+        return None, "mt5_protective_stop_invalid_price"
+    exponent = -max(int(digits), 0)
+    return price.quantize(Decimal(1).scaleb(exponent), rounding=ROUND_HALF_UP), ""
+
+
+def stop_loss_confirmed(
+    position: MT5Position | None, expected: Decimal | None, *, tolerance: Decimal
+) -> tuple[bool, str]:
+    """``(confirmed, detail)`` for a broker-side stop the caller asked for.
+
+    Confirmation comes only from the broker: the position record must carry a
+    positive ``sl`` at the expected price within ``tolerance``.  Anything else
+    (including a position that cannot be found) is unconfirmed with a reason.
+    """
+
+    if expected is None:
+        return False, "no_stop_requested"
+    if position is None:
+        return False, "position_not_found_after_send"
+    stop = position.stop_loss
+    if stop is None:
+        return False, "broker_reports_no_stop_loss"
+    if Decimal(stop) <= 0:
+        return False, "broker_reports_zero_stop_loss"
+    difference = abs(Decimal(stop) - Decimal(expected))
+    if tolerance is not None and difference > abs(Decimal(tolerance)):
+        return False, f"stop_loss_differs_by_{difference.normalize()}"
+    return True, ""
 
 
 def check_order(terminal: MT5Terminal, request: dict[str, Any]) -> MT5OrderCheck:

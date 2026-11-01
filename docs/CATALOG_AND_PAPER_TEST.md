@@ -126,11 +126,43 @@ shows exactly when that happened.
 
 * `data/catalog/catalog-evaluation.json` — the evaluation record: counts, cost
   labels, data origin, per-row results, and the paper set.
+* `data/catalog/catalog-audit.json` — the whole-catalog audit (below): one entry per
+  declared candidate, with its status and every reason the record gave.
 * `data/catalog/paper/catalog-paper-ledger.jsonl` — one line per event and fill.
 * `data/catalog/paper/catalog-paper-state.json` — status, watches, open positions.
 
 All three are local, Git-ignored, and contain no credential, no account number and
 no balance.
+
+## Auditing the whole catalog
+
+**Audit the whole catalog** (on *Quick setup*, next to the evaluation) reads the
+stored evaluation record and folds it into one entry per **declared** candidate, so
+nothing goes missing because a run never reached it:
+
+| Status | Means |
+| --- | --- |
+| `TESTED` | at least one (candidate, symbol, timeframe) row ran and produced a measurement |
+| `SKIPPED` | a row existed but did not run — `history_shorter_than_warmup`, `timeframe_not_offered_by_candidate`, `not_reached_within_budget`, `cancelled_by_operator`, `no_usable_cost_model` |
+| `FAILED` | a row ran and could not be measured; the exception class is carried as the reason |
+| `NOT_CONSIDERED` | the run never planned this candidate at all, and the report says so |
+
+Each entry also carries its cells (symbol, timeframe, screen, trades, score, positive
+folds), so a count can always be traced to a row. A row in the record for a strategy
+this build no longer declares is listed too and counted separately, rather than
+quietly dropped.
+
+The audit does not evaluate, re-rank or tune anything: the chronological split and
+walk-forward rules are the evaluation module's own, the locked test window is read
+once and never fitted, and the report repeats that a historical evaluation is
+evidence about the past — not a forecast, and not a sign that anything will work on
+a live account. Pressing the button writes one local file; it cannot arm, size,
+switch mode or send.
+
+The status of the declared catalog in *this* notebook — what was declared, what was
+actually measured, what was skipped and why — is recorded in
+`docs/RESEARCH_STATUS.md`. It is a status file, not a result: a blank there means
+the run has not happened, never that the catalog came back clean.
 
 ## What none of this claims
 

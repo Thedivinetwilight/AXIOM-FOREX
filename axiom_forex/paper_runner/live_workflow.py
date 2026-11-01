@@ -3,8 +3,9 @@
 This module is the *only* place a workstation session decides to arm real
 trading, and it decides nothing about markets.  It:
 
-* collects the operator's plan (strategy, symbol, order size, open-position
-  count, daily loss limit) and validates every field;
+* collects the operator's plan (strategy, symbol, timeframe, order size,
+  open-position count, protective stop, daily loss limit) and validates every
+  field;
 * builds the final review -- the exact terms, the account it would trade, the
   broker's own volume rules -- so the decision is taken on the numbers, not on a
   memory of them;
@@ -73,6 +74,23 @@ ACCOUNT_CHANGED = "session_account_changed"
 #: fingerprint.  A different account in the terminal is refused, not adopted.
 ACCOUNT_NOT_IDENTIFIED = "account_not_identified"
 ACCOUNT_CONFIRMATION_MISMATCH = "account_confirmation_mismatch"
+#: A live plan without a bar size or without a protective stop is not a plan this
+#: module will act on, and a plan whose bar size is not the one this stack reads
+#: would decide on different bars than the ones the evidence came from.
+PLAN_STOP_MISSING = "live_plan_stop_missing"
+PLAN_STOP_INVALID = "live_plan_stop_invalid"
+PLAN_TIMEFRAME_MISSING = "live_plan_timeframe_missing"
+PLAN_TIMEFRAME_INVALID = "live_plan_timeframe_invalid"
+PLAN_TIMEFRAME_MISMATCH = "live_plan_timeframe_mismatch"
+#: The plan's stop is a limit AXIOM *watches*; it is not a broker-side stop.
+PROTECTIVE_STOP_BREACHED = "protective_stop_breached"
+PROTECTIVE_STOP_UNMEASURABLE = "protective_stop_unmeasurable"
+#: The broker-side stop, which is a different thing and has its own reasons.
+BROKER_STOP_MISSING = "broker_stop_not_configured"
+BROKER_STOP_BELOW_MINIMUM = "broker_stop_below_broker_minimum"
+BROKER_STOP_INVALID = "broker_stop_invalid"
+BROKER_STOP_UNVERIFIABLE = "broker_stop_unverifiable"
+STOP_SAVED_PENDING_RECONNECT = "stop_saved_pending_reconnect"
 
 
 def _utc_now() -> datetime:
@@ -151,6 +169,8 @@ class LiveTrading:
         armed_strategy: ArmedStrategy | None = None,
         clock: Callable[[], datetime] | None = None,
         audit_log: Any = None,
+        live_interval_seconds: int = 0,
+        settings_path: Any = None,
     ) -> None:
         self.adapter = adapter
         self.mode = mode
@@ -166,6 +186,17 @@ class LiveTrading:
         self.armed_strategy = armed_strategy
         self.session: Any = None
         self.plan: dict[str, Any] = {}
+        #: The bar interval the live stack actually reads, in seconds.  The plan's
+        #: timeframe is compared with it; ``0`` means this deployment did not say,
+        #: and the comparison is then reported as "not checked", never as a pass.
+        self.live_interval_seconds = int(live_interval_seconds or 0)
+        #: The local settings document the adapter was built from.  Read only, to
+        #: tell the operator when the file and the running adapter disagree.
+        self.settings_path = settings_path
+        #: Why the stored plan could not be read, if it could not (e.g. it predates
+        #: the protective-stop requirement and must be reviewed again).
+        self.plan_error = ""
+        self._last_spec: Any = None
         self.armed_at: datetime | None = None
         self.last_review: dict[str, Any] = {}
         self.last_refusal: dict[str, Any] = {}
@@ -179,8 +210,12 @@ class LiveTrading:
             return
         try:
             self.plan = plans.load_plan(path)
-        except plans.PlanError:
+            self.plan_error = ""
+        except plans.PlanError as exc:
+            # Kept as a reason, so the page can say "re-arm, the stop is missing"
+            # instead of "no plan" for a file that exists.
             self.plan = {}
+            self.plan_error = exc.reason
 
     def _setup(self) -> tuple[Any, str]:
         """The provider setup document, or a reason code.  Never raises."""
@@ -227,9 +262,11 @@ class LiveTrading:
         return {
             "candidate_id": "",
             "pair": "",
+            "timeframe": "",
             "quantity": "",
             "max_open_positions": "",
             "max_daily_loss_account": "",
+            "protective_stop_pips": "",
         }
 
     def symbol_choices(self) -> list[str]:
@@ -264,8 +301,9 @@ class LiveTrading:
         view = {
             "ok": not problems and not blockers,
             "values": {key: str(values.get(key, "") or "").strip() for key in
-                       ("candidate_id", "pair", "quantity", "max_open_positions",
-                        "max_daily_loss_account")},
+                       ("candidate_id", "pair", "timeframe", "quantity",
+                        "max_open_positions", "max_daily_loss_account",
+                        "protective_stop_pips")},
             "problems": [item.audit_view() for item in problems],
             "blockers": [item.audit_view() for item in blockers],
             "plan": plans.plan_view(document),
@@ -403,6 +441,7 @@ class LiveTrading:
         pair = str(document.get("pair", "") or "")
         if not pair:
             return blockers
+        blockers.extend(self._document_blockers(document))
         stack = self._stack(pair)
         if stack is None:
             blockers.append(
@@ -414,9 +453,12 @@ class LiveTrading:
             )
             return blockers
         spec = getattr(stack, "spec", None)
+        self._last_spec = spec
         quantity = _decimal(document.get("quantity"))
         if spec is None or quantity is None:
             return blockers
+        blockers.extend(self._stop_blockers(document, spec))
+        blockers.extend(self._broker_stop_blockers(spec))
         minimum = _decimal(getattr(spec, "min_quantity", None))
         maximum = _decimal(getattr(spec, "max_quantity", None))
         step = _decimal(getattr(spec, "quantity_step", None))
@@ -445,6 +487,136 @@ class LiveTrading:
                     )
                 )
         return blockers
+
+    def _document_blockers(self, document: Mapping[str, Any]) -> list[Blocker]:
+        """The plan's own bar size and protective stop.  Nothing is defaulted."""
+
+        blockers: list[Blocker] = []
+        declared = document.get("protective_stop_pips")
+        stop = _decimal(declared)
+        if declared is None or str(declared).strip() == "":
+            blockers.append(
+                Blocker(
+                    PLAN_STOP_MISSING,
+                    "The plan declares no protective stop, so no live order may be sent.",
+                    "Enter the maximum adverse move you accept, in pips, and arm the plan again.",
+                )
+            )
+        elif stop is None or stop <= 0:
+            blockers.append(
+                Blocker(
+                    PLAN_STOP_INVALID,
+                    f"The protective stop ({declared}) is not a positive number of pips.",
+                    "A stop is a limit, not a suggestion; live orders stay refused without one.",
+                )
+            )
+        timeframe = str(document.get("timeframe", "") or "").strip()
+        if not timeframe:
+            blockers.append(
+                Blocker(
+                    PLAN_TIMEFRAME_MISSING,
+                    "The plan does not say which bar size the strategy decides on.",
+                    "Choose the timeframe the strategy was evaluated on and arm again.",
+                )
+            )
+        elif timeframe not in plans.TIMEFRAME_SECONDS:
+            blockers.append(
+                Blocker(
+                    PLAN_TIMEFRAME_INVALID,
+                    f"{timeframe} is not a bar size this live loop can run.",
+                    "Use one of " + ", ".join(plans.TIMEFRAMES) + ".",
+                )
+            )
+        elif self.live_interval_seconds:
+            wanted = int(plans.TIMEFRAME_SECONDS[timeframe])
+            if int(self.live_interval_seconds) != wanted:
+                blockers.append(
+                    Blocker(
+                        PLAN_TIMEFRAME_MISMATCH,
+                        f"The plan decides on {timeframe} bars, but this live stack reads "
+                        f"{int(self.live_interval_seconds)}-second bars.",
+                        f"Restart the workstation with --paper-runner-interval {wanted} so the "
+                        "live loop decides on the same bar size the strategy was evaluated on, "
+                        "or arm a plan whose timeframe matches this stack.",
+                    )
+                )
+        return blockers
+
+    def _stop_blockers(self, document: Mapping[str, Any], spec: Any) -> list[Blocker]:
+        """Is an open position already further against the account than the stop?
+
+        The distance is measured from the broker's own entry and current prices and
+        the symbol's declared pip size.  When it cannot be measured the answer is a
+        named blocker, not a pass: an unmeasured limit is not a satisfied one.
+        """
+
+        stop = _decimal(document.get("protective_stop_pips"))
+        adapter = self.adapter
+        if stop is None or stop <= 0 or adapter is None or spec is None:
+            return []
+        if not getattr(adapter, "connected", False):
+            return []
+        try:
+            rows = [
+                item.audit_view() if hasattr(item, "audit_view") else dict(item)
+                for item in adapter.positions()
+            ]
+        except Exception as exc:
+            return [
+                Blocker(
+                    PROTECTIVE_STOP_UNMEASURABLE,
+                    "Open positions could not be read "
+                    f"({type(exc).__name__}), so the protective stop was not checked.",
+                    "Reconnect and reconcile; new orders stay refused while the distance to "
+                    "the stop is unknown.",
+                )
+            ]
+        if not rows:
+            return []
+        try:
+            pip = Decimal(str(spec.pip_size_decimal()))
+        except Exception:
+            pip = None
+        if pip is None or pip <= 0:
+            return [
+                Blocker(
+                    PROTECTIVE_STOP_UNMEASURABLE,
+                    "This symbol's pip size could not be read, so the protective stop "
+                    "distance is unknown.",
+                    "Re-resolve the symbol from the terminal before sending anything.",
+                )
+            ]
+        wanted = str(document.get("broker_symbol") or document.get("pair") or "")
+        breached: list[str] = []
+        for row in rows:
+            row_symbol = str(row.get("symbol") or "")
+            if wanted and row_symbol and row_symbol != wanted:
+                continue
+            entry = _decimal(row.get("price_open"))
+            current = _decimal(row.get("price_current"))
+            side = str(row.get("side") or "").upper()
+            if entry is None or current is None or side not in {"BUY", "SELL"}:
+                continue
+            adverse = (entry - current) if side == "BUY" else (current - entry)
+            pips = adverse / pip
+            if pips > stop:
+                breached.append(
+                    f"ticket {row.get('ticket') or '?'} is {pips:.1f} pips against you "
+                    f"(limit {stop})"
+                )
+        if not breached:
+            return []
+        return [
+            Blocker(
+                PROTECTIVE_STOP_BREACHED,
+                "A position has moved further against the account than the plan's "
+                "protective stop: " + "; ".join(breached) + ".",
+                "Close or reduce it in MetaTrader 5, or let the strategy exit. AXIOM "
+                "moves no stop and closes nothing on this limit; it refuses new orders "
+                "while this holds. The broker-side stop on each position is set "
+                "separately and is unaffected by this warning.",
+            )
+        ]
 
     def _stack(self, pair: str) -> Any:
         if self.stack_builder is None:
@@ -796,6 +968,82 @@ class LiveTrading:
     def armed(self) -> bool:
         return bool(getattr(self.adapter, "armed", False))
 
+    @property
+    def live_timeframe(self) -> str:
+        """The bar size this stack actually reads, from its own interval."""
+
+        if self.live_interval_seconds:
+            for name, seconds in plans.TIMEFRAME_SECONDS.items():
+                if int(seconds) == int(self.live_interval_seconds):
+                    return name
+        return ""
+
+    def _feed_facts(self, runner_view: Mapping[str, Any]) -> dict[str, Any]:
+        """How old the price the loop reads is, or why that is unknown.
+
+        The running feed's own newest quote answers first.  With no session, one
+        quote is read from the adapter.  Neither path can report an unreadable
+        quote as fresh.
+        """
+
+        symbol = str(self.plan.get("broker_symbol") or self.plan.get("pair") or "")
+        timeframe = str(self.plan.get("timeframe") or self.live_timeframe or "")
+        data = runner_view.get("data")
+        data = dict(data) if isinstance(data, Mapping) else {}
+        tick = str(data.get("last_tick_at") or runner_view.get("last_tick_at") or "")
+        source = "session_feed" if tick else ""
+        if not tick:
+            adapter = self.adapter
+            spec = self._last_spec
+            if adapter is not None and spec is not None and getattr(adapter, "connected", False):
+                try:
+                    tick = adapter.quote(spec).timestamp_utc().isoformat()
+                    source = "terminal_quote"
+                except Exception as exc:
+                    return {
+                        "available": False,
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "reason": "quote_unreadable",
+                        "detail": f"the newest quote could not be read ({type(exc).__name__}), "
+                        "so freshness is unknown",
+                    }
+        if not tick:
+            return {
+                "available": False,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "reason": "not_measured",
+                "detail": "no quote has been read, so freshness is unknown",
+            }
+        try:
+            quoted_at = datetime.fromisoformat(str(tick).replace("Z", "+00:00"))
+        except ValueError:
+            return {
+                "available": False,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "reason": "quote_timestamp_unreadable",
+                "detail": f"the newest quote's timestamp ({tick}) could not be read",
+            }
+        if quoted_at.tzinfo is None:
+            quoted_at = quoted_at.replace(tzinfo=timezone.utc)
+        age = (self.clock() - quoted_at).total_seconds()
+        policy = data.get("policy")
+        bound = _decimal(dict(policy).get("max_quote_age_seconds")) if isinstance(policy, Mapping) else None
+        limit = float(bound) if bound is not None and bound > 0 else 5.0
+        return {
+            "available": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "quoted_at": quoted_at.isoformat(),
+            "age_seconds": age,
+            "fresh": age <= limit,
+            "limit_seconds": limit,
+            "source": source,
+            "detail": "" if age <= limit else f"the newest quote is {age:.1f}s old",
+        }
+
     def _refuse(self, blockers: Sequence[Blocker]) -> ArmResult:
         items = tuple(blockers)
         self.last_refusal = {
@@ -852,9 +1100,21 @@ class LiveTrading:
                 session_view = dict(self.session.view() or {})
             except Exception:
                 session_view = {}
+        stop = _decimal(self.plan.get("protective_stop_pips"))
+        stop_setting = self.stop_setting()
+        broker_stop = self._broker_stop_facts(stop_setting)
         return {
             "configured": adapter is not None,
             "adapter_present": adapter is not None,
+            "live_timeframe": self.live_timeframe,
+            "live_interval_seconds": int(self.live_interval_seconds),
+            "timeframes": list(plans.TIMEFRAMES),
+            "plan_error": self.plan_error,
+            "protective_stop": {
+                "pips": "" if stop is None else str(stop),
+                "note": plans.PROTECTIVE_STOP_NOTE,
+            },
+            "feed": self._feed_facts(runner_view or session_view),
             "connected": connected,
             "armed": armed,
             "mode": str(getattr(self.mode, "mode", "") or "PAPER"),
@@ -864,6 +1124,9 @@ class LiveTrading:
             "account_mode": str(status.get("account_mode", "")),
             "unresolved": list(status.get("unresolved_orders", []) or []),
             "positions": self._broker_positions(),
+            "stop_setting": stop_setting,
+            "broker_stop": broker_stop,
+            "warnings": self._stop_warnings(broker_stop),
             "plan": plan,
             "plan_path": str(self.plan_path or ""),
             "blockers": [item.audit_view() for item in blockers],
@@ -941,6 +1204,392 @@ class LiveTrading:
             "sentence": sentence,
         }
 
+    def _stop_warnings(
+        self, facts: Mapping[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Risk conditions worth an urgent warning, which arming does not clear."""
+
+        facts = dict(facts) if facts is not None else self._broker_stop_facts()
+        warnings: list[dict[str, Any]] = []
+        if not facts.get("available"):
+            return warnings
+        unprotected = [dict(item) for item in facts.get("unprotected") or []]
+        if unprotected:
+            warnings.append(
+                {
+                    "reason": "live_protective_stop_missing",
+                    "urgent": True,
+                    "message": (
+                        f"{len(unprotected)} open position(s) placed by this deployment "
+                        "carry no broker-side stop loss."
+                    ),
+                    "tickets": [item.get("ticket") for item in unprotected],
+                    "hint": (
+                        "No new entry will be sent while this is true, and AXIOM will not "
+                        "invent a stop for an open position. Set the stop in the terminal "
+                        "or close the position, then reconcile."
+                    ),
+                }
+            )
+        if int(facts.get("configured_points") or 0) <= 0:
+            requirement = dict(facts.get("requirement") or {})
+            declared = str(requirement.get("declared") or "")
+            reason = str(requirement.get("reason") or "")
+            warnings.append(
+                {
+                    "reason": "broker_stop_not_usable",
+                    "urgent": False,
+                    "message": (
+                        "No usable broker-side stop distance for this symbol"
+                        + (f" (declared: {declared})" if declared else " (none declared)")
+                        + ", so every live entry will be refused."
+                    ),
+                    "tickets": [],
+                    "hint": (
+                        f"{reason}. "
+                        if reason
+                        else ""
+                    )
+                    + "Set the distance, with its unit, under Broker-side stop "
+                    "settings, then connect again.",
+                }
+            )
+        return warnings
+
+    def _spec_for(self, pair: str) -> Any:
+        """The catalog spec for ``pair``, resolved the same way the plan is."""
+
+        if not pair:
+            return None
+        stack = self._stack(pair)
+        return getattr(stack, "spec", None)
+
+    def stop_setting(self) -> dict[str, Any]:
+        """The broker-side distance that applies to the plan's symbol.
+
+        ``declared`` is what the running adapter enforces; ``file_declared`` is
+        what the local document now says.  When they differ the operator is told
+        the file is saved but not yet in force, instead of being shown a value the
+        order path does not use.
+        """
+
+        adapter = self.adapter
+        pair = str((self.plan or {}).get("pair") or "")
+        base: dict[str, Any] = {
+            "available": False,
+            "pair": pair,
+            "broker_symbol": "",
+            "declared": "",
+            "file_declared": "",
+            "pending": False,
+            "unit": "",
+            "distance": "",
+            "distance_points": None,
+            "distance_price": None,
+            "point": None,
+            "pip_size": None,
+            "broker_min_points": None,
+            "broker_min_price": None,
+            "valid": False,
+            "reason": "",
+            "detail": "",
+        }
+        file_text = self._stop_text_in_file(pair)
+        base["file_declared"] = file_text
+        if adapter is None:
+            base["reason"] = "no MT5 adapter is attached"
+            base["detail"] = "the adapter is what enforces a stop"
+            return base
+        spec = self._last_spec or self._spec_for(pair)
+        if spec is None:
+            base["reason"] = "live_symbol_unresolved"
+            base["detail"] = "arm a plan naming a symbol the terminal can resolve"
+            return base
+        try:
+            result = dict(adapter.stop_requirement(spec))
+        except Exception as exc:  # a read failure is reported, never assumed
+            base["reason"] = "live_stop_unreadable"
+            base["detail"] = type(exc).__name__
+            return base
+        result["available"] = True
+        result["file_declared"] = file_text
+        result["pending"] = bool(
+            file_text and file_text.strip() != str(result.get("declared") or "").strip()
+        )
+        return result
+
+    def _stop_text_in_file(self, pair: str) -> str:
+        """What the local settings document says for ``pair``, read-only."""
+
+        if not pair or self.settings_path is None:
+            return ""
+        try:
+            from ..config.mt5 import load_settings_file
+
+            settings = load_settings_file(self.settings_path)
+        except Exception:
+            return ""
+        if settings is None:
+            return ""
+        return settings.stop_text_for(pair)
+
+    def validate_stop_setting(self, pair: str, text: str) -> dict[str, Any]:
+        """Judge a distance the operator typed, against the connected broker.
+
+        Nothing is written here: a refusal costs nothing, and a preview cannot
+        change the value the order path uses.
+        """
+
+        adapter = self.adapter
+        if adapter is None:
+            return {
+                "valid": False,
+                "reason": "live_adapter_missing",
+                "detail": "no MT5 adapter is attached",
+                "pair": pair,
+            }
+        spec = self._spec_for(pair)
+        if spec is None:
+            return {
+                "valid": False,
+                "reason": "live_symbol_unresolved",
+                "detail": f"{pair} could not be resolved against the terminal",
+                "pair": pair,
+            }
+        try:
+            result = dict(adapter.stop_requirement(spec, text=str(text)))
+        except Exception as exc:
+            return {
+                "valid": False,
+                "reason": "live_stop_unreadable",
+                "detail": type(exc).__name__,
+                "pair": pair,
+            }
+        result.setdefault("pair", pair)
+        return result
+
+    def save_stop_setting(self, pair: str, text: str) -> dict[str, Any]:
+        """Write one per-symbol distance into the local MT5 settings document.
+
+        The value is judged against the connected broker first, and the write is
+        refused while trading is armed or a session is running: the adapter reads
+        its settings when it is built, so writing a value it will not load would be
+        a knob that changes nothing.  Only the ``protective_stops`` section of the
+        document is touched, and it is re-validated before it replaces the file.
+        """
+
+        from ..config.mt5 import MT5SettingsFileError, write_protective_stop
+
+        if (
+            self.armed
+            or bool(getattr(self.adapter, "armed", False))
+            or bool(getattr(self.armed_strategy, "armed", False))
+        ):
+            return {
+                "saved": False,
+                "reason": "live_trading_armed",
+                "message": "Trading is armed. Disarm (or stop the session) before "
+                "changing the stop distance, then arm again.",
+            }
+        if self.session is not None:
+            try:
+                running = bool(self.session.view().get("running", False))
+            except Exception:
+                running = False
+            if running:
+                return {
+                    "saved": False,
+                    "reason": "live_session_running",
+                    "message": "A live session is running. Stop it before changing the "
+                    "stop distance.",
+                }
+        if self.settings_path is None:
+            return {
+                "saved": False,
+                "reason": "live_settings_path_unknown",
+                "message": "This workstation was not started from a settings file, so "
+                "there is nowhere safe to write the distance.",
+            }
+        preview = self.validate_stop_setting(pair, text)
+        if not preview.get("valid"):
+            return {
+                "saved": False,
+                "reason": str(preview.get("reason") or "live_stop_invalid"),
+                "message": str(preview.get("detail") or "") or "That distance cannot be "
+                "used with the broker's own symbol specification.",
+                "preview": preview,
+            }
+        try:
+            written = write_protective_stop(self.settings_path, pair=pair, distance=text)
+        except MT5SettingsFileError as exc:
+            return {
+                "saved": False,
+                "reason": exc.reason,
+                "message": str(exc.detail or exc.reason),
+            }
+        except OSError as exc:
+            return {
+                "saved": False,
+                "reason": "live_settings_write_failed",
+                "message": type(exc).__name__,
+            }
+        self._audit(
+            "LIVE_STOP_SETTING_SAVED",
+            pair=written["pair"],
+            distance=written["distance"],
+            applied=False,
+        )
+        return {
+            "saved": True,
+            "pair": written["pair"],
+            "distance": written["distance"],
+            "preview": preview,
+            "pending_reconnect": True,
+            "message": (
+                f"Saved {written['distance']} for {written['pair']} in the local settings "
+                "document. The adapter in this window is still using the value it was "
+                "built with, so reconnect (or restart the workstation) before it is in "
+                "force; no live entry is sent until it is."
+            ),
+        }
+
+    def _broker_stop_blockers(self, spec: Any) -> list[Blocker]:
+        """The broker-side stop for this symbol must be usable before arming.
+
+        This is the arming-time half of the same rule the order path enforces: a
+        plan may not be armed for a symbol whose stop is absent, unreadable, or
+        inside the broker's minimum distance.
+        """
+
+        adapter = self.adapter
+        if adapter is None or spec is None:
+            return []
+        try:
+            requirement = dict(adapter.stop_requirement(spec))
+        except Exception as exc:
+            return [
+                Blocker(
+                    BROKER_STOP_UNVERIFIABLE,
+                    "The broker-side stop for this symbol could not be checked "
+                    f"({type(exc).__name__}).",
+                    "Reconnect and re-read the symbol's specification.",
+                )
+            ]
+        if requirement.get("valid"):
+            return []
+        reason = str(requirement.get("reason") or "")
+        pair = str(requirement.get("pair") or "")
+        symbol = str(requirement.get("broker_symbol") or pair)
+        if reason == "mt5_protective_stop_not_configured_for_symbol":
+            return [
+                Blocker(
+                    BROKER_STOP_MISSING,
+                    f"No broker-side stop distance is declared for {pair}.",
+                    "Set it, with its unit, under Broker-side stop settings on this "
+                    'page, for example {"' + pair + '": "20 pips"}. Nothing is '
+                    "guessed, and no entry is sent without it.",
+                )
+            ]
+        if reason == "mt5_protective_stop_below_broker_minimum":
+            return [
+                Blocker(
+                    BROKER_STOP_BELOW_MINIMUM,
+                    f"The declared stop for {symbol} ({requirement.get('declared')}) is "
+                    "inside the broker's minimum stop distance "
+                    f"({requirement.get('broker_min_points')} points, "
+                    f"{requirement.get('broker_min_price')} in price).",
+                    "Declare a distance at least as large as the broker's minimum; "
+                    "AXIOM will not silently widen the stop you asked for.",
+                )
+            ]
+        if reason in {
+            "mt5_protective_stop_invalid",
+            "mt5_protective_stop_not_on_point_grid",
+        }:
+            return [
+                Blocker(
+                    BROKER_STOP_INVALID,
+                    f"The declared stop for {symbol} cannot be used: "
+                    f"{requirement.get('detail') or reason}.",
+                    "Write one number and one unit (points or pips) that lands on a "
+                    "whole broker point.",
+                )
+            ]
+        return [
+            Blocker(
+                BROKER_STOP_UNVERIFIABLE,
+                f"The broker-side stop for {symbol} is not usable right now ({reason}).",
+                "Connect the terminal and resolve the symbol; the check runs again for "
+                "every order.",
+            )
+        ]
+
+    def _broker_stop_facts(self, requirement: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """What the broker reports about the stop loss on our open positions.
+
+        Read-only and never repaired here: a position without a stop is a defect
+        the operator has to see, not something this page fixes.
+        """
+
+        adapter = self.adapter
+        requirement = (
+            dict(requirement) if requirement is not None else self.stop_setting()
+        )
+        empty = {
+            "available": False,
+            "detail": "",
+            "configured_points": 0,
+            "declared": str(requirement.get("declared") or ""),
+            "unit": str(requirement.get("unit") or ""),
+            "requirement": requirement,
+            "positions_checked": 0,
+            "unprotected": [],
+            "confirmed": False,
+        }
+        if adapter is None:
+            empty["detail"] = "no MT5 adapter is attached"
+            return empty
+        settings = getattr(adapter, "settings", None)
+        points = (
+            int(requirement.get("distance_points") or 0)
+            if requirement.get("valid")
+            else 0
+        )
+        magic = int(getattr(settings, "magic", 0) or 0)
+        try:
+            positions = list(adapter.positions())
+        except Exception as exc:
+            empty["detail"] = f"positions unreadable: {type(exc).__name__}"
+            empty["configured_points"] = points
+            return empty
+        unprotected: list[dict[str, Any]] = []
+        for position in positions:
+            if int(getattr(position, "magic", 0) or 0) != magic:
+                continue
+            stop = getattr(position, "stop_loss", None)
+            if stop is not None and _decimal(stop) and _decimal(stop) > 0:
+                continue
+            unprotected.append(
+                {
+                    "ticket": int(getattr(position, "ticket", 0) or 0),
+                    "symbol": str(getattr(position, "symbol", "")),
+                    "side": str(getattr(position, "side", "")),
+                    "volume": str(getattr(position, "volume", "")),
+                    "stop_loss": "" if stop is None else str(stop),
+                }
+            )
+        return {
+            "available": True,
+            "detail": "",
+            "configured_points": points,
+            "declared": str(requirement.get("declared") or ""),
+            "unit": str(requirement.get("unit") or ""),
+            "requirement": requirement,
+            "positions_checked": len(positions),
+            "unprotected": unprotected,
+            "confirmed": bool(points > 0 and not unprotected),
+        }
+
     def _broker_positions(self) -> list[dict[str, Any]]:
         adapter = self.adapter
         if adapter is None:
@@ -988,7 +1637,14 @@ __all__ = [
     "NOT_CONFIRMED",
     "NOT_CONNECTED",
     "PLAN_INVALID",
+    "PLAN_STOP_INVALID",
+    "PLAN_STOP_MISSING",
+    "PLAN_TIMEFRAME_INVALID",
+    "PLAN_TIMEFRAME_MISMATCH",
+    "PLAN_TIMEFRAME_MISSING",
     "PLAN_WRITE_FAILED",
+    "PROTECTIVE_STOP_BREACHED",
+    "PROTECTIVE_STOP_UNMEASURABLE",
     "QUANTITY_NOT_TRADABLE",
     "REVIEW_NOT_ACKNOWLEDGED",
     "SETUP_INVALID",

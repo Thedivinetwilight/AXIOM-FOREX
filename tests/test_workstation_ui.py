@@ -678,6 +678,12 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "live-disarm",
         "live-start",
         "live-stop",
+        # The broker-side stop distance: one per-symbol value written into the
+        # local MT5 settings document after the connected terminal's own symbol
+        # record accepts it. It writes no plan, arms nothing, changes no mode,
+        # places no stop order, and is refused while trading is armed or a
+        # session is running.
+        "live-stop-settings",
         # The optional Kronos panel. Every one of these changes what a
         # *forecast* looks like, or records/inspects one. None of them can
         # create an order, arm anything, change the mode, or edit a risk limit;
@@ -734,6 +740,10 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         # this layer.
         "autopilot-live-start",
         "autopilot-live-stop",
+        # The full-catalog audit: it reads the stored evaluation record and writes
+        # one report file. It evaluates nothing, re-ranks nothing, promotes
+        # nothing, and holds no order, arming or mode surface at all.
+        "catalog-audit",
     }
 
 

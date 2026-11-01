@@ -164,6 +164,7 @@ def mt5_settings(**overrides) -> MT5Settings:
         magic=26081001,
         deviation_points=10,
         max_price_drift_points=20,
+        protective_stops={"EUR/USD": "200 points"},
     )
     values.update(overrides)
     return MT5Settings(**values)

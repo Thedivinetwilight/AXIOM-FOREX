@@ -3136,10 +3136,58 @@ def live_status_banner(ctx: PageContext) -> str:
     )
 
 
+def _stop_warnings(view: Mapping[str, Any]) -> str:
+    """Risk conditions the operator must see, which arming does not fix.
+
+    These do not block arming -- a close must stay possible -- but they are the
+    first thing on the page, because an open position without a broker-side stop
+    is exactly the state this build refuses to add to.
+    """
+
+    warnings = [dict(item) for item in view.get("warnings") or []]
+    if not warnings:
+        return ""
+    items = "".join(
+        "<li><strong>{}</strong>{}<div class='small muted'>{}</div></li>".format(
+            escape(str(item.get("message", ""))),
+            (
+                " <span class='mono'>{}</span>".format(
+                    escape(", ".join(str(t) for t in item.get("tickets") or []))
+                )
+                if item.get("tickets")
+                else ""
+            ),
+            escape(str(item.get("hint", ""))),
+        )
+        for item in warnings
+    )
+    tone = "danger" if any(item.get("urgent") for item in warnings) else "warn"
+    title = (
+        "Unprotected exposure"
+        if any(item.get("urgent") for item in warnings)
+        else "Worth reading"
+    )
+    return (
+        f"<div class='notice notice--{tone}' role='alert'>"
+        f"<div><strong>{escape(title)}</strong><ul class='list'>{items}</ul></div></div>"
+    )
+
+
 def _live_blockers(view: Mapping[str, Any]) -> str:
     blockers = [dict(item) for item in view.get("blockers") or []]
+    prefix = _stop_warnings(view)
     if not blockers:
-        return notice("ok", "Every arming precondition holds", "Nothing stands between this plan and a real order.")
+        if any(item.get("urgent") for item in view.get("warnings") or []):
+            # The arming preconditions do hold, but an entry is still refused:
+            # saying "nothing stands between this plan and a real order" here
+            # would contradict the warning printed directly above it.
+            return prefix + notice(
+                "warn",
+                "No arming precondition is missing",
+                "An entry is still refused while the warning above stands. That check "
+                "runs again for every order, not just on this page.",
+            )
+        return prefix + notice("ok", "Every arming precondition holds", "Nothing stands between this plan and a real order.")
     body = "<ul class='list'>" + "".join(
         "<li><strong class='mono'>{}</strong> {}".format(
             escape(str(item.get("reason", ""))), escape(str(item.get("message", "")))
@@ -3182,6 +3230,12 @@ def _live_plan_card(view: Mapping[str, Any]) -> str:
                     f" <span class='small muted'>({escape(str(plan.get('broker_symbol', '')))})</span>"
                     if plan.get("broker_symbol") else ""
                 )),
+                ("Timeframe", f"<span class='mono'>{escape(str(plan.get('timeframe', '')) or 'not stated')}</span>"),
+                (
+                    "Protective stop",
+                    f"<span class='mono'>{escape(str(plan.get('protective_stop_pips', '')) or 'not stated')}</span> pips"
+                    if plan.get("protective_stop_pips") else "not stated",
+                ),
                 ("Order size", f"<span class='mono'>{escape(str(plan.get('quantity', '')))}</span> lots"),
                 ("Max open positions", escape(str(plan.get("max_open_positions", "")))),
                 (
@@ -3215,6 +3269,9 @@ def _live_review_card(view: Mapping[str, Any]) -> str:
              escape(str(facts.get("broker_volume_step", facts.get("quantity_step", "—")))),
              escape(str(facts.get("broker_volume_max", facts.get("max_quantity", "—")))),
          )),
+        ("Timeframe", escape(str(review.get("values", {}).get("timeframe", "")) or "—")
+         + " (this live stack reads " + escape(str(view.get("live_timeframe", "")) or "an unreported bar size") + ")"),
+        ("Protective stop", escape(str(review.get("values", {}).get("protective_stop_pips", "")) or "—") + " pips"),
         ("Max open positions", escape(str(review.get("values", {}).get("max_open_positions", "")) or "—")),
         ("Daily loss limit", escape(str(review.get("values", {}).get("max_daily_loss_account", "")) or "—")
          + " " + escape(str((review.get("plan") or {}).get("account_currency", "")))),
@@ -3243,12 +3300,263 @@ def _live_review_card(view: Mapping[str, Any]) -> str:
     )
 
 
+def _broker_stop_cell(view: Mapping[str, Any]) -> str:
+    """The broker's own answer about the stop on our open positions.
+
+    "Verified" is only claimed when the broker reports a stop on every position
+    this deployment placed; none, or a missing one, is said plainly.
+    """
+
+    facts = dict(view.get("broker_stop") or {})
+    if not facts.get("available"):
+        return chip("not checked", "muted") + " <span class='small muted'>{}</span>".format(
+            escape(str(facts.get("detail") or "no broker position has been read"))
+        )
+    points = int(facts.get("configured_points") or 0)
+    declared = str(facts.get("declared") or "")
+    unprotected = [dict(item) for item in facts.get("unprotected") or []]
+    if points <= 0:
+        return chip("not configured", "danger", dot=True) + (
+            " <span class='small muted'>no usable distance for this symbol — live entries "
+            "are refused until one is declared under Broker-side stop settings</span>"
+        )
+    if unprotected:
+        tickets = ", ".join(escape(str(item.get("ticket", ""))) for item in unprotected)
+        return chip("unprotected", "danger", dot=True) + (
+            " <span class='small muted'>{} ({} pt) requested · ticket(s) {} report no "
+            "stop loss</span>".format(escape(declared or "unspecified"), escape(str(points)), tickets)
+        )
+    checked = int(facts.get("positions_checked") or 0)
+    if checked == 0:
+        return chip("configured", "muted", dot=True) + (
+            " <span class='small muted'>{} ({} pt) · no open position to verify right now</span>"
+        ).format(escape(declared or "unspecified"), escape(str(points)))
+    return chip("verified by broker", "ok", dot=True) + (
+        " <span class='small muted'>{} ({} pt) on {} open position(s)</span>"
+    ).format(
+        escape(declared or "unspecified"),
+        escape(str(points)),
+        escape(str(checked)),
+    )
+
+
+def _broker_stop_settings_card(view: Mapping[str, Any], nonce: str) -> str:
+    """The one control that sets the broker-side stop, with its units shown.
+
+    Every number on this card comes from the connected terminal's own symbol
+    record or from the settings document: the broker symbol, the point size, the
+    unit of the entered value, and the broker's minimum distance.  Nothing is
+    pre-filled, and a save is refused while trading is armed or running.
+    """
+
+    setting = dict(view.get("stop_setting") or {})
+    armed = bool(view.get("armed"))
+    running = bool(view.get("session_running"))
+    pair = str(setting.get("pair") or "")
+    symbol = str(setting.get("broker_symbol") or "")
+
+    def present(value: Any) -> str:
+        text = str(value if value is not None else "").strip()
+        return escape(text) if text else "<span class='small muted'>not reported</span>"
+
+    def pip_in_points() -> str:
+        """How many broker points one pip is here, from the two sizes we were given."""
+
+        try:
+            pip = float(setting.get("pip_size") or 0)
+            point = float(setting.get("point") or 0)
+        except (TypeError, ValueError):
+            return "not reported"
+        if not pip or not point:
+            return "not reported"
+        ratio = pip / point
+        text = f"{ratio:.2f}".rstrip("0").rstrip(".")
+        return f"{text} point(s)"
+
+    declared = str(setting.get("declared") or "")
+    unit = str(setting.get("unit") or "")
+    points = setting.get("distance_points")
+    if not setting.get("available"):
+        state_cell = chip("not checked", "muted") + " <span class='small muted'>{}</span>".format(
+            present(setting.get("reason") or setting.get("detail"))
+        )
+    elif setting.get("valid"):
+        state_cell = (
+            chip("usable", "ok", dot=True)
+            + " <span class='small muted'>{} = {} broker point(s) = {} in price</span>".format(
+                escape(f"{declared}" if declared else ""),
+                present(points),
+                present(setting.get("distance_price")),
+            )
+        )
+    else:
+        state_cell = chip("not usable", "danger", dot=True) + (
+            " <span class='mono'>{}</span> <span class='small muted'>{}</span>".format(
+                escape(str(setting.get("reason", ""))),
+                present(setting.get("detail")),
+            )
+        )
+
+    rows = [
+        ("Pair", escape(pair) if pair else "<span class='small muted'>no plan yet</span>"),
+        ("Broker symbol", present(symbol)),
+        ("Entered value", (
+            f"<span class='mono'>{escape(declared)}</span> "
+            f"<span class='small muted'>(unit: {escape(unit or 'not stated')})</span>"
+        ) if declared else "<span class='small muted'>nothing declared for this symbol</span>"),
+        ("Symbol point size", present(setting.get("point"))),
+        ("Symbol pip size", present(setting.get("pip_size"))),
+        (
+            "Broker minimum stop",
+            "{} point(s) = {} in price".format(
+                present(setting.get("broker_min_points")),
+                present(setting.get("broker_min_price")),
+            ),
+        ),
+        ("State", state_cell),
+    ]
+    body = [dl(rows)]
+    if setting.get("pending"):
+        body.append(
+            notice(
+                "warn",
+                "Saved, not yet in force",
+                "The settings document now says "
+                + escape(str(setting.get("file_declared", "")))
+                + ", but this adapter was built with "
+                + (declared or "nothing")
+                + ". Reconnect for the file to be read; until then no live entry is sent.",
+            )
+        )
+    if not pair:
+        body.append(
+            notice(
+                "muted",
+                "Arm a plan first",
+                "This distance is configured per symbol, so the page needs a plan to know "
+                "which symbol LIVE will trade. Nothing is guessed from a symbol list.",
+            )
+        )
+    elif armed or running:
+        body.append(
+            notice(
+                "warn",
+                "Stop and disarm to change the distance",
+                "The adapter reads its settings when it is built. Changing the file now "
+                "would be a knob that does nothing, so the write is refused.",
+            )
+        )
+    else:
+        body.append(
+            "<form method='post' action='/actions/live-stop-settings' class='stack'>"
+            f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+            f"<input type='hidden' name='pair' value='{escape(pair)}'>"
+            "<label class='field'><span>Distance</span>"
+            "<input type='text' name='distance' inputmode='decimal' autocomplete='off' "
+            "placeholder='e.g. 20' required>"
+            "<span class='small muted'>One positive number. Nothing is pre-filled and "
+            "nothing is widened for you.</span></label>"
+            "<label class='field'><span>Unit</span>"
+            "<select name='unit' required>"
+            "<option value=''>Choose points or pips…</option>"
+            "<option value='pips'>pips</option>"
+            "<option value='points'>points</option>"
+            "</select>"
+            "<span class='small muted'>A point is the broker's own unit; on this symbol "
+            "one pip is "
+            + escape(pip_in_points())
+            + ".</span></label>"
+            "<button class='button' type='submit'>Save the distance</button>"
+            "</form>"
+        )
+    return card(
+        "Broker-side stop settings",
+        "".join(body),
+        hint=(
+            "This is the stop the order carries to MetaTrader 5, verified against the "
+            "broker's own position record after the fill. It is a different number from "
+            "the plan's monitored limit, which AXIOM watches but does not place."
+        ),
+        right=chip("per symbol", "muted"),
+    )
+
+
+def _live_session_card(view: Mapping[str, Any]) -> str:
+    """What the loop is actually doing: feed age, last signal, last order result."""
+
+    runner = dict(view.get("runner") or {})
+    feed = dict(view.get("feed") or {})
+    stop = dict(view.get("protective_stop") or {})
+    last = dict(view.get("last_outcome") or {})
+    positions = [dict(item) for item in view.get("positions") or []]
+    if not feed.get("available"):
+        feed_cell = chip("not measured", "muted") + " <span class='small muted'>{}</span>".format(
+            escape(str(feed.get("detail", "") or "no quote has been read"))
+        )
+    else:
+        age = feed.get("age_seconds")
+        age_text = f"{float(age):.1f}s old" if isinstance(age, (int, float)) else "age unknown"
+        feed_cell = (
+            chip("fresh", "ok", dot=True) if feed.get("fresh")
+            else chip("stale", "danger", dot=True)
+        ) + " <span class='small muted'>{} · {} · {}</span>".format(
+            escape(age_text), escape(str(feed.get("source", ""))), escape(str(feed.get("symbol", "")))
+        )
+    signal = str(runner.get("last_signal") or "") or "—"
+    at = str(runner.get("last_signal_at") or runner.get("last_decision_at") or "")
+    if last:
+        last_cell = "{} {}".format(
+            chip("submitted", "danger", dot=True) if last.get("submitted") else chip("refused", "warn", dot=True),
+            escape(str(last.get("reason", "") or ("submitted" if last.get("submitted") else ""))),
+        )
+        if last.get("retcode_name"):
+            last_cell += " <span class='small muted'>{} {}</span>".format(
+                escape(str(last.get("retcode", ""))), escape(str(last.get("retcode_name")))
+            )
+        if last.get("unresolved"):
+            last_cell += " " + chip("outcome unknown", "danger", dot=True)
+    else:
+        last_cell = "<span class='small muted'>no order attempt in this session</span>"
+    rows = [
+        ("Feed freshness", feed_cell),
+        ("Last signal", f"<span class='mono'>{escape(signal)}</span>"
+         + (f" <span class='small muted'>{escape(at)}</span>" if at else "")),
+        ("Last order result", last_cell),
+        ("Broker-side stop", _broker_stop_cell(view)),
+        ("Orders sent", escape(str(view.get("orders_sent", 0)))),
+        ("Open positions", escape(str(len(positions)))
+         + (" <span class='small muted'>— AXIOM does not close them when you stop</span>" if positions else "")),
+        ("Plan protective stop", (f"<span class='mono'>{escape(str(stop.get('pips', '')))}</span> pips "
+                             if stop.get("pips") else "not stated ")
+         + f"<span class='small muted'>{escape(str(stop.get('note', '')))}</span>"),
+        ("Measured latency",
+         "<span class='small muted'>decision and submission timings are shown on the Autopilot "
+         "page's LIVE card; this page does not time the broker round trip</span>"),
+    ]
+    if view.get("stopped_reason"):
+        rows.append(("Session stopped because", f"<span class='mono'>{escape(str(view.get('stopped_reason')))}</span>"))
+    if view.get("plan_error"):
+        rows.append(("Stored plan cannot be used", f"<span class='mono'>{escape(str(view.get('plan_error')))}</span>"))
+    return card(
+        "What the session is doing right now",
+        dl(rows),
+        hint="Read from the running loop. A missing measurement is shown as missing, never as zero.",
+        right=chip("running" if view.get("session_running") else "not running",
+                   "ok" if view.get("session_running") else "muted", dot=True),
+    )
+
+
 def render_live(ctx: PageContext) -> str:
     view = _live_view(ctx)
     configured = bool(view.get("configured"))
     armed = bool(view.get("armed"))
     running = bool(view.get("session_running"))
     nonce = ctx.action_nonce
+    live_timeframe = str(view.get("live_timeframe", "") or "")
+    timeframe_options = ["<option value=''>Choose a timeframe…</option>"] + [
+        f"<option value='{escape(str(name))}'>{escape(str(name))}</option>"
+        for name in (view.get("timeframes") or ())
+    ]
     candidates = [dict(item) for item in view.get("candidates") or []]
     symbols = [str(item) for item in view.get("symbols") or []]
 
@@ -3269,7 +3577,9 @@ def render_live(ctx: PageContext) -> str:
     controls = []
     if running:
         controls.append(
-            action_form("live-stop", nonce, "STOP and disarm", tone="danger")
+            action_form(
+                "live-stop", nonce, "EMERGENCY STOP — stop sending and disarm", tone="danger"
+            )
         )
     elif armed:
         controls.append(action_form("live-disarm", nonce, "Disarm", tone="danger"))
@@ -3277,7 +3587,12 @@ def render_live(ctx: PageContext) -> str:
         controls.append(action_form("live-start", nonce, "Start live session", tone="primary"))
     if controls:
         body.append(
-            "<div class='row' style='margin:8px 0 12px'>" + "".join(controls) + "</div>"
+            "<div class='row' style='margin:8px 0 6px'>" + "".join(controls) + "</div>"
+        )
+        body.append(
+            "<p class='small muted' style='margin:0 0 12px'>Emergency stop stops sending and "
+            "disarms. It closes nothing: anything already open stays open in MetaTrader 5, "
+            "and the mode does not change.</p>"
         )
 
     if str(view.get("mode", "")).upper() != "LIVE" and (view.get("positions") or []):
@@ -3292,6 +3607,8 @@ def render_live(ctx: PageContext) -> str:
         )
 
     body.append(_live_plan_card(view))
+    body.append(_live_session_card(view))
+    body.append(_broker_stop_settings_card(view, nonce))
     body.append(_live_blockers(view))
     body.append(_live_review_card(view))
 
@@ -3315,6 +3632,11 @@ def render_live(ctx: PageContext) -> str:
         "<label class='field'><span>Symbol</span>"
         f"<select name='pair' required>{''.join(symbol_options)}</select>"
         "<span class='small muted'>Only pairs declared in your provider setup are listed.</span></label>"
+        "<label class='field'><span>Timeframe the strategy decides on</span>"
+        f"<select name='timeframe' required>{''.join(timeframe_options)}</select>"
+        "<span class='small muted'>It must be the bar size the strategy was evaluated on. "
+        f"This workstation's live stack reads {escape(live_timeframe or 'an unreported bar size')}; "
+        "a plan on another bar size is refused, never quietly re-timed.</span></label>"
         "<label class='field'><span>Order size (lots)</span>"
         "<input type='text' name='quantity' inputmode='decimal' autocomplete='off' "
         "placeholder='e.g. 0.10' required>"
@@ -3328,6 +3650,13 @@ def render_live(ctx: PageContext) -> str:
         "placeholder='e.g. 100' required>"
         "<span class='small muted'>Enforced by AXIOM before each order; it is not a broker "
         "stop-loss.</span></label>"
+        "<label class='field'><span>Monitored stop limit (pips)</span>"
+        "<input type='text' name='protective_stop_pips' inputmode='decimal' autocomplete='off' "
+        "placeholder='e.g. 25' required>"
+        "<span class='small muted'>The move against you at which AXIOM stops sending new "
+        "orders. It is a limit this app watches and blocks on — not the stop the order "
+        "carries. The broker-side stop is set separately under Broker-side stop settings, "
+        "and the two are independent.</span></label>"
         "<label class='field'><span>Type the account signature shown below</span>"
         "<input type='text' name='account_confirmation' autocomplete='off' spellcheck='false' "
         f"placeholder='{escape(str(view.get('account_fingerprint', '')) or 'account signature')}' required>"
@@ -5141,6 +5470,77 @@ def _chip_row(items: Sequence[Mapping[str, Any]]) -> str:
     return " ".join(parts)
 
 
+def _catalog_audit_card(audit: Mapping[str, Any]) -> str:
+    """Every declared candidate, and what the stored evaluation did with it."""
+
+    status_tone = {
+        "TESTED": "ok",
+        "SKIPPED": "warn",
+        "FAILED": "danger",
+        "NOT_CONSIDERED": "muted",
+    }
+    rows = [dict(item) for item in audit.get("candidates") or []]
+    counted = "".join(
+        kpi(label, str(audit.get(key, 0)), foot=foot)
+        for label, key, foot in (
+            ("Declared", "declared", "every strategy in this build"),
+            ("Tested", "tested", "ran and produced a measurement"),
+            ("Skipped", "skipped", "reached, not run — reason shown"),
+            ("Failed", "failed", "ran and could not be measured"),
+            ("Not considered", "not_considered", "never planned by the run"),
+        )
+    )
+    body = "<div class='data-grid'>" + counted + "</div>"
+    if rows:
+        body += table(
+            "Every candidate, with its status and reasons",
+            (
+                ("candidate_id", "Candidate"),
+                ("status", "Status"),
+                ("reasons", "Reasons"),
+                ("cells", "Rows tested / skipped / failed"),
+            ),
+            (
+                (
+                    escape(str(item.get("candidate_id", ""))),
+                    chip(
+                        str(item.get("status", "")),
+                        status_tone.get(str(item.get("status", "")), "muted"),
+                    ),
+                    escape(", ".join(item.get("reasons") or []) or "—"),
+                    "{}/{}/{}".format(
+                        item.get("tested_cells", 0),
+                        item.get("skipped_cells", 0),
+                        item.get("failed_cells", 0),
+                    ),
+                )
+                for item in rows
+            ),
+            empty="No candidate is listed, which would be a fault in the report.",
+        )
+        total = int(audit.get("candidates_total") or len(rows))
+        if total > len(rows):
+            body += (
+                f"<p class='small muted'>Showing the first {len(rows)} of {total} "
+                "candidates; the full list is in the report file.</p>"
+            )
+    body += f"<p class='small muted'>{escape(str(audit.get('tuning_note', '')))}</p>"
+    body += notice(
+        "warn" if not audit.get("tested") else "ok",
+        "What this audit is",
+        str(audit.get("claim", "")),
+    )
+    return card(
+        "Full catalog audit",
+        body,
+        hint=(
+            f"Generated {audit.get('generated_at', '')} from "
+            f"{audit.get('source', '')}. Reading it evaluates nothing and promotes nothing."
+        ),
+        right=chip("report", "muted"),
+    )
+
+
 def render_catalog_section(ctx: PageContext) -> str:
     """The Monday test: forex-only symbols, one evaluation, one paper start.
 
@@ -5500,6 +5900,26 @@ def render_catalog_section(ctx: PageContext) -> str:
     body.append(
         f"<p class='small muted'>{escape(str(snapshot.get('claim') or paper.get('headline') or ''))}</p>"
     )
+    # 6. the whole-catalog audit
+    audit = dict(view.get("audit") or {})
+    if audit.get("present"):
+        body.append(_catalog_audit_card(audit))
+        body.append(action_form("catalog-audit", ctx.action_nonce, "Re-run the audit"))
+    else:
+        body.append(
+            card(
+                "Full catalog audit",
+                notice(
+                    "warn" if not evaluation.get("on_record") else "ok",
+                    "Account for every declared candidate, not just the ones that ran",
+                    "The audit reads the stored evaluation record and lists every declared "
+                    "candidate as tested, skipped, failed, or not considered -- with the reason. "
+                    "It runs nothing, tunes nothing and promotes nothing.",
+                )
+                + action_form("catalog-audit", ctx.action_nonce, "Audit the whole catalog"),
+            )
+        )
+
     body.append(
         notice(
             "ok",
@@ -6182,6 +6602,12 @@ def _render_live_autopilot(live: Mapping[str, Any], nonce: str) -> str:
             str(strategy.get("max_open_positions") if strategy.get("max_open_positions") is not None else "—"),
         ),
         ("Max daily loss", str(strategy.get("max_daily_loss_account") or "—")),
+        (
+            "Protective stop",
+            (str(strategy.get("protective_stop_pips")) + " pips")
+            if strategy.get("protective_stop_pips")
+            else "not declared — orders refused",
+        ),
         ("Evidence", str(strategy.get("evidence_state") or "—")),
         ("Armed", "yes" if live.get("armed") else "no"),
         ("Plan", str(strategy.get("plan_id") or "—")),
