@@ -26,7 +26,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import dataclasses
 
@@ -311,6 +311,33 @@ class CatalogPanel:
             with self._lock:
                 self._data_check = (key, now, dict(view))
         return view
+
+    def funnel(
+        self, *, verdict: str = "", selected: Iterable[str] = (), offset: int = 0
+    ) -> dict[str, Any]:
+        """The catalog's funnel: what exists, what was tested, what it concluded.
+
+        Read-only over the stored record and the declared catalog.  The library
+        figure comes from the catalog definition rather than from the record, so a
+        partial evaluation can never look like a small library -- which is exactly
+        the confusion this page exists to prevent.
+        """
+
+        from axiom_forex.strategies.catalog import funnel as funnel_module
+
+        library = summary_counts()
+        record = self._record()
+        if record is None:
+            return funnel_module.empty(library=library)
+        # ``_record`` returns the store's wrapper; the funnel reads the payload.
+        payload = getattr(record, "payload", record)
+        return funnel_module.build(
+            payload,
+            library=library,
+            selected=selected,
+            verdict=verdict,
+            offset=offset,
+        )
 
     def _record(self) -> Any:
         """The stored evaluation, parsed once per file change."""

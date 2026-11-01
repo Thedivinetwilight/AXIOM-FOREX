@@ -354,6 +354,48 @@ plan, where the review, the confirmation phrase, the risk gate and the protectiv
 requirement still apply. A timeframe no template declares is never analysed. Full
 detail: `docs/STRATEGY_LIBRARY.md`.
 
+#### Four counts that must never be confused
+
+The catalog holds **1,566 declared candidates** over **480 distinct rule structures**
+(16 entries x 6 exits x 5 filters, at one predeclared parameter set each; no two
+candidates share a signature, so the figure is not padded with renamed copies). A full
+evaluation on two symbols at one timeframe plans **3,132 candidate x symbol rows**, and
+most of them do not pass. Seeing "three strategies" on a page is therefore a statement
+about *one stage*, never about the library:
+
+| Stage | Question it answers |
+| --- | --- |
+| In the library | What is declared at all — 1,566 candidates, 480 structures |
+| Compatible now | Which of those can run on the selected symbols and timeframe |
+| Evaluated | Which have a result on record |
+| Passed / failed / too little evidence / skipped | What each outcome was, with its reason |
+| Selected | Which ones you chose |
+
+`/strategies` shows all of these as **separate figures**, counted as *strategies*, not
+rows (one candidate on two symbols is one strategy tested twice), and the four statuses
+plus "not yet evaluated" add up to the library count. Every row can be browsed by
+paging and filtered by status, and failed rows are listed exactly like passing ones with
+the record's own reason — nothing is hidden to make the short list look longer or
+shorter.
+
+#### Readiness is a ladder, not a label
+
+A candidate climbs four rungs: **in the library**, **evaluated**, **paper-testable**
+(passed the screen), and **live-ready**. The page reports a number for each, and the
+last is **always zero from a stored record**: live readiness needs a stored live plan,
+the confirmation phrase, the risk gate and the protective-stop rule, each satisfied at
+the time of use. No backtest, however good, reaches that rung.
+
+Each row also carries the rule's exact **version** (its signature), its **parameter
+values**, the **evidence** it was judged on, and its **execution compatibility** (the
+timeframes it declares versus the one selected), so a result is reproducible rather
+than a bare identifier.
+
+You can evaluate the whole catalog from `/strategies` with **Evaluate all declared
+strategies**: it posts the existing `catalog-evaluate` action for the symbols and
+timeframe currently selected, returns to the same page, and measures without selecting,
+sizing, arming, or placing anything.
+
 ### Kronos forecasting (optional, `/kronos`)
 
 Kronos is a published financial foundation model that predicts the next few

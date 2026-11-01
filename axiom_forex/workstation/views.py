@@ -5413,6 +5413,247 @@ def render_catalog_section(ctx: PageContext) -> str:
     return card("Catalog and the Monday paper test", "".join(body))
 
 
+def _strategy_funnel_card(ctx: PageContext, funnel: Mapping[str, Any]) -> str:
+    """Every count the page must keep apart, in one block.
+
+    The whole point is that these numbers are *not* interchangeable: over a
+    thousand strategies are in the library, hundreds are compatible with what is
+    selected, and only a handful pass the screen.  Rendering them as one figure
+    is what made the page read as "there are only three strategies".
+    """
+
+    library = dict(funnel.get("library") or {})
+    compatible = dict(funnel.get("compatible") or {})
+    evaluated = dict(funnel.get("evaluated") or {})
+    counts = dict(funnel.get("counts") or {})
+    ladder = dict(funnel.get("ladder") or {})
+    available = bool(funnel.get("available"))
+
+    def num(value: Any) -> str:
+        try:
+            return f"{int(value):,}"
+        except (TypeError, ValueError):
+            return "0"
+
+    symbols = ", ".join(compatible.get("symbols") or ()) or "none selected"
+    timeframes = ", ".join(compatible.get("timeframes") or ()) or "none selected"
+
+    body = (
+        "<div class='data-grid'>"
+        + kpi(
+            "In the library",
+            num(library.get("candidates")),
+            foot=f"{num(library.get('structures'))} distinct rule structures",
+            tone="accent",
+        )
+        + kpi(
+            "Compatible now",
+            num(compatible.get("candidates")),
+            foot=f"{num(compatible.get('incompatible_candidates'))} skipped: timeframe not offered",
+        )
+        + kpi(
+            "Evaluated",
+            num(evaluated.get("candidates")),
+            foot=f"{num(evaluated.get('rows'))} candidate x symbol rows",
+        )
+        + kpi(
+            "Passed the screen",
+            num(counts.get("passed_strategies")),
+            foot=f"{num(counts.get('passed_rows'))} rows across symbols",
+        )
+        + kpi(
+            "Failed",
+            num(counts.get("failed_strategies")),
+            foot=f"{num(counts.get('failed_rows'))} rows, each with its reason",
+        )
+        + kpi(
+            "Too little evidence",
+            num(counts.get("thin_strategies")),
+            foot=f"{num(counts.get('thin_rows'))} rows below the trade minimum",
+        )
+        + kpi(
+            "Skipped",
+            num(counts.get("skipped_strategies")),
+            foot="declared, but not run on this timeframe",
+        )
+        + kpi(
+            "Not yet evaluated",
+            num(counts.get("not_evaluated")),
+            foot="in the library with no result on record",
+        )
+        + kpi(
+            "Selected",
+            num(counts.get("selected")),
+            foot="your operator choices",
+        )
+        + "</div>"
+    )
+
+    body += (
+        "<p class='small muted'>Counted as <strong>strategies</strong>, not rows: one "
+        "candidate measured on two symbols is one strategy tested twice. The four "
+        "statuses plus &ldquo;not yet evaluated&rdquo; add up to the library figure "
+        f"({num(library.get('candidates'))}).</p>"
+    )
+
+    if not available:
+        body += notice(
+            "warn",
+            "No evaluation on record yet",
+            "The catalog is declared and the counts above are real, but nothing has "
+            "been measured on your symbols yet. Evaluate on Quick setup, then return "
+            "here to read each result and its reason.",
+        )
+    else:
+        body += (
+            "<p class='small muted'>Measured on "
+            f"<strong>{escape(symbols)}</strong> at <strong>{escape(timeframes)}</strong>"
+            + (f", data origin <span class='mono'>{escape(str(funnel.get('data_origin')))}</span>" if funnel.get("data_origin") else "")
+            + ".</p>"
+        )
+
+    ladder_html = (
+        "<div class='data-grid'>"
+        + kpi("Step 1 - In the library", num(ladder.get("in_library")), foot="declared in the catalog")
+        + kpi("Step 2 - Evaluated", num(ladder.get("evaluated")), foot="has a result on record")
+        + kpi("Step 3 - Paper-testable", num(ladder.get("paper_testable")), foot="passed the screen; may be paper-tested")
+        + kpi("Step 4 - Live-ready", num(ladder.get("live_ready")), foot="backtests cannot reach this rung")
+        + "</div>"
+        f"<p class='small muted'>{escape(str(ladder.get('live_ready_note', '')))}</p>"
+    )
+
+    return (
+        card(
+            "How many strategies, exactly",
+            body,
+            hint=str(library.get("note", "")),
+            right=chip("four different questions", "muted"),
+        )
+        + card(
+            "Readiness ladder: in the library, evaluated, paper-testable, live-ready",
+            ladder_html,
+            hint="A ladder rung is a claim about evidence, not about profit. Nothing "
+            "here promises a return, and no historical result is a forecast.",
+            right=chip("no profitability claim", "muted"),
+        )
+    )
+
+
+def _strategy_results_card(ctx: PageContext, funnel: Mapping[str, Any]) -> str:
+    """Every evaluated row, with its own reason -- failures included."""
+
+    rows = [dict(item) for item in (funnel.get("rows") or [])]
+    filters = [dict(item) for item in (funnel.get("filters") or [])]
+    current = str(funnel.get("verdict") or "")
+    counts = dict(funnel.get("counts") or {})
+
+    links = "".join(
+        f"<a class='btn btn-sm{' btn--primary' if str(item.get('key')) == current else ''}' "
+        f"href='/strategies?verdict={escape(str(item.get('key', '')))}'>"
+        f"{escape(str(item.get('label', '')))} ({int(item.get('rows') or 0):,})</a>"
+        for item in filters
+    )
+    links += (
+        f"<a class='btn btn-sm{' btn--primary' if not current else ''}' href='/strategies'>"
+        f"All rows ({sum(int(item.get('rows') or 0) for item in filters):,})</a>"
+    )
+
+    if not rows:
+        return card(
+            "Every evaluated result, with its reason",
+            f"<div class='row'>{links}</div>"
+            + notice(
+                "warn",
+                "Nothing to list",
+                "No evaluation is on record for these symbols yet, so there is no "
+                "result to show. Nothing has been hidden: there is simply nothing here.",
+            ),
+            hint="Failed and thin results are listed exactly like passing ones.",
+        )
+
+    table_rows = []
+    for item in rows:
+        verdict = str(item.get("verdict_label") or "")
+        tone = {
+            "Passed": "ok",
+            "Failed": "warn",
+            "Too little evidence": "muted",
+            "Skipped": "muted",
+        }.get(verdict, "muted")
+        # The rule's exact identity travels with its result: an id alone is not
+        # reproducible, and a parameter set is what was actually measured.
+        params = str(item.get("parameters") or "")
+        signature = str(item.get("signature") or "")
+        rule = f"<span class='mono'>{escape(str(item.get('candidate_id', '')))}</span>"
+        if params:
+            rule += f"<div class='small muted'>{escape(params)}</div>"
+        if signature:
+            rule += f"<div class='small muted mono' title='{escape(signature)}'>version {escape(signature[:64])}{'…' if len(signature) > 64 else ''}</div>"
+        table_rows.append(
+            [
+                rule,
+                f"{escape(str(item.get('symbol', '')))} / {escape(str(item.get('timeframe', '')))}",
+                escape(str(item.get("family", ""))),
+                chip(verdict, tone),
+                escape(str(item.get("trades", 0))),
+                escape(str(item.get("reason", ""))),
+            ]
+        )
+
+    # Paging, so "browse" means every row rather than only the first page.
+    offset = int(funnel.get("offset") or 0)
+    size = int(funnel.get("limit") or 0)
+    verdict_query = f"&verdict={escape(current)}" if current else ""
+    pager = ""
+    if funnel.get("has_previous") or funnel.get("has_next"):
+        previous = (
+            f"<a class='btn btn-sm' href='/strategies?from={max(0, offset - size)}{verdict_query}'>Previous</a>"
+            if funnel.get("has_previous")
+            else ""
+        )
+        following = (
+            f"<a class='btn btn-sm' href='/strategies?from={offset + size}{verdict_query}'>Next</a>"
+            if funnel.get("has_next")
+            else ""
+        )
+        pager = f"<div class='row' style='margin-top:8px'>{previous}{following}</div>"
+
+    shown = int(funnel.get("shown") or 0)
+    matching = int(funnel.get("matching") or 0)
+    # The caption is escaped by ``table``, so it carries no entities: a filter is
+    # named by its label, never by its internal key.
+    current_label = next(
+        (str(item.get("label")) for item in filters if str(item.get("key")) == current),
+        "",
+    )
+    caption = (
+        f"Showing {shown:,} of {matching:,} rows"
+        + (f' filtered to "{current_label}"' if current_label else " across every status")
+        + ". Use the buttons to narrow; every row carries its own reason."
+    )
+    return card(
+        "Every evaluated result, with its reason",
+        f"<div class='row' style='flex-wrap:wrap;gap:6px;margin-bottom:10px'>{links}</div>"
+        + table(
+            caption,
+            [
+                ("Candidate", "mono"),
+                ("Symbol / TF", ""),
+                ("Family", ""),
+                ("Result", ""),
+                ("Trades", ""),
+                ("Why", ""),
+            ],
+            table_rows,
+        )
+        + pager,
+        hint="A passing row is a short-list entry, not a profitable strategy: it is "
+        "measured on the bars on record, under the cost assumptions in the record's "
+        "notes, and it says nothing about the future.",
+        right=chip(f"{(counts.get('passed_strategies') or 0)} passed", "ok"),
+    )
+
+
 def render_strategies(ctx: PageContext) -> str:
     view = _strategies_view(ctx)
     nonce = ctx.action_nonce
@@ -5473,6 +5714,50 @@ def render_strategies(ctx: PageContext) -> str:
             right=chip(f"grid {view.get('grid_version', '')}", "muted"),
         )
     )
+
+    # -- the catalog funnel -----------------------------------------------
+    # The library card above counts documented templates; the catalog is much
+    # larger and lives in its own panel.  Both are shown, kept apart.
+    funnel = dict(view.get("funnel") or {})
+    if funnel:
+        body.append(_strategy_funnel_card(ctx, funnel))
+        # Evaluating the whole declared catalog is the same action the guided
+        # page posts; it adds no new endpoint and it cannot trade.
+        library_counts = dict(funnel.get("library") or {})
+        compatible = dict(funnel.get("compatible") or {})
+        # Evaluate what is selected, not a default: the same symbols and the same
+        # timeframe the funnel counted as compatible.
+        chosen_symbols = [str(item) for item in (compatible.get("symbols") or ()) if str(item)]
+        chosen_timeframe = str((compatible.get("timeframes") or [""])[0] or "")
+        symbol_fields = "".join(
+            f"<input type='hidden' name='symbols' value='{escape(symbol)}'>"
+            for symbol in chosen_symbols
+        )
+        timeframe_field = (
+            f"<input type='hidden' name='timeframe' value='{escape(chosen_timeframe)}'>"
+            if chosen_timeframe
+            else ""
+        )
+        body.append(
+            card(
+                "Evaluate every compatible strategy",
+                "<p class='small muted'>Runs the declared catalog on the symbols and "
+                "timeframe that are selected, using the terminal's own historical "
+                "bars, the same bid/ask fills, cost model and calendar the paper lane "
+                "uses. Every result is kept, including the failures.</p>"
+                f"<form method='post' action='/actions/catalog-evaluate' class='stack'>"
+                f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+                "<input type='hidden' name='return_to' value='/strategies'>"
+                f"{symbol_fields}{timeframe_field}"
+                f"<div class='row'><button class='btn btn--primary' type='submit'>"
+                f"Evaluate all {int(library_counts.get('candidates') or 0):,} declared "
+                "strategies</button></div></form>",
+                hint="This measures; it does not select, size, arm, or place anything. "
+                "A candidate that passes is a short-list entry, not a promise of profit.",
+                right=chip("research only", "muted"),
+            )
+        )
+        body.append(_strategy_results_card(ctx, funnel))
 
     # -- search ----------------------------------------------------------
     family_options = "".join(

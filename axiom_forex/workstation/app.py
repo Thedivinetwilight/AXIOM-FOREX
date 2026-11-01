@@ -704,7 +704,38 @@ class WorkstationApp:
         if self.strategies_result:
             view["result"] = dict(self.strategies_result)
             self.strategies_result = {}
+        # The declared catalog over a thousand candidates lives in its own panel
+        # (the Monday paper test's record), and the library page only knows about
+        # its documented templates.  Both are shown here so "the library", "what
+        # was evaluated" and "what passed" can never be read as the same number.
+        view["funnel"] = self.strategy_funnel(query=query)
         return view
+
+    def strategy_funnel(self, *, query: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The catalog funnel for the strategy page; never raises into the page."""
+
+        if self.catalog is None:
+            return {"available": False, "reason": "no_catalog_panel"}
+        params = query or {}
+        verdict = str((params.get("verdict") or [""])[0] or "").strip().upper()
+        try:
+            offset = max(0, int(str((params.get("from") or ["0"])[0] or "0")))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            selected = [
+                str(item.get("variant_id") or "")
+                for item in (self.strategies.view(query={}).get("selections") or ())
+            ] if self.strategies is not None else []
+        except Exception:
+            selected = []
+        try:
+            return dict(
+                self.catalog.funnel(verdict=verdict, selected=selected, offset=offset)
+            )
+        except Exception as exc:  # a read model never raises into the page
+            self._log(f"strategy funnel failed: {type(exc).__name__}")
+            return {"available": False, "reason": "funnel_unavailable"}
 
     def catalog_view(self) -> dict[str, Any]:
         """The catalog panel's own view, or an honest "not wired" state."""
@@ -817,7 +848,9 @@ class WorkstationApp:
         # The guided page and the full catalog page share these actions; the form
         # says which one it came from, and only those two are accepted.
         return_to = str((form.get("return_to") or [""])[0])
-        back = return_to if return_to in {"/", "/quick-setup"} else "/quick-setup"
+        # The guided start page, the full catalog page, and the strategy page all
+        # post these actions; only those three are accepted as return targets.
+        back = return_to if return_to in {"/", "/quick-setup", "/strategies"} else "/quick-setup"
         try:
             outcome = dict(self.catalog.act(action, payload))
         except Exception as exc:  # the panel promises not to raise; this is the wall
