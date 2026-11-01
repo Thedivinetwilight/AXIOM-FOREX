@@ -16,11 +16,24 @@ build/
 dist/
 
 # Runtime state, exports, and downloaded market data
+#
+# SQLite creates up to four files per database: the database itself, a write-
+# ahead log (-wal), its shared-memory index (-shm), and a rollback journal
+# (-journal). All four are live runtime state that changes on every write.
+# Committing a sidecar leaks ledger history into Git and can give a reader a
+# view of the database that never actually existed, so every suffix is ignored.
 *.db
-*.db-shm
 *.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 logs/
 data/cache/
 data/history/
