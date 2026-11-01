@@ -77,6 +77,11 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/provider-setup": ("provider-setup", "Broker terms (advanced)"),
     "/live": ("live", "Live execution"),
     "/kronos": ("kronos", "Kronos forecast"),
+    # One page for the whole autonomous paper workflow: evaluate, select, follow.
+    # It has one start and one stop for that loop; the only other control is a
+    # start/stop for the live session /live already wired, which refuses unless
+    # the operator has armed a plan there. Arming itself is not offered here.
+    "/autopilot": ("autopilot", "Autopilot"),
     "/strategies": ("strategies", "Strategy library"),
     "/activity": ("activity", "Activity"),
     "/health": ("health", "System health"),
@@ -172,6 +177,24 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "catalog-paper-start",
         "catalog-paper-stop",
         "catalog-paper-flat",
+        # The autopilot: one start and one stop for the whole paper workflow, plus
+        # an explicit flatten of the simulated book and the optional forecast
+        # switch.  Starting evaluates and selects on the terminal's own history and
+        # then follows the selection as a *paper* test; it cannot arm, cannot send,
+        # and cannot change the execution mode.  Flatten closes simulated positions
+        # only, and only when the operator asks: stopping never closes anything.
+        "autopilot-start",
+        "autopilot-stop",
+        "autopilot-flat",
+        "autopilot-kronos",
+        # The bridge from the selection to the live workflow: a start and a stop for
+        # the session /live already wired.  Starting it runs the same path /live
+        # starts -- same arming, same gate, same risk limits, same account check,
+        # same unresolved-order lockout -- and refuses, naming the reason, when any
+        # prerequisite is missing.  It cannot arm, cannot widen a limit, and cannot
+        # send an order itself.
+        "autopilot-live-start",
+        "autopilot-live-stop",
         # The live workflow: plan, review, arm, start, stop.
         "live-arm",
         "live-disarm",
@@ -310,6 +333,22 @@ class WorkstationApp:
     catalog: Any = None
     #: The last catalog action's result, shown once on the next render.
     catalog_result: dict[str, Any] = field(default_factory=dict)
+
+    #: The autopilot: evaluate, select, then follow the selection as a paper test.
+    #: ``None`` means this process has no autopilot and the page says so. It holds
+    #: the catalog panel and no adapter: it cannot arm, size, or send anything, and
+    #: its only execution object is the paper test's local ledger.
+    autopilot: Any = None
+    #: The last autopilot action's result, shown once on the next render.
+    autopilot_result: dict[str, Any] = field(default_factory=dict)
+
+    #: The bridge from the selection to the live workflow.  It owns no adapter, no
+    #: router and no plan: it calls the live workflow built for /live, whose own
+    #: refusals decide whether a session may start.  ``None`` means this process
+    #: cannot start a live session from here, and the card says so.
+    autopilot_live: Any = None
+    #: The last live-bridge action's result, shown once on the next render.
+    autopilot_live_result: dict[str, Any] = field(default_factory=dict)
 
     #: The optional Kronos forecasting panel. ``None`` means this deployment has
     #: no forecasting component, which is the default and leaves every other page
@@ -665,6 +704,10 @@ class WorkstationApp:
                 "catalog": (
                     self.catalog_view() if page in {"quick-setup", "start"} else {}
                 ),
+                # The autopilot page: one start/stop for the paper workflow, the
+                # reason for every candidate, and the LIVE handoff with its
+                # blockers.  Reading it starts nothing.
+                "autopilot": self.autopilot_view() if page == "autopilot" else {},
                 # The guided page's step 3: the terminal's own bars, read once and
                 # cached by the panel.  Nothing is written and nothing is stored.
                 "data_check": self.data_check_view() if page == "start" else {},
@@ -833,6 +876,156 @@ class WorkstationApp:
             return HTTPStatus.SEE_OTHER, str(outcome.get("path") or "/quick-setup"), ""
         return HTTPStatus.CONFLICT, "/quick-setup", str(outcome.get("message") or "")
 
+    # -- the autopilot ----------------------------------------------------
+
+    def autopilot_view(self) -> dict[str, Any]:
+        """The autopilot's own state, its reasons, and the LIVE handoff blockers.
+
+        Read-only: it asks the object for its status and starts nothing.  Every
+        field is a measured value, a stored decision, or a refusal with a reason.
+        """
+
+        if self.autopilot is None:
+            return {"available": False}
+        try:
+            view = dict(self.autopilot.status())
+            view["decisions"] = self.autopilot.decisions(limit=60)
+            view["handoff"] = self.autopilot.handoff()
+            view["latency"] = self.autopilot.latency()
+            view["choices"] = self.autopilot.choices()
+        except Exception as exc:  # a read model never raises into the page
+            self._log(f"autopilot view failed: {type(exc).__name__}")
+            return {
+                "available": False,
+                "error": type(exc).__name__,
+                "message": "The autopilot's state could not be read. Nothing was started.",
+            }
+        view.setdefault("available", True)
+        view["live"] = self.autopilot_live_view()
+        if self.autopilot_result:
+            view["result"] = dict(self.autopilot_result)
+            self.autopilot_result = {}
+        return view
+
+    def autopilot_live_view(self) -> dict[str, Any]:
+        """The bridge's own view: what it would run, and why it may not.
+
+        Read-only.  Reading a status starts nothing, arms nothing and sends
+        nothing; every refusal it shows comes from the live path underneath it.
+        """
+
+        pilot = self.autopilot_live
+        if pilot is None:
+            return {"available": False}
+        try:
+            view = dict(pilot.status())
+        except Exception as exc:  # a read model never raises into the page
+            self._log(f"live autopilot view failed: {type(exc).__name__}")
+            return {
+                "available": False,
+                "error": type(exc).__name__,
+                "message": "The live bridge's state could not be read. Nothing was started.",
+            }
+        view.setdefault("available", True)
+        return view
+
+    def _autopilot_live_action(self, action: str) -> dict[str, Any]:
+        """Start or stop the session /live wired.  Never arms, never sends."""
+
+        pilot = self.autopilot_live
+        if pilot is None:
+            return {
+                "ok": False,
+                "reason": "live_autopilot_unavailable",
+                "message": (
+                    "This workstation has no live bridge, so no live session can be "
+                    "started here. Nothing changed and nothing was sent."
+                ),
+            }
+        starting = action == "autopilot-live-start"
+        view = pilot.start() if starting else pilot.stop()
+        state = str(getattr(view, "state", "") or "")
+        blockers = [item.as_dict() for item in getattr(view, "blockers", ()) or ()]
+        ok = state == "RUNNING" if starting else True
+        reason = ""
+        if not ok:
+            reason = str(getattr(view, "reason", "") or "")
+            if not reason and blockers:
+                reason = str(blockers[0].get("reason") or "")
+        return {
+            "ok": ok,
+            "reason": reason,
+            "message": str(getattr(view, "message", "") or ""),
+            "live": dict(view.as_dict()),
+        }
+
+    def _autopilot_action(
+        self, action: str, form: Mapping[str, list[str]]
+    ) -> tuple[int, str, str]:
+        if self.autopilot is None:
+            return (
+                HTTPStatus.CONFLICT,
+                "/autopilot",
+                "This workstation has no autopilot, so there is nothing to start. "
+                "Nothing was run and no mode changed.",
+            )
+        payload: dict[str, Any] = {}
+        for name, values in form.items():
+            if name in {"nonce", "return_to"}:
+                continue
+            payload[name] = values if len(values) > 1 else (values[0] if values else "")
+        try:
+            if action == "autopilot-start":
+                symbols = payload.get("symbols")
+                frames = payload.get("timeframes")
+                if isinstance(symbols, str):
+                    symbols = [item.strip() for item in symbols.split(",") if item.strip()]
+                if isinstance(frames, str):
+                    frames = [item.strip() for item in frames.split(",") if item.strip()]
+                outcome = dict(
+                    self.autopilot.start(
+                        symbols=symbols if isinstance(symbols, list) else None,
+                        timeframes=frames if isinstance(frames, list) else None,
+                    )
+                )
+            elif action == "autopilot-stop":
+                outcome = dict(self.autopilot.stop(reason="operator_stop"))
+            elif action == "autopilot-flat":
+                outcome = dict(self.autopilot.flatten())
+            elif action == "autopilot-kronos":
+                outcome = dict(
+                    self.autopilot.set_kronos(
+                        str(payload.get("kronos_mode") or "OFF"),
+                        required=str(payload.get("kronos_required") or "") in {"1", "on", "yes", "true"},
+                    )
+                )
+            elif action in {"autopilot-live-start", "autopilot-live-stop"}:
+                outcome = self._autopilot_live_action(action)
+            else:  # pragma: no cover - the action set above is exhaustive
+                outcome = {"ok": False, "reason": "unknown_action", "message": "Not an autopilot action."}
+        except Exception as exc:  # the autopilot promises not to raise; this is the wall
+            self._log(f"autopilot action {action} raised: {type(exc).__name__}")
+            outcome = {
+                "ok": False,
+                "reason": type(exc).__name__,
+                "message": (
+                    "That step could not be completed. Nothing was traded, no mode "
+                    "changed, and no position was closed."
+                ),
+            }
+        if not outcome.get("message"):
+            outcome["message"] = (
+                "Done." if outcome.get("ok") else "The step was refused; the reason is on the page."
+            )
+        self.autopilot_result = dict(outcome)
+        self._log(
+            f"autopilot action {action}: "
+            + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused"))
+        )
+        if outcome.get("ok"):
+            return HTTPStatus.SEE_OTHER, "/autopilot", ""
+        return HTTPStatus.CONFLICT, "/autopilot", str(outcome.get("message") or "")
+
     def _catalog_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         if self.catalog is None:
             return (
@@ -937,6 +1130,8 @@ class WorkstationApp:
         wizard = self.wizard
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
+        if action.startswith("autopilot-"):
+            return self._autopilot_action(action, form)
         if action.startswith("catalog-"):
             return self._catalog_action(action, form)
         if action.startswith("strategy-"):

@@ -717,6 +717,23 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "catalog-paper-start",
         "catalog-paper-stop",
         "catalog-paper-flat",
+        # The autopilot: one start and one stop for the whole paper workflow,
+        # an explicit flatten of the simulated book, and the optional forecast
+        # switch. Starting evaluates and selects on the terminal's own history and
+        # then follows the selection as a *paper* test. None of the four can arm,
+        # send, change the mode, or close a position the operator did not ask to
+        # close; stopping leaves every open position open.
+        "autopilot-start",
+        "autopilot-stop",
+        "autopilot-flat",
+        "autopilot-kronos",
+        # The bridge from that selection to the live workflow /live already
+        # wired. Starting calls that workflow's own start, which refuses unless
+        # the operator armed a plan on this account; stopping ends it and disarms.
+        # Neither arms, widens a limit, changes the mode, or sends an order from
+        # this layer.
+        "autopilot-live-start",
+        "autopilot-live-stop",
     }
 
 

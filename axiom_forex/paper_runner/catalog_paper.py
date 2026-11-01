@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -310,8 +311,21 @@ class CatalogPaperTest:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         bar_window: int = DEFAULT_BAR_WINDOW,
         clock: Callable[[], datetime] = _utc_now,
+        confirmation: Callable[[Watch, int], Any] | None = None,
     ) -> None:
         self._quotes = quotes
+        #: An optional *veto only* second opinion (Kronos, when the operator turned
+        #: it on).  It is handed the watch and the direction a signal proposes, and
+        #: may only say no.  ``None`` -- the default -- means no second opinion is
+        #: consulted at all, which is the behaviour this class always had.  It is
+        #: called while the loop holds its state lock, so it must be quick: the
+        #: launcher's reader looks up one stored row and never runs a model.
+        self._confirmation = confirmation
+        #: Observed decision latency, in milliseconds.  Measured, never promised:
+        #: the page shows these numbers with the machine they were measured on.
+        self._latency_ms: dict[str, float] = {"last": 0.0, "min": 0.0, "max": 0.0, "total": 0.0}
+        self._latency_samples = 0
+        self._vetoed = 0
         self._watches = tuple(watches)
         self._root = Path(root)
         self._lot = float(lot)
@@ -554,7 +568,9 @@ class CatalogPaperTest:
                 if self._last_bar.get(watch.key) == stamp:
                     continue  # no new completed bar; nothing can have changed
                 self._last_bar[watch.key] = stamp
+            began = time.monotonic()
             self._decide(watch, series, quote)
+            self._note_latency((time.monotonic() - began) * 1000.0)
 
     # -- decisions --------------------------------------------------------
 
@@ -595,6 +611,25 @@ class CatalogPaperTest:
                 }
                 return
             direction = 1 if long_now else -1
+            if self._confirmation is not None:
+                # A refusal here can only skip the trade.  It cannot reverse the
+                # direction, resize it, or reach an order path.
+                verdict = self._confirmation(watch, direction)
+                allowed = bool(getattr(verdict, "allowed", True))
+                if not allowed:
+                    self._vetoed += 1
+                    view = getattr(verdict, "audit_view", None)
+                    detail = dict(view()) if callable(view) else {"reason": str(verdict)}
+                    self._last_decision[watch.key] = {
+                        "at": _iso(self._clock()),
+                        "action": "NO_TRADE",
+                        "reason": str(detail.get("reason") or "confirmation_refused"),
+                        "detail": str(detail.get("detail") or ""),
+                        "bar": _iso(series.timestamps[index]),
+                        "simulated": True,
+                    }
+                    self._record(EVENT_SIGNAL_SKIPPED, {"key": watch.key, **detail})
+                    return
             price = self._fill_price(direction, quote, closing=False)
             facts = self._facts(watch.symbol)
             point = _decimal(getattr(facts, "point", None)) or 0.0
@@ -1000,6 +1035,38 @@ class CatalogPaperTest:
 
     # -- views -------------------------------------------------------------
 
+    def _note_latency(self, milliseconds: float) -> None:
+        """Record one observed decision duration.  Never used to make a promise."""
+
+        value = max(0.0, float(milliseconds))
+        if self._latency_samples == 0:
+            self._latency_ms["min"] = value
+        self._latency_ms["last"] = value
+        self._latency_ms["min"] = min(self._latency_ms["min"], value)
+        self._latency_ms["max"] = max(self._latency_ms["max"], value)
+        self._latency_ms["total"] += value
+        self._latency_samples += 1
+
+    def latency(self) -> dict[str, Any]:
+        """What was actually measured, with its sample count and no promises."""
+
+        samples = self._latency_samples
+        mean = self._latency_ms["total"] / samples if samples else 0.0
+        return {
+            "unit": "milliseconds",
+            "basis": "measured in this process on this machine",
+            "samples": samples,
+            "last": round(self._latency_ms["last"], 3),
+            "mean": round(mean, 3),
+            "min": round(self._latency_ms["min"], 3),
+            "max": round(self._latency_ms["max"], 3),
+            "note": (
+                "Decision time only: from the completed bar to this cycle's decision, "
+                "including the simulated fill when a signal fires. It says nothing "
+                "about order submission, which this loop cannot do."
+            ),
+        }
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             age_limit = self._max_age
@@ -1013,6 +1080,11 @@ class CatalogPaperTest:
                         "age_seconds": age,
                         "fresh": bool(age is not None and age <= age_limit),
                         "checked_at": seen.get("at") or "",
+                        # The last quote the loop saw, so the page can show feed
+                        # health and a mark.  Strings: the page never does maths on
+                        # a price, and a Decimal in HTML is a rendering accident.
+                        "bid": None if seen.get("bid") is None else str(seen.get("bid")),
+                        "ask": None if seen.get("ask") is None else str(seen.get("ask")),
                     }
                 )
             closed = [event for event in self._fills if event.get("kind") == EVENT_CLOSED]
@@ -1045,6 +1117,12 @@ class CatalogPaperTest:
                     "waiting_for_history": self._stats.waiting,
                 },
                 "blockers": list(self.blockers()),
+                "latency": self.latency(),
+                "confirmation": {
+                    "enabled": self._confirmation is not None,
+                    "vetoed": self._vetoed,
+                    "can_only_veto": True,
+                },
                 "ledger": str(self._ledger_path),
                 "state": str(self._state_path),
                 "claim": (

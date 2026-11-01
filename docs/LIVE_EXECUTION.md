@@ -128,6 +128,16 @@ retcode and whether the fill was booked.
 
 No password, token, balance, or equity figure is ever shown, logged, or stored.
 
+### The start button on `/autopilot`
+
+`/autopilot` can also start **this** session, once a strategy is selected and running
+there. That page's bridge calls the same `start_session()` and displays the same
+refusals; it cannot arm, cannot write a plan and cannot change a size or a limit. It
+refuses when no plan is written, when the plan belongs to a different candidate than
+the running selection, when the mode is not LIVE, when the adapter is not connected,
+when the plan is not armed, or when this page reports any blocker. Stopping from
+either page disarms and leaves open positions untouched. See `AUTOPILOT.md`.
+
 ## Before your first real order
 
 All of these must be true, and the page names each one that is not:

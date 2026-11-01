@@ -223,6 +223,63 @@ def test_an_open_position_survives_a_restart_and_is_marked_as_restored(tmp_path)
     revived.stop()
 
 
+def test_a_confirmation_hook_can_only_skip_the_entry_it_was_asked_about(tmp_path):
+    """The optional second opinion may cancel a signal and nothing else."""
+
+    from types import SimpleNamespace
+
+    from axiom_forex.paper_runner.catalog_paper import EVENT_SIGNAL_SKIPPED
+
+    asked = []
+
+    def refuse(watch, direction):
+        asked.append((watch.key, direction))
+        return SimpleNamespace(
+            allowed=False,
+            audit_view=lambda: {
+                "reason": "kronos_opposes_the_signal",
+                "detail": "The forecast's own range points against this entry.",
+                "label": "FORECAST_ONLY_NOT_A_SIGNAL",
+            },
+        )
+
+    quotes = FakeQuotes(age_seconds=1.0)
+    test = _test(tmp_path, quotes, confirmation=refuse)
+    test._cycle()
+    snapshot = test.snapshot()
+    assert asked == [(test.watches[0].key, 1)], "the hook is asked once, about this signal"
+    assert snapshot["positions"] == []
+    assert snapshot["orders"] == []
+    assert snapshot["confirmation"]["vetoed"] == 1
+    assert snapshot["confirmation"]["enabled"] is True
+    assert snapshot["confirmation"]["can_only_veto"] is True
+    assert any(event["kind"] == EVENT_SIGNAL_SKIPPED for event in snapshot["events"])
+    # The refusal is a decision, and it is on the page with its reason.
+    assert snapshot["signals"][0]["action"] == "NO_TRADE"
+    assert snapshot["signals"][0]["reason"] == "kronos_opposes_the_signal"
+
+
+def test_without_a_confirmation_hook_the_loop_behaves_exactly_as_before(tmp_path):
+    quotes = FakeQuotes(age_seconds=1.0)
+    test = _test(tmp_path, quotes)
+    test._cycle()
+    snapshot = test.snapshot()
+    assert snapshot["orders"], "a signal still fills when no second opinion is wired"
+    assert snapshot["confirmation"] == {"enabled": False, "vetoed": 0, "can_only_veto": True}
+
+
+def test_decision_latency_is_measured_and_reported_as_measured(tmp_path):
+    quotes = FakeQuotes(age_seconds=1.0)
+    test = _test(tmp_path, quotes)
+    test._cycle()
+    latency = test.snapshot()["latency"]
+    assert latency["samples"] == 1
+    assert latency["unit"] == "milliseconds"
+    assert latency["max"] >= latency["min"] >= 0.0
+    assert "measured in this process" in latency["basis"]
+    assert "order submission" in latency["note"]
+
+
 def test_the_test_cannot_reach_an_order_surface():
     source = Path("axiom_forex/paper_runner/catalog_paper.py").read_text(encoding="utf-8")
     for forbidden in ("order_send", "import socket", "Adapter", "initialize("):

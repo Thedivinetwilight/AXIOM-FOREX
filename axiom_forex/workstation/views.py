@@ -53,6 +53,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("mode", "/mode", "Trading mode"),
     ("live", "/live", "Live execution"),
     ("setup", "/setup", "Setup steps"),
+    ("autopilot", "/autopilot", "Autopilot"),
     ("kronos", "/kronos", "Kronos forecast"),
     ("overview", "/overview", "Overview (classic)"),
     ("health", "/health", "System health"),
@@ -66,6 +67,7 @@ NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Advanced",
         (
+            "autopilot",
             "quick-setup",
             "provider-setup",
             "mode",
@@ -81,6 +83,7 @@ NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 ICONS: dict[str, str] = {
     "overview": "M3 12h4l3 7 4-14 3 7h4",
     "start": "M5 4l14 8-14 8z",
+    "autopilot": "M12 3v3M12 18v3M3 12h3M18 12h3M12 8a4 4 0 100 8 4 4 0 000-8zM7 7l10 10",
     "mode": "M4 7h10l-3-3M20 17H10l3 3M14 7h6v6M10 17H4v-6",
     "live": "M12 3v3M12 18v3M3 12h3M18 12h3M6.3 6.3l2.1 2.1M15.6 15.6l2.1 2.1M17.7 6.3l-2.1 2.1M8.4 15.6l-2.1 2.1M12 9a3 3 0 100 6 3 3 0 000-6z",
     "setup": "M4 6h10M4 12h16M4 18h7M18 4v4M16 18h4M20 16v4",
@@ -6091,8 +6094,906 @@ def render_connecting(ctx: PageContext) -> str:
     return render_shell(ctx, body)
 
 
+def _autopilot_view(ctx: PageContext) -> Mapping[str, Any]:
+    return dict((ctx.extra or {}).get("autopilot") or {})
+
+
+def _autopilot_state_chip(state: str) -> str:
+    tone = {
+        "RUNNING": "ok",
+        "PREPARING": "warn",
+        "BLOCKED": "danger",
+        "STOPPED": "muted",
+    }.get(state, "muted")
+    return chip(state or "IDLE", tone, dot=state in {"RUNNING", "PREPARING"})
+
+
+def _live_signal_chip(outcome: str, side: str) -> str:
+    tone = {
+        "submitted": "ok",
+        "refused": "danger",
+        "held": "warn",
+    }.get(str(outcome or ""), "muted")
+    label = str(outcome or "no signal").upper()
+    if side and side != "flat":
+        label = f"{label} · {str(side).upper()}"
+    return chip(label, tone)
+
+
+def _render_live_autopilot(live: Mapping[str, Any], nonce: str) -> str:
+    """The selected strategy on the existing LIVE path, with its own refusals.
+
+    Every number here is either read from the live path's view or measured by the
+    bridge; a duration the path did not record is shown as "not measured" rather
+    than as a zero.  The start control is drawn only when the live path reports
+    no blockers, so a blocked page cannot even offer the click.
+    """
+
+    if not live or not live.get("available"):
+        return notice(
+            "muted",
+            "The live bridge is not wired into this workstation",
+            str(live.get("message") or "")
+            or "This process cannot start a live session from here. The Live execution "
+            "page keeps its own review, arming and start controls.",
+        )
+
+    state = str(live.get("state") or "IDLE")
+    strategy = dict(live.get("strategy") or {})
+    selection = dict(live.get("selection") or {})
+    feed = dict(live.get("feed") or {})
+    signal = dict(live.get("signal") or {})
+    latency = dict(live.get("latency") or {})
+    kronos = dict(live.get("kronos") or {})
+    blockers = [dict(item) for item in (live.get("blockers") or [])]
+    orders = [dict(item) for item in (live.get("orders") or [])]
+    positions = [dict(item) for item in (live.get("positions") or [])]
+    sending = bool(live.get("order_sending"))
+
+    parts: list[str] = []
+    head = (
+        "<div class='row' style='justify-content:space-between'>"
+        "<h3 style='margin:0'>LIVE session</h3>"
+        f"<span class='row'>{_autopilot_state_chip(state)}"
+        f"{chip('SENDING REAL ORDERS' if sending else 'not sending', 'danger' if sending else 'muted', dot=sending)}</span>"
+        "</div>"
+    )
+    parts.append(head)
+
+    if live.get("message"):
+        parts.append(
+            notice(
+                "danger" if sending else "warn" if blockers else "ok",
+                "The live path says",
+                str(live.get("message")),
+            )
+        )
+    parts.append(f"<p class='small muted'>{escape(str(live.get('note') or ''))}</p>")
+
+    facts = [
+        ("Candidate", str(strategy.get("candidate_id") or "—")),
+        ("Strategy", str(strategy.get("strategy_label") or "—")),
+        ("Pair", str(live.get("pair") or "—")),
+        ("Broker symbol", str(live.get("broker_symbol") or "—")),
+        ("Timeframe", str(live.get("timeframe") or selection.get("timeframe") or "—")),
+        ("Quantity", str(strategy.get("quantity") or "—")),
+        (
+            "Open positions allowed",
+            str(strategy.get("max_open_positions") if strategy.get("max_open_positions") is not None else "—"),
+        ),
+        ("Max daily loss", str(strategy.get("max_daily_loss_account") or "—")),
+        ("Evidence", str(strategy.get("evidence_state") or "—")),
+        ("Armed", "yes" if live.get("armed") else "no"),
+        ("Plan", str(strategy.get("plan_id") or "—")),
+        (
+            "Plan matches the selection",
+            {True: "yes", False: "no", None: "not known"}.get(live.get("plan_matches_selection"), "not known"),
+        ),
+    ]
+    parts.append(dl([(label, escape(value)) for label, value in facts]))
+
+    parts.append(
+        "<h4 class='small muted' style='margin:16px 0 4px'>Why submission is on or off</h4>"
+        + (
+            _blocker_list(blockers)
+            if blockers
+            else "<p class='small'>No blocker is reported by the live path right now.</p>"
+        )
+    )
+
+    parts.append(
+        "<h4 class='small muted' style='margin:16px 0 4px'>Feed freshness</h4>"
+        + dl(
+            [
+                ("Source", escape(str(feed.get("source") or "not measured"))),
+                ("Newest quote", escape(str(feed.get("quoted_at") or "—"))),
+                (
+                    "Age",
+                    escape(
+                        f"{float(feed.get('age_seconds')):.1f}s"
+                        if feed.get("age_seconds") is not None
+                        else "not measured"
+                    ),
+                ),
+                (
+                    "Fresh",
+                    {True: "yes", False: "no — stale", None: "not measured"}.get(feed.get("fresh"), "not measured"),
+                ),
+                ("Detail", escape(str(feed.get("detail") or "—"))),
+            ]
+        )
+    )
+
+    parts.append(
+        "<h4 class='small muted' style='margin:16px 0 4px'>Last signal</h4>"
+        + f"<p class='small'>{_live_signal_chip(signal.get('outcome', ''), signal.get('side', ''))} "
+        + escape(str(signal.get("why") or "—"))
+        + (f" <span class='muted'>{escape(str(signal.get('detail')))}</span>" if signal.get("detail") else "")
+        + (f" <span class='muted'>at {escape(str(signal.get('at')))}</span>" if signal.get("at") else "")
+        + "</p>"
+    )
+
+    if orders:
+        parts.append(
+            table(
+                "Orders the live path recorded",
+                (
+                    ("request_id", "Request"),
+                    ("at", "At"),
+                    ("status", "Status"),
+                    ("refusal", "Refusal"),
+                    ("detail", "Detail"),
+                    ("unresolved", "Unresolved"),
+                ),
+                (
+                    (
+                        escape(str(item.get("request_id", ""))),
+                        escape(str(item.get("at", ""))),
+                        escape(str(item.get("status", ""))),
+                        escape(str(item.get("refusal") or "—")),
+                        escape(str(item.get("detail") or "—")),
+                        "yes" if item.get("unresolved") else "no",
+                    )
+                    for item in orders
+                ),
+                empty="No order has been attempted.",
+            )
+        )
+    else:
+        parts.append("<p class='small muted'>No order has been attempted in this session.</p>")
+
+    parts.append(
+        "<h4 class='small muted' style='margin:16px 0 4px'>Measured latency</h4>"
+        + dl(
+            [
+                (
+                    "Decision",
+                    escape(
+                        f"{float(latency.get('decision_ms')):.1f} ms"
+                        if latency.get("decision_ms") is not None
+                        else "not measured by this path"
+                    ),
+                ),
+                (
+                    "Submission call",
+                    escape(
+                        f"{float(latency.get('submit_ms')):.1f} ms"
+                        if latency.get("submit_ms") is not None
+                        else "not measured by this path"
+                    ),
+                ),
+                (
+                    "Session start",
+                    escape(
+                        f"{float(latency.get('start_ms')):.1f} ms"
+                        if latency.get("start_ms") is not None
+                        else "not measured"
+                    ),
+                ),
+                (
+                    "Reading this page",
+                    escape(
+                        f"{float(latency.get('view_ms')):.1f} ms"
+                        if latency.get("view_ms") is not None
+                        else "not measured"
+                    ),
+                ),
+            ]
+        )
+        + "<p class='small muted'>Measured on this machine, in this process. Not a fill "
+        "time, not a broker measurement, and not a promise about execution speed.</p>"
+    )
+
+    parts.append(
+        "<h4 class='small muted' style='margin:16px 0 4px'>Kronos (optional)</h4>"
+        + dl(
+            [
+                ("Policy", escape(str(kronos.get("policy") or "off"))),
+                ("Available", "yes" if kronos.get("available") else "no"),
+            ]
+        )
+        + f"<p class='small muted'>{escape(str(kronos.get('note') or ''))}</p>"
+    )
+
+    if positions:
+        parts.append(
+            table(
+                "Open positions in the terminal",
+                (("symbol", "Symbol"), ("volume", "Volume"), ("ticket", "Ticket")),
+                (
+                    (
+                        escape(str(item.get("symbol", ""))),
+                        escape(str(item.get("volume", ""))),
+                        escape(str(item.get("ticket", ""))),
+                    )
+                    for item in positions
+                ),
+                empty="No position is open.",
+            )
+            + "<p class='small muted'>Stopping the session never closes these.</p>"
+        )
+
+    if state in {"RUNNING", "STARTING"}:
+        parts.append(
+            action_form("autopilot-live-stop", nonce, "Stop the live session")
+            + "<p class='small muted'>Stopping disarms the plan and stops new submissions. "
+            "Any open position stays open in the terminal.</p>"
+        )
+    elif blockers:
+        parts.append(
+            "<p class='small'>"
+            f"<strong>Start is disabled:</strong> "
+            f"{escape(str(blockers[0].get('reason') or 'a prerequisite is missing'))} — "
+            f"{escape(str(blockers[0].get('message') or ''))}</p>"
+        )
+    else:
+        parts.append(
+            action_form("autopilot-live-start", nonce, "Start the live session", tone="danger")
+            + "<p class='small muted'>This starts the session the Live execution page already "
+            "wired: every signal still passes that path's own gate, risk limits, account "
+            "check and unresolved-order lockout. Nothing is re-checked less because it "
+            "started here.</p>"
+        )
+
+    return card(
+        "The selected strategy on the existing LIVE path",
+        "".join(parts),
+        hint="This card adds no order path. It starts the same live session the Live "
+        "execution page does, and shows that session's own refusals, history and "
+        "measured timings.",
+    )
+
+def render_autopilot(ctx: PageContext) -> str:
+    """One start, one stop, and every reason written down.
+
+    The page shows what the autopilot measured, what it selected and why it left
+    everything else out, what it is following, and what stands between that
+    selection and a real order.  The only live control it carries is a start and
+    a stop for the session the Live execution page already wired -- and that
+    control is drawn only when that page's own blockers say it may be.  Arming is
+    never offered here: the phrase, the account fingerprint and the acknowledged
+    review stay on /live.
+    """
+
+    view = _autopilot_view(ctx)
+    if not view.get("available"):
+        return render_shell(
+            ctx,
+            notice(
+                "warn",
+                "The autopilot is not wired into this workstation",
+                str(view.get("message") or "This process has no autopilot, so there is "
+                "nothing to start here. Nothing else is affected."),
+            ),
+        )
+
+    nonce = escape(ctx.action_nonce)
+    state = str(view.get("state") or "IDLE")
+    paper = dict(view.get("paper") or {})
+    selection = dict(view.get("selection") or {})
+    decisions = dict(view.get("decisions") or {})
+    handoff = dict(view.get("handoff") or {})
+    kronos = dict(view.get("kronos") or {})
+    kronos_policy = dict(view.get("kronos_policy") or {})
+    choices = dict(view.get("choices") or {})
+    live = dict(view.get("live") or {})
+    latency = dict(view.get("latency") or {})
+    inner = dict(latency.get("decision") or {})
+    positions = [dict(item) for item in (view.get("positions") or [])]
+    body: list[str] = []
+
+    result = dict(view.get("result") or {})
+    if result.get("message"):
+        body.append(
+            notice(
+                "ok" if result.get("ok") else "warn",
+                "The last autopilot action",
+                str(result.get("message")),
+            )
+        )
+
+    headline = {
+        "RUNNING": (
+            "ok",
+            "The paper loop is following the selection",
+            "Real terminal quotes, locally simulated fills. No order is sent, no "
+            "account is read, and nothing here is a profit claim.",
+        ),
+        "PREPARING": (
+            "warn",
+            "Evaluating, then selecting",
+            "The catalog is being measured on the terminal's own history and the "
+            "selection rules are applied to that evidence. Nothing is traded while "
+            "this runs; the steps below are the record of it.",
+        ),
+        "BLOCKED": (
+            "warn",
+            "The autopilot is blocked",
+            "It stopped at a step it could not complete, and said which. Nothing was "
+            "traded, no mode changed, and no open position was closed.",
+        ),
+        "STOPPED": (
+            "muted",
+            "The paper loop is stopped",
+            "Stopping never closes a position: anything open is still open and is "
+            "listed below. Re-selection is a separate start, so a strategy is never "
+            "swapped under an open position.",
+        ),
+    }.get(state, (
+        "muted",
+        "The autopilot has not run in this process",
+        "Press Start to evaluate the catalog on the terminal's own history, select on "
+        "train and validation evidence, and follow the selection as a paper test.",
+    ))
+    body.append(
+        "<section class='card'><div class='hero'>"
+        "<div class='row' style='justify-content:space-between'>"
+        "<h2>Autopilot</h2>"
+        f"<span class='row'>{_autopilot_state_chip(state)}"
+        f"{execution_mode_chip(ctx)}</span></div>"
+        + notice(headline[0], headline[1], str(headline[2]))
+        + (
+            f"<p class='small muted'>{escape(str(view.get('note') or ''))}</p>"
+            if view.get("note")
+            else ""
+        )
+        + "</div></section>"
+    )
+
+    # -- the two controls -------------------------------------------------
+    controls: list[str] = []
+    running = state in {"RUNNING", "PREPARING"}
+    frames = [str(item) for item in (choices.get("timeframes") or ["1h"])]
+    default_frame = str(choices.get("default_timeframe") or (frames[0] if frames else "1h"))
+    options = "".join(
+        f"<option value='{escape(name)}'"
+        + (" selected" if name == default_frame else "")
+        + f">{escape(name)}</option>"
+        for name in frames
+    )
+    recommended = ", ".join(str(name) for name in (choices.get("recommended") or ()))
+    if running:
+        controls.append(
+            action_form(
+                "autopilot-stop",
+                nonce,
+                "Stop the paper loop",
+                extra="",
+            )
+        )
+        controls.append(
+            "<p class='small muted'>Stopping ends the loop and leaves every open "
+            "position open and visible below. It does not change the execution mode "
+            "and does not touch LIVE.</p>"
+        )
+    else:
+        controls.append(
+            f"<form method='post' action='/actions/autopilot-start' class='stack' "
+            "style='gap:10px'>"
+            f"<input type='hidden' name='nonce' value='{nonce}'>"
+            "<label for='autopilot-symbols' class='small'>Symbols (comma separated; "
+            "blank uses what the terminal recommends)</label>"
+            f"<input id='autopilot-symbols' name='symbols' value='{escape(recommended)}'>"
+            "<label for='autopilot-timeframe' class='small'>Timeframe</label>"
+            f"<select id='autopilot-timeframe' name='timeframes'>{options}</select>"
+            "<button class='btn btn--primary' type='submit'>Start paper autopilot</button>"
+            "<p class='small muted'>One run measures at most "
+            f"{int(choices.get('max_symbols', 0) or 0)} symbol(s) and follows at most "
+            f"{int(choices.get('max_rows', 0) or 0)} row(s). Both bounds are stated "
+            "here rather than applied silently.</p>"
+            "</form>"
+        )
+    if positions:
+        controls.append(
+            action_form(
+                "autopilot-flat",
+                nonce,
+                "Close the simulated positions",
+                tone="danger",
+                extra="",
+            )
+            + "<p class='small muted'>A separate click, and paper only: it closes the "
+            "simulated book at the current quote. Nothing is sent to a broker.</p>"
+        )
+    body.append(
+        card(
+            "Start and stop",
+            "".join(controls),
+            hint="One start for the whole paper workflow and one stop. Neither can "
+            "place an order, arm live trading, or change the execution mode.",
+        )
+    )
+
+    # -- the optional forecast -------------------------------------------
+    body.append(
+        card(
+            "Kronos, if you turn it on",
+            notice(
+                "muted",
+                f"Mode: {kronos.get('mode', 'OFF')}",
+                str(kronos_policy.get("note") or ""),
+            )
+            + f"<form method='post' action='/actions/autopilot-kronos' class='stack' "
+            "style='gap:10px'>"
+            f"<input type='hidden' name='nonce' value='{nonce}'>"
+            "<label for='kronos-mode' class='small'>How a forecast may be used</label>"
+            "<select id='kronos-mode' name='kronos_mode'>"
+            "<option value='OFF'" + (" selected" if str(kronos.get("mode")) == "OFF" else "") + ">OFF — no forecast is read</option>"
+            "<option value='VETO'" + (" selected" if str(kronos.get("mode")) == "VETO" else "") + ">VETO — a forecast may cancel an entry</option>"
+            "</select>"
+            "<label class='small'><input type='checkbox' name='kronos_required' "
+            "value='1'" + (" checked" if kronos.get("required") else "") + "> "
+            "skip a signal when no forecast is available</label>"
+            "<button class='btn' type='submit'>Set the forecast mode</button>"
+            "</form>"
+            + dl(
+                (
+                    ("Affects the ranking", "no"),
+                    ("Can create a trade", "no"),
+                    ("Can size a position", "no"),
+                    ("Can only veto", "yes"),
+                    ("Forecasts so far", f"{int(kronos.get('vetoed', 0) or 0)} veto(es), "
+                    f"{int(kronos.get('unavailable', 0) or 0)} unavailable"),
+                )
+            ),
+            hint="Off by default because its forecasts have not been validated against "
+            "realised outcomes here. It is never required for the autopilot to run.",
+        )
+    )
+
+    # -- the selection ----------------------------------------------------
+    if selection:
+        counts = dict(selection.get("counts") or {})
+        policy = dict(selection.get("policy") or {})
+        body.append(
+            "<div class='data-grid'>"
+            + kpi("Selected", str(counts.get("selected", 0)), foot="these are followed")
+            + kpi(
+                "Eligible, not chosen",
+                str(counts.get("eligible_not_chosen", 0)),
+                foot="passed every rule, lost on rank or a cap",
+            )
+            + kpi("Rejected", str(counts.get("rejected", 0)), foot="each with its reason")
+            + kpi(
+                "Policy",
+                str(policy.get("fingerprint", "")),
+                foot="fingerprint of the rules that were applied",
+            )
+            + "</div>"
+        )
+        body.append(
+            notice(
+                "ok",
+                "How these were chosen",
+                "Ranked on train and validation evidence only. Walk-forward folds that "
+                "run past the validation boundary are not counted, so the locked test "
+                "window takes no part. Data origin: "
+                f"{selection.get('data_origin', 'unknown')}."
+                + (
+                    f" Selection rules were applied at {selection.get('generated_at', '')}."
+                    if selection.get("generated_at")
+                    else ""
+                ),
+            )
+        )
+        rows = [dict(item) for item in (decisions.get("decisions") or [])]
+        if rows:
+            body.append(
+                table(
+                    "Why every candidate was selected or left out",
+                    (
+                        ("candidate_id", "Candidate"),
+                        ("symbol", "Symbol"),
+                        ("timeframe", "TF"),
+                        ("status", "Decision"),
+                        ("rank", "Rank"),
+                        ("reasons", "Reason"),
+                        ("message", "In words"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("candidate_id", ""))),
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("timeframe", ""))),
+                            escape(str(item.get("status", ""))),
+                            "" if item.get("rank") in (None, "") else str(item.get("rank")),
+                            escape(", ".join(str(r) for r in (item.get("reasons") or ()))),
+                            escape(str(item.get("message", ""))),
+                        )
+                        for item in rows
+                    ),
+                    empty="No candidate was recorded.",
+                )
+            )
+            if int(decisions.get("decisions_omitted", 0) or 0):
+                body.append(
+                    f"<p class='small muted'>{int(decisions.get('decisions_omitted', 0))} "
+                    "further decision(s) are in the stored selection record; this page "
+                    "draws the first 60.</p>"
+                )
+            body.append(
+                f"<p class='small muted'>Selection record: "
+                f"<code>{escape(str(view.get('selection_record') or ''))}</code> · "
+                f"evaluation record: <code>{escape(str(view.get('record') or ''))}</code></p>"
+            )
+
+    blockers = [dict(item) for item in (view.get("blockers") or [])]
+    if blockers:
+        body.append(
+            card(
+                "What stopped it",
+                _blocker_list(
+                    [
+                        {
+                            "reason": item.get("reason", ""),
+                            "message": item.get("detail", ""),
+                        }
+                        for item in blockers
+                    ]
+                ),
+                hint="A blocker is a refusal with a reason, never a silent fallback to "
+                "something else.",
+            )
+        )
+
+    steps = [dict(item) for item in (view.get("steps") or [])]
+    if steps:
+        body.append(
+            table(
+                "What the autopilot did, in order",
+                (
+                    ("name", "Step"),
+                    ("ok", "Ok"),
+                    ("took_ms", "Took (ms)"),
+                    ("detail", "Detail"),
+                    ("at", "At"),
+                ),
+                (
+                    (
+                        escape(str(item.get("name", ""))),
+                        "yes" if item.get("ok") else "no",
+                        str(item.get("took_ms", "")),
+                        escape(str(item.get("detail", ""))),
+                        escape(str(item.get("at", ""))),
+                    )
+                    for item in steps
+                ),
+            )
+        )
+
+    # -- what is running --------------------------------------------------
+    if paper:
+        active = [dict(item) for item in (paper.get("watches") or [])]
+        body.append(
+            card(
+                "Active strategies",
+                table(
+                    "One row per symbol and timeframe the loop follows",
+                    (
+                        ("symbol", "Symbol"),
+                        ("timeframe", "TF"),
+                        ("family", "Family"),
+                        ("candidate_id", "Candidate"),
+                        ("trades_in_evaluation", "Trades measured"),
+                        ("folds_positive", "Positive folds"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("timeframe", ""))),
+                            escape(str(item.get("family", ""))),
+                            escape(str(item.get("candidate_id", ""))),
+                            str(item.get("trades_in_evaluation", "")),
+                            str(item.get("folds_positive", "")),
+                        )
+                        for item in active
+                    ),
+                    empty="No strategy is being followed.",
+                ),
+                hint="The rationale for each of these is in the selection table above: the "
+                "same rows, with the evidence they were chosen on.",
+            )
+        )
+
+        quotes = [dict(item) for item in (paper.get("quotes") or [])]
+        body.append(
+            card(
+                "Feed health",
+                table(
+                    "The last quote the loop saw, per symbol",
+                    (
+                        ("symbol", "Symbol"),
+                        ("state", "State"),
+                        ("age_seconds", "Quote age (s)"),
+                        ("bid", "Bid"),
+                        ("ask", "Ask"),
+                        ("checked_at", "Last checked"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("state", ""))),
+                            "unknown" if item.get("age_seconds") is None else str(item.get("age_seconds")),
+                            escape(str(item.get("bid") or "—")),
+                            escape(str(item.get("ask") or "—")),
+                            escape(str(item.get("checked_at", ""))),
+                        )
+                        for item in quotes
+                    ),
+                    empty="No quote has been read yet.",
+                )
+                + notice(
+                    "muted",
+                    f"Quotes older than {paper.get('max_quote_age_seconds', '')} s are "
+                    "refused, not used",
+                    "A stale, missing, or half-formed quote skips that cycle: the loop "
+                    "waits and says so. A closed market reads as missing quotes, so the "
+                    "loop idles rather than inventing a price.",
+                ),
+                hint="Counts: "
+                + ", ".join(
+                    f"{key} {value}"
+                    for key, value in sorted((paper.get("stats") or {}).items())
+                ),
+            )
+        )
+
+        # Positions are always drawn, whatever the state.
+        body.append(
+            card(
+                "Open simulated positions",
+                table(
+                    "Open positions — these stay open when the loop stops",
+                    (
+                        ("symbol", "Symbol"),
+                        ("timeframe", "TF"),
+                        ("direction", "Side"),
+                        ("lots", "Lots"),
+                        ("entry_price", "Entry"),
+                        ("stop", "Stop"),
+                        ("target", "Target"),
+                        ("entry_at", "Opened"),
+                        ("restored", "After restart"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("timeframe", ""))),
+                            escape(str(item.get("direction", ""))),
+                            str(item.get("lots", "")),
+                            str(item.get("entry_price", "")),
+                            escape(str(item.get("stop") if item.get("stop") is not None else "—")),
+                            escape(str(item.get("target") if item.get("target") is not None else "—")),
+                            escape(str(item.get("entry_at", ""))),
+                            "yes" if item.get("restored_after_restart") else "no",
+                        )
+                        for item in positions
+                    ),
+                    empty="No simulated position is open.",
+                ),
+                hint="Simulated fills on the broker's own quote. Stopping the loop, or "
+                "changing the execution mode, never closes these; only an exit rule or "
+                "the explicit flatten button does.",
+            )
+        )
+
+        signals = [dict(item) for item in (paper.get("signals") or [])]
+        if signals:
+            body.append(
+                table(
+                    "The last decision per symbol and timeframe",
+                    (
+                        ("key", "Row"),
+                        ("action", "Action"),
+                        ("reason", "Reason"),
+                        ("detail", "Detail"),
+                        ("bar", "Bar"),
+                        ("at", "At"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("key", ""))),
+                            escape(str(item.get("action", ""))),
+                            escape(str(item.get("reason", ""))),
+                            escape(str(item.get("detail", ""))),
+                            escape(str(item.get("bar", ""))),
+                            escape(str(item.get("at", ""))),
+                        )
+                        for item in signals
+                    ),
+                )
+            )
+
+        orders = [dict(item) for item in (paper.get("orders") or [])]
+        fills = [dict(item) for item in (paper.get("fills") or [])]
+        body.append(
+            card(
+                "Simulated orders and fills",
+                table(
+                    "Simulated entries",
+                    (
+                        ("at", "At"),
+                        ("symbol", "Symbol"),
+                        ("direction", "Side"),
+                        ("lots", "Lots"),
+                        ("price", "Price"),
+                        ("reason", "Reason"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("at", ""))),
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("direction", ""))),
+                            str(item.get("lots", "")),
+                            str(item.get("price", "")),
+                            escape(str(item.get("reason", ""))),
+                        )
+                        for item in orders
+                    ),
+                    empty="No simulated entry yet.",
+                )
+                + table(
+                    "Simulated closes, with the simulated result in the quote currency",
+                    (
+                        ("at", "At"),
+                        ("symbol", "Symbol"),
+                        ("direction", "Side"),
+                        ("entry_price", "Entry"),
+                        ("exit_price", "Exit"),
+                        ("simulated_net_quote", "Simulated net (quote ccy)"),
+                        ("simulated_mid_move_pips", "Mid move (pips)"),
+                        ("reason", "Reason"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("at", ""))),
+                            escape(str(item.get("symbol", ""))),
+                            escape(str(item.get("direction", ""))),
+                            str(item.get("entry_price", "")),
+                            str(item.get("exit_price", "")),
+                            str(item.get("simulated_net_quote", "")),
+                            str(item.get("simulated_mid_move_pips", "")),
+                            escape(str(item.get("reason", ""))),
+                        )
+                        for item in fills
+                    ),
+                    empty="No simulated close yet.",
+                ),
+                hint="These are numbers in a local ledger. No order was sent for any of "
+                "them, and the totals are not a claim about what a broker would have "
+                "filled.",
+            )
+        )
+
+    # -- latency ----------------------------------------------------------
+    body.append(
+        card(
+            "Observed latency",
+            summary_grid(
+                (
+                    ("Selection pass", f"{latency.get('selection_ms', 0)} ms"),
+                    ("Evaluation", f"{latency.get('evaluation_ms', 0)} ms"),
+                    ("Decision, last", f"{inner.get('last', 0)} ms"),
+                    ("Decision, mean", f"{inner.get('mean', 0)} ms"),
+                    ("Decision, max", f"{inner.get('max', 0)} ms"),
+                    ("Samples", str(inner.get("samples", 0))),
+                )
+            )
+            + notice("muted", "Measured here, on this machine", str(latency.get("note") or "")),
+            hint="No number on this card is a service level. Order submission cannot be "
+            "timed from this loop because this loop cannot submit an order.",
+        )
+    )
+
+    # -- the live handoff -------------------------------------------------
+    handoff_blockers = [dict(item) for item in (handoff.get("blockers") or [])]
+    proposed = [dict(item) for item in (handoff.get("proposed") or [])]
+    body.append(
+        card(
+            "Taking this to LIVE: what is missing",
+            notice(
+                "warn",
+                "LIVE is never automatic",
+                str(handoff.get("per_order_checks") or ""),
+            )
+            + _blocker_list(
+                [
+                    {
+                        "reason": item.get("reason", ""),
+                        "message": item.get("detail", ""),
+                    }
+                    for item in handoff_blockers
+                ]
+            )
+            + (
+                table(
+                    "The selection this page would propose, if an operator chose to",
+                    (
+                        ("candidate_id", "Candidate"),
+                        ("pair", "Pair"),
+                        ("timeframe", "TF"),
+                    ),
+                    (
+                        (
+                            escape(str(item.get("candidate_id", ""))),
+                            escape(str(item.get("pair", ""))),
+                            escape(str(item.get("timeframe", ""))),
+                        )
+                        for item in proposed
+                    ),
+                    empty="Nothing is selected, so nothing is proposed.",
+                )
+                if proposed
+                else "<p class='small muted'>Nothing is selected, so nothing is proposed.</p>"
+            )
+            + dl(
+                tuple(
+                    (f"Requirement {index + 1}", escape(str(item)))
+                    for index, item in enumerate(handoff.get("requirements") or ())
+                )
+            )
+            + f"<p class='small muted'>{escape(str(handoff.get('note') or ''))}</p>"
+            + "<p class='small'><a href='/live'>Open the Live execution page</a> — review, "
+            "arming and the confirmation phrase live there. This page can only start a "
+            "session that page has already armed.</p>",
+            hint="A paper selection is not a live readiness verdict. Every order still "
+            "passes the broker adapter's own preflight.",
+        )
+    )
+
+    # -- the live session ------------------------------------------------
+    body.append(_render_live_autopilot(live, nonce))
+
+    watches_refused = [dict(item) for item in (view.get("watch_refusals") or [])]
+    if watches_refused:
+        body.append(
+            card(
+                "Rows the paper loop could not follow",
+                _blocker_list(
+                    [
+                        {"reason": item.get("reason", ""), "message": item.get("detail", "")}
+                        for item in watches_refused
+                    ]
+                ),
+                hint="These were not swapped for something else: a row that cannot be "
+                "followed is reported and left out.",
+            )
+        )
+
+    body.append(
+        notice(
+            "muted",
+            "What this page cannot say",
+            str(view.get("claim") or "")
+            + " " + str(latency.get("note") or ""),
+        )
+    )
+    return render_shell(ctx, body)
+
+
 PAGES = {
     "start": render_start,
+    "autopilot": render_autopilot,
     "overview": render_overview,
     "mode": render_mode,
     "setup": render_setup,
@@ -6120,6 +7021,7 @@ __all__ = [
     "PAGES",
     "STYLES",
     "render_account",
+    "render_autopilot",
     "render_activity",
     "render_data",
     "render_provider_setup",

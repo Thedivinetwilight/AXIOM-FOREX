@@ -470,6 +470,78 @@ def _wire_catalog(app, args, settings_path: Path):
     )
 
 
+def _wire_autopilot(app):
+    """The autopilot: evaluate, select, then follow the selection as paper only.
+
+    It wraps the catalog panel this launcher already built, so it reads bars and
+    quotes through the same read-only terminal and writes the same local records.
+    It is handed no adapter, no mode controller and no risk object: the only
+    execution object it knows is the paper test's local ledger.  Building it
+    starts nothing -- nothing runs until the operator presses Start on /autopilot.
+    """
+
+    panel = getattr(app, "catalog", None)
+    if panel is None:
+        return None
+    try:
+        from axiom_forex.strategies.catalog.autopilot import Autopilot
+        from axiom_forex.strategies.catalog.kronos_gate import KronosGate
+    except Exception:  # pragma: no cover - the modules ship with the repo
+        return None
+
+    def forecast_provider(symbol: str, timeframe: str):
+        """The most recent *stored* forecast for one symbol and timeframe.
+
+        Only a forecast the operator already produced on /kronos is read, and only
+        when they have turned the optional input on.  Nothing here loads a model,
+        downloads anything, or runs inference inside the trading loop: a loop that
+        ran a model would be a loop that can stall, and a forecast nobody recorded
+        is simply not available.  The gate records the absence; it never retries
+        and never blocks the signal silently.
+        """
+
+        from axiom_forex.kronos.forecast import Forecast, KronosUnavailable
+
+        kronos = getattr(app, "kronos", None)
+        if kronos is None:
+            raise KronosUnavailable("kronos_panel_unavailable")
+        try:
+            recorded = kronos.store().recent(symbol=symbol, limit=10)
+        except Exception as error:
+            raise KronosUnavailable("kronos_history_unreadable", type(error).__name__)
+        for row in recorded or ():
+            if isinstance(row, dict) and str(row.get("timeframe") or "") == timeframe:
+                return Forecast.from_payload(row)
+        raise KronosUnavailable("no_stored_forecast_for_this_symbol_and_timeframe")
+
+    # The row limit is the autopilot's own declared default; the page prints it so
+    # a bounded run never reads as the whole screened set.
+    return Autopilot(panel, gate=KronosGate(provider=forecast_provider))
+
+
+def _wire_autopilot_live(app):
+    """The bridge from the selected strategy to the live workflow built for /live.
+
+    It is handed two objects it does not own -- the autopilot (which answers
+    "which strategy is active and is it running?") and the live workflow (which
+    answers "may a session start, on this account, with this plan?").  It holds no
+    adapter, no router, no gate, no plan and no mode controller, so it cannot arm,
+    widen a risk limit, or send an order itself.  Building it starts nothing.
+    """
+
+    trading = getattr(app, "live", None)
+    autopilot = getattr(app, "autopilot", None)
+    try:
+        from axiom_forex.strategies.catalog.live_autopilot import build_live_autopilot
+    except Exception:  # pragma: no cover - the module ships with the repo
+        return None
+    return build_live_autopilot(
+        autopilot=autopilot,
+        trading=trading,
+        mode=getattr(app, "mode", None),
+    )
+
+
 def read_only_terminal(session):
     """The session's read-only terminal surface, or a typed refusal.
 
@@ -960,6 +1032,10 @@ def main(argv: list[str] | None = None) -> int:
     # reads nothing: the terminal is asked only when a page needs it.
     app.research = _wire_research(app, args, settings_path)
 
+    # The autopilot wraps the catalog panel built just above.  It starts nothing;
+    # the only thing it can execute is the paper test's local ledger.
+    app.autopilot = _wire_autopilot(app)
+
     # The live path is wired whenever the operator's own settings were loaded.
     # Building it connects nothing and sends nothing; every decision stays on
     # the Live execution page.  The assembly itself lives beside the live leg so
@@ -978,6 +1054,11 @@ def main(argv: list[str] | None = None) -> int:
     # model is loaded only when the operator presses Load on /kronos, and the
     # panel never downloads, installs, or trades.
     app.kronos = _wire_kronos(app)
+
+    # The bridge from the selection to that live path.  Built after both halves so
+    # it wraps the objects this process already has; it starts nothing, and the
+    # controls it exposes are the live path's own start and stop.
+    app.autopilot_live = _wire_autopilot_live(app)
 
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and not args.simulate:
