@@ -131,7 +131,11 @@ NUMBER_OF_LEDGER_EVENTS = 60
 #: a position *exactly*.  Version 1 records (written by the first build) omitted
 #: all of them, which is how a restart could change an exit: ``atr=0.0`` alone
 #: silently disabled the trailing stop.
-STATE_VERSION = 2
+#:
+#: Version 3 adds the identity of the **entry bar**.  Without it the trailing
+#: stop's "not on the entry bar" guard had nothing to compare against and read a
+#: field the decision had just overwritten, so a trail could never fire.
+STATE_VERSION = 3
 
 
 def _utc_now() -> datetime:
@@ -178,6 +182,26 @@ def _finite_positive(value: Any) -> bool:
 
     number = _decimal(value)
     return number is not None and math.isfinite(number) and number > 0
+
+
+def _after_entry_bar(entry_bar_at: Any, current_bar_at: Any) -> bool:
+    """Is the bar being managed strictly later than the bar the trade opened on?
+
+    The evaluation this test mirrors says ``index > entry_index``: a stop or trail
+    may act from the next bar, never on the bar that opened the position.  Indices
+    cannot be compared across paper cycles -- the series is rebuilt from a sliding
+    rate request every cycle -- so the comparison is made on the bars' own stamps.
+
+    An unparseable or missing stamp answers ``False``.  That is the conservative
+    direction: an unknown bar identity may *delay* a trailing exit by a bar, but it
+    can never fabricate one.
+    """
+
+    entry = _parse_iso(entry_bar_at)
+    current = _parse_iso(current_bar_at)
+    if entry is None or current is None:
+        return False
+    return current > entry
 
 
 def _state_number(value: Any) -> float | None:
@@ -265,6 +289,14 @@ class Position:
     #: says exactly what was derived and why it cannot change an exit.
     migrated: bool = False
     migration: str = ""
+    #: The completed bar the position was opened on.  ``bar_index``/``bar_at`` are
+    #: the *management cursor* and move on every decision; this pair never moves.
+    #: The trailing stop is armed only strictly after this bar -- exactly the rule
+    #: the evaluation applies (``simulate.py``: ``index > entry_index``), so the
+    #: paper test cannot stop out on the bar it entered on, and cannot refuse to
+    #: stop out later either.
+    entry_bar_at: str = ""
+    entry_bar_index: int = -1
     #: The pair's quote (profit) currency and contract size, exactly as the
     #: terminal reported them when the position was opened.  A money figure is
     #: meaningless without its currency, and recovering these later would mean
@@ -297,6 +329,8 @@ class Position:
             "atr": self.atr,
             "bar_index": self.bar_index,
             "bar_at": self.bar_at,
+            "entry_bar_at": self.entry_bar_at,
+            "entry_bar_index": self.entry_bar_index,
             "stop": self.stop,
             "target": self.target,
             "trail": self.trail,
@@ -334,6 +368,7 @@ class Position:
             "atr": self.atr,
             "bar_index": self.bar_index,
             "bar_at": self.bar_at,
+            "entry_bar_at": self.entry_bar_at,
             "best": self.best,
             "stop_initial": self.stop_initial,
             "target_initial": self.target_initial,
@@ -876,6 +911,8 @@ class CatalogPaperTest:
                 ),
                 trail_initial=(price if (policy.trail_atr and atr_value) else None),
                 bar_at=_iso(series.timestamps[index]),
+                entry_bar_at=_iso(series.timestamps[index]),
+                entry_bar_index=index,
             )
             self._positions[watch.key] = position
             self._stats.signals += 1
@@ -924,10 +961,20 @@ class CatalogPaperTest:
         hit_stop = position.stop is not None and (
             low <= position.stop if direction > 0 else high >= position.stop
         )
-        hit_trail = (
-            position.trail is not None
-            and index > position.bar_index
-            and (low <= position.trail if direction > 0 else high >= position.trail)
+        # The trailing stop is armed from the first completed bar *after* the one
+        # the position opened on, and it is tested against the level this bar left
+        # behind.  The old guard read ``index > position.bar_index``, but
+        # ``_decide`` sets ``bar_index = index`` immediately before calling here, so
+        # the comparison was ``index > index``: always false, and a trail could
+        # never close anything -- before or after a restart.  The entry bar is now
+        # compared by its own stamp, which survives a restart and a sliding window
+        # (the series is rebuilt each cycle, so raw indices are not comparable
+        # across cycles at all).
+        armed = position.trail is not None and _after_entry_bar(
+            position.entry_bar_at, _iso(series.timestamps[index])
+        )
+        hit_trail = bool(
+            armed and (low <= position.trail if direction > 0 else high >= position.trail)
         )
         hit_target = position.target is not None and (
             high >= position.target if direction > 0 else low <= position.target
@@ -1041,6 +1088,11 @@ class CatalogPaperTest:
             "unpriced": "" if priced else "contract_size_unknown",
             "quote_currency": position.quote_currency,
             "contract_size": position.contract_size or float(contract),
+            # The trailing state the exit was decided on, so why a trade closed on
+            # its trail (and from which extreme) is read from the ledger, not inferred.
+            "trail": None if position.trail is None else round(position.trail, 8),
+            "trail_extreme": round(position.best, 8),
+            "entry_bar_at": position.entry_bar_at,
             "exit_basis": basis,
             "costs_modelled": modelled,
             "costs_not_modelled": ["commission", "swap"],
@@ -1310,6 +1362,37 @@ class CatalogPaperTest:
         else:
             bar_index = stored_index
 
+        # -- the bar the trade opened on ------------------------------------
+        # This is what arms the trailing stop (``_after_entry_bar``).  A record
+        # that carries a live trail but no knowable entry bar could never exit on
+        # its trail -- the exact defect this guard fix removes -- so it is refused
+        # rather than resumed with a trail that is silently inert.
+        entry_bar_at = str(entry.get("entry_bar_at") or "").strip()
+        entry_bar_index = entry.get("entry_bar_index")
+        if not isinstance(entry_bar_index, int) or isinstance(entry_bar_index, bool):
+            entry_bar_index = -1
+        if not entry_bar_at:
+            # Schema 2 and earlier: ``bar_at`` is the last bar this position was
+            # *managed* on, which is always at or after the entry bar, so using it
+            # can only delay a trail trigger by one bar -- never advance one.
+            entry_bar_at = str(entry.get("bar_at") or "").strip()
+            if entry_bar_at:
+                derived.append(
+                    "entry_bar_at: not recorded; taken from the last managed bar, "
+                    "which is never before the entry bar"
+                )
+        if not entry_bar_at:
+            if trail is not None:
+                return None, (
+                    "the position carries a trailing stop but no bar the trade "
+                    "opened on, so the trail could never be armed"
+                )
+            derived.append(
+                "entry_bar_at: not recorded; there is no trailing stop to arm"
+            )
+        if entry_bar_index < 0:
+            entry_bar_index = bar_index
+
         best = _state_number(entry.get("best"))
         if best is None:
             best = entry_price
@@ -1356,6 +1439,8 @@ class CatalogPaperTest:
             target_initial=target if target_initial is None else target_initial,
             trail_initial=trail if trail_initial is None else trail_initial,
             bar_at=str(entry.get("bar_at") or ""),
+            entry_bar_at=entry_bar_at,
+            entry_bar_index=entry_bar_index,
             migrated=bool(version < STATE_VERSION),
             migration="; ".join(derived),
         )

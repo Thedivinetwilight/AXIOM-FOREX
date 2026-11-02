@@ -85,7 +85,7 @@ only when the terminal's own symbol record could price them.
 
 | File | Written by | Contents |
 | --- | --- | --- |
-| `data/catalog/paper/catalog-paper-ledger.jsonl` | the paper test, one line per event | fills, closes, signals, stale-quote skips, session start/stop |
+| `data/catalog/paper/catalog-paper-ledger.jsonl` | the paper test, one line per event | fills, closes (with `exit_basis`, `trail`, `trail_extreme`, `entry_bar_at`), signals, stale-quote skips, state migrations, session start/stop |
 | `data/catalog/paper/catalog-paper-state.json` | the paper test, rewritten each cycle | status, watch list, open positions with their management levels |
 | `paper-capital.local.json` | the operator, on Paper performance | the local simulated starting capital and its currency |
 
@@ -96,13 +96,14 @@ broker balance, and none is read from an account.
 
 A paper position is not a number on a page: it is a set of levels the next bar is
 compared against. The state file therefore stores **everything the exit rules
-read** (`state_view()`, schema version 2), not the page summary:
+read** (`state_view()`, schema version 3), not the page summary:
 
 | Field | Why the exit logic needs it |
 | --- | --- |
 | `entry_price`, `entry_mid`, `lots`, `direction`, `entry_at` | the trade's identity, and the base every level is measured from |
 | `atr` | the unit a trailing stop is measured in — a restored `atr=0.0` froze the trail |
-| `bar_index`, `bar_at` | the "not on the entry bar" guard on the trail trigger |
+| `bar_at`, `bar_index` | the last bar this position was managed on (when it was last compared against its levels) |
+| `entry_bar_at`, `entry_bar_index` | the bar the trade **opened on** — immutable; the "not on the entry bar" guard on the trail trigger |
 | `stop`, `target`, `trail` | the active levels, as they stand now |
 | `stop_initial`, `target_initial`, `trail_initial` | what the trade opened with, before the trail ratcheted |
 | `best` | the trailing extreme the trail ratchets from |
@@ -116,15 +117,19 @@ honouring.
 
 ### Three outcomes, and never a fourth
 
-1. **Resumed exactly.** A version-2 record with every field ⇒ identical
+1. **Resumed exactly.** A version-3 record with every field ⇒ identical
    management, identical subsequent exits (`tests/test_paper_restart.py`).
-2. **Migrated, with a note.** A version-1 record from the previous build is
-   resumed **only** where the missing field cannot move an exit — for a candidate
-   that does not trail by ATR, `atr` is never read, so its absence is harmless and
-   a `state_migrated` event records the derivation.
+2. **Migrated, with a note.** An older record is resumed **only** where the missing
+   field cannot move an exit, and the derivation is written to the ledger as a
+   `state_migrated` event. For a version-2 record the missing `entry_bar_at` is
+   derived from the last bar the position was managed on — by construction never
+   before the entry bar, so the resumed trail cannot fire on the entry bar. For a
+   candidate that does not trail by ATR, `atr` is never read, so its absence is
+   harmless.
 3. **Refused.** If the missing value *does* feed an exit (a live trail with no
-   ATR), or a record has no entry price, no direction, no lot size, or no watched
-   row to manage it, the run is **blocked**: status `BLOCKED`, reason
+   ATR, or a live trail with no bar it could ever have been armed on), or a record
+   has no entry price, no direction, no lot size, or no watched row to manage it,
+   the run is **blocked**: status `BLOCKED`, reason
    `paper_state_incomplete`, a `state_recovery_failed` event in the ledger, and
    the state file left byte-for-byte as it was found. The page shows a data
    integrity warning naming the position and the reason, and the affected figures
@@ -133,6 +138,32 @@ honouring.
 The accounting read model surfaces the same thing: a state file whose `recovery.ok`
 is false becomes an integrity warning on every page that reads the ledger, so a
 blocked restart can never look like a flat book.
+
+## When a trailing stop is allowed to act
+
+A trailing stop is a level the next bar is compared against, so it needs two
+things the page summary never had: the level *and* permission to act on it.
+
+* **Seeded at the fill.** A candidate that trails seeds `trail = entry price` at
+  entry; the ATR distance only accumulates as the trade makes new extremes.
+* **Armed only after the entry bar.** The guard compares **bar stamps**, not
+  indices (`entry_bar_at < this bar's stamp`). It used to compare
+  `index > bar_index`, but `bar_index` was overwritten with the current index just
+  before the comparison, so the guard was `index > index` — always false, and a
+  trail could ratchet forever without ever closing a position. An unparseable or
+  absent stamp arms nothing: the decision is delayed, never invented.
+* **The ratchet reads the current bar's own range.** Long: `trail =
+  max(trail, high − atr); best = max(best, high)`. Short: mirrored on the low.
+* **Therefore one behaviour looks odd but is correct.** A trailing row whose
+  first managed bar makes **no new extreme** has `trail == entry price`, and the
+  next bar that trades at or through it closes the trade at the entry price:
+  **0.0 P&L**, reason `TRAILING_STOP`. That is what the evaluation
+  (`strategies/catalog/simulate.py`) does on the same bars. It is documented here
+  rather than "fixed", because changing it would make paper results disagree with
+  the numbers the candidates were selected on.
+* **A stale quote neither triggers nor fabricates an exit.** No level is tested
+  while the quote is outside the freshness allowance; the position stays open and
+  the page shows the mark as stale, with the reason.
 
 
 ## What this is not

@@ -3223,6 +3223,14 @@ def render_positions(ctx: PageContext) -> str:
                 escape(price(item.get("entry_price"))),
                 escape(str(item.get("stop") if item.get("stop") is not None else "—")),
                 escape(str(item.get("target") if item.get("target") is not None else "—")),
+                escape(price(item.get("trail")))
+                + (
+                    " <span class='small muted'>armed after "
+                    + escape(_utc(item.get("entry_bar_at")))
+                    + "</span>"
+                    if item.get("trail") is not None and item.get("entry_bar_at")
+                    else ""
+                ),
                 f"{escape(str(item.get('mark_side') or ''))} {escape(price(item.get('mark')))}",
                 escape(
                     "—"
@@ -3243,6 +3251,7 @@ def render_positions(ctx: PageContext) -> str:
                 ("Entry", "num"),
                 ("Stop", "num"),
                 ("Target", "num"),
+                ("Trailing stop", "num"),
                 ("Mark (closing side)", "num"),
                 ("Unrealised", "num"),
                 ("Status", "text"),

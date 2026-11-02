@@ -726,6 +726,11 @@ def _open_positions(
                 "stop": None if state_copy is None else _finite(state_copy.get("stop")),
                 "target": None if state_copy is None else _finite(state_copy.get("target")),
                 "trail": None if state_copy is None else _finite(state_copy.get("trail")),
+                # The bar the trade opened on: the trail is armed only after it, so
+                # the page can say when this trail is allowed to act.
+                "entry_bar_at": ""
+                if state_copy is None
+                else str(state_copy.get("entry_bar_at") or ""),
                 "in_state": state_copy is not None,
             }
         )
@@ -850,6 +855,7 @@ def read_account(
                 "stop": _finite(item.get("stop")),
                 "target": _finite(item.get("target")),
                 "trail": _finite(item.get("trail")),
+                "entry_bar_at": str(item.get("entry_bar_at") or ""),
                 "in_state": True,
                 "unreconciled": True,
             }

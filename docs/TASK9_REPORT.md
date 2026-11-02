@@ -231,13 +231,11 @@ catalog numbers are fixture numbers.
 
 ## 6. Remaining limitations
 
-1. **The trail trigger itself is inert, by an older design decision.** In `_manage`,
-   `position.bar_index` is set to the current index just before the "`index >
-   position.bar_index`" trail guard is evaluated, so that guard is always false and a
-   trailing stop never *triggers* an exit — the trail only ratchets. This is
-   pre-existing behaviour, unchanged here: fixing it would change paper exits and is
-   a strategy-semantics decision, not a reliability one. It is recorded so nobody
-   reads "the trail is restored" as "the trail can exit".
+1. ~~**The trail trigger itself is inert, by an older design decision.**~~ **Fixed
+   after this report** — see §7. The guard compared the current bar index with a
+   field that was overwritten *with that same index* earlier in the same call, so a
+   trailing stop could ratchet but never exit. The state schema is now v3 and the
+   guard is a bar-stamp comparison against the entry bar.
 2. **Commission and swap are never simulated.** They are subtracted only when the
    broker publishes them. On a broker that publishes nothing, every net figure is
    `Unavailable` by design.
@@ -254,5 +252,50 @@ catalog numbers are fixture numbers.
    lists come from the accounting read model.
 8. **Unverified on Windows/MT5** as listed in §5.
 
-No commit, push or pull request was made — the working tree holds the changes and
-the branch is `arena/f67c2859-axiom-forex`.
+## 7. Follow-up: the inert trailing stop (fixed)
+
+The limitation above was a real execution defect, not a design choice, and it is
+fixed in the paper path only:
+
+* **Root cause.** `_decide()` writes the managed bar's identity onto the position
+  (`bar_index = index`, `bar_at = …`) *before* `_manage()` runs, and `_manage()`
+  then evaluated the "not on the entry bar" guard as `index > position.bar_index`.
+  That is `index > index`: always false, in every cycle. The evaluation rule the
+  paper path is meant to mirror (`strategies/catalog/simulate.py`, `index >
+  entry_index`) was therefore never reached, so a trail ratcheted and never exited.
+* **Fix.** Positions now carry the bar the trade *opened on* — `entry_bar_at`
+  (stamp) and `entry_bar_index` (reference only) — recorded immutably at entry and
+  never overwritten by management. The guard is
+  `position.trail is not None and entry_bar_at < current bar stamp`; an
+  unparseable or missing stamp arms nothing (delay, never fabricate). The exit
+  itself still goes through the same level-basis exit, so stop/target/freshness
+  protections are untouched.
+* **State schema version 3.** Every record now persists `entry_bar_at` /
+  `entry_bar_index`. A v2 record derives `entry_bar_at` from the last bar the
+  position was managed on — a bar that is never before the entry bar, so a resume
+  cannot fire on the entry bar — and records the derivation as a `state_migrated`
+  ledger event. A v2 record **with a live trail but no managed bar at all** is
+  refused: the trail could never be armed, and guessing an entry bar would invent
+  an exit.
+* **Close events** now also carry `trail`, `trail_extreme` and `entry_bar_at`, so a
+  trailing exit is attributable after the fact.
+* **Degenerate case, unchanged and intentional.** Because a trailing row seeds its
+  trail *at the fill* and the ratchet reads the current bar's own high/low, a bar
+  that makes **no new extreme** legitimately stops the trade out on the *next* bar
+  at the entry price: 0.0 P&L, reason `TRAILING_STOP`. That is what the evaluation
+  does on the same bars, so the paper path matches it rather than diverging; the
+  fixtures in `tests/test_paper_trailing_stop.py` assert this exact behaviour
+  instead of hiding it.
+* **Coverage** (`tests/test_paper_trailing_stop.py`, 14 tests): ratchet-and-exit
+  long and short; no exit on the entry bar; the runner's own entry surviving its
+  entry bar and closing on the trail; restart parity (trail, extreme, ledger);
+  v2 migration with a stated derivation and the refusal path; stale quotes neither
+  triggering nor fabricating a fill; the ledger, trade list, closed-trade count and
+  dashboard agreeing after a trailing exit. Reverting the guard fails 6 of them.
+
+Verified in this sandbox with fake quotes and fixture bars only. **Not** verified:
+real trailing exits on a live quote stream, a real terminal restart against a v3
+state file, and a genuine stale-feed episode on Windows/MT5.
+
+No commit, push or pull request was made from this report — the trailing-stop fix
+is a separate follow-up commit on `arena/f67c2859-axiom-forex`.

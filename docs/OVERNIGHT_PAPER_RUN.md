@@ -52,6 +52,22 @@ Symptom: the *Market data* tile reads `STALE · PAUSED`, or a page shows
   restarting repeatedly: repeated cycles on one stale feed record stale skips,
   not trades.
 
+### Upgrading a run that is already in progress
+
+The state file is at schema version 3. A file written by the previous build
+(version 2) still resumes: the bar the trade opened on is derived from the last bar
+the position was managed on, and the derivation is recorded in the ledger as
+`state_migrated` — it is never guessed. One case is refused instead: a stored
+position with a **live trailing stop but no managed bar**, because the trail could
+never be armed and the run would look protected while it was not. See *If state
+recovery fails* below.
+
+Note what changed in behaviour: a trailing stop can now **close** a position. Before
+this version it only ratcheted, so a paper run may show `TRAILING_STOP` closes it
+never showed before. A trailing row that makes no new extreme typically closes on
+the next bar at its entry price (0.0 P&L) — that is the same rule the candidate
+evaluation uses, not a new one.
+
 ## If state recovery fails
 
 Symptom: starting the test returns a blocker, and the page says *the paper test
