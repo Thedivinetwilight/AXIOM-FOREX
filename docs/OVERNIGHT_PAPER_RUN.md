@@ -68,6 +68,55 @@ never showed before. A trailing row that makes no new extreme typically closes o
 the next bar at its entry price (0.0 P&L) — that is the same rule the candidate
 evaluation uses, not a new one.
 
+## If the paper test refuses to resume a stored book
+
+Symptom: the autopilot stops at *paper-start* with `paper_state_incomplete`, and the
+Paper positions page says **"This stored paper book has to be closed before the
+paper test can start"**, naming the positions and the reason (usually *no watched row
+matches this position*).
+
+That is a refusal, not a fault. The stored positions were opened by an earlier
+selection; the autopilot has just selected different rows, so no row in the new
+selection would ever manage the old positions. AXIOM will not attach a stored
+position to a strategy that did not open it, and it will not substitute a missing
+level to make the resume look clean. The state file is left exactly as it was found.
+
+Two honest ways forward, and the page tells you which one applies:
+
+1. **Resume exactly.** If the page says *"These positions can be resumed exactly"*,
+   the paper test can manage every one of them: press Start and nothing needs
+   closing. Do not flatten a book that can still be followed.
+2. **Close the book, then start again.** If the page shows the recovery warning,
+   the stored book cannot be resumed, so close it:
+
+   1. Read the named positions and the reason under the warning.
+   2. Tick the confirmation box (*"I understand every open paper position is closed
+      as a simulated fill …"*). The button does nothing without it, and it is a
+      separate click from anything else on the page.
+   3. Press **Simulate closing all paper positions**.
+   4. Read the result. Either every position was closed — one priced fill each, at
+      the closing side of the spread, from a fresh quote, written to
+      `catalog-paper-ledger.jsonl` with a `paper_book_flattened` summary event — or
+      **nothing at all was closed** and the reason is named: a stale or missing
+      quote, a position missing a field a close needs, or a position the ledger has
+      no entry fill for. Fix the cause and press it again; the book is never
+      half-closed.
+   5. Go back to the autopilot and press Start. The block is gone because the
+      stored book is now empty, and the closed positions are trades on the
+      performance page like any other.
+
+The closed records are not deleted: the ledger holds one close event per position,
+and the state file keeps the full original record of each under `flattened`, so what
+was closed and at what price can still be read months later.
+
+**It is simulated paper accounting.** Each close is a local fill: no order is sent to
+a broker, no MetaTrader 5 position is opened or closed, and the execution mode does
+not change. If you want the broker's own ten positions closed, that is a decision made
+in MetaTrader 5 and it is not this button.
+
+Closing cannot be done while the loop is running — stop the paper test first, so the
+close and the next cycle cannot disagree about the same position.
+
 ## If state recovery fails
 
 Symptom: starting the test returns a blocker, and the page says *the paper test

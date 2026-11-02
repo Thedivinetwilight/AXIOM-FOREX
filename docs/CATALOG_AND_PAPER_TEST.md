@@ -94,6 +94,14 @@ catalog on a normal laptop; the worker thread is bounded by a wall-clock budget.
 6. Watch: quote freshness per symbol, the active symbols, the latest decision per
    row, simulated orders and fills, and open paper positions. **Stop the paper
    test** ends it; **Simulate closing open positions** flattens the paper book.
+7. If the paper test later refuses to resume the stored book (`paper_state_incomplete`,
+   because a new selection no longer matches the rows that opened it), the reopen is
+   on the Paper positions page: **Simulate closing all paper positions**. It closes
+   every stored position at a fresh quote, one priced fill each, or — if any quote is
+   stale, any record is incomplete, or a position has no entry fill to pair with —
+   nothing at all, naming the reason. It is simulated paper accounting: no broker
+   order is sent and no MT5 position is touched. See
+   `docs/OVERNIGHT_PAPER_RUN.md` for the step-by-step recovery.
 
 ### What the page refuses, on purpose
 

@@ -187,6 +187,10 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "catalog-paper-start",
         "catalog-paper-stop",
         "catalog-paper-flat",
+        # The recovery close, added after a stored book could not be resumed.  It
+        # writes simulated paper fills only: it cannot arm, cannot send, cannot
+        # close a broker position, and cannot change the execution mode.
+        "catalog-paper-close-all",
         # The autopilot: one start and one stop for the whole paper workflow, plus
         # an explicit flatten of the simulated book and the optional forecast
         # switch.  Starting evaluates and selects on the terminal's own history and
@@ -1191,9 +1195,14 @@ class WorkstationApp:
         # The guided page and the full catalog page share these actions; the form
         # says which one it came from, and only those two are accepted.
         return_to = str((form.get("return_to") or [""])[0])
-        # The guided start page, the full catalog page, and the strategy page all
-        # post these actions; only those three are accepted as return targets.
-        back = return_to if return_to in {"/", "/quick-setup", "/strategies"} else "/quick-setup"
+        # The guided start page, the full catalog page, the strategy page and the
+        # paper positions page post these actions; only those are accepted as
+        # return targets, so a form cannot bounce an operator somewhere else.
+        back = (
+            return_to
+            if return_to in {"/", "/quick-setup", "/strategies", "/positions"}
+            else "/quick-setup"
+        )
         try:
             outcome = dict(self.catalog.act(action, payload))
         except Exception as exc:  # the panel promises not to raise; this is the wall

@@ -3200,6 +3200,116 @@ def render_performance(ctx: PageContext) -> str:
     return render_shell(ctx, body)
 
 
+def _close_all_paper_form(ctx: PageContext) -> str:
+    """The explicit, confirmed, simulated close of the whole paper book.
+
+    Two proofs travel with the request: the process nonce (this form came from a
+    page this process rendered) and a ticked confirmation (a person meant this
+    button, not the one beside it).  No script, no fetch, no storage -- a plain
+    form post, so it works with JavaScript disabled.
+    """
+
+    tick = (
+        "<label class='cand-meta' style='display:block;margin:0 0 8px'>"
+        "<input type='checkbox' name='confirm' value='close-all-paper-positions' required> "
+        "I understand every open paper position is closed as a <strong>simulated</strong> "
+        "fill at the current quote, that this cannot be undone, that no broker order "
+        "is sent, and that no MetaTrader 5 position is touched."
+        "</label>"
+    )
+    return (
+        "<form method='post' action='/actions/catalog-paper-close-all'>"
+        f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+        "<input type='hidden' name='return_to' value='/positions'>"
+        f"{tick}"
+        "<button class='btn btn--danger' type='submit'>"
+        "Simulate closing all paper positions</button></form>"
+    )
+
+
+def _paper_book_recovery_card(
+    ctx: PageContext, *, account: Mapping[str, Any], positions: Sequence[Mapping[str, Any]]
+) -> str:
+    """What to do about a stored book the paper test cannot resume.
+
+    Three answers, and each of them says only what the evidence supports:
+
+    * **It can be resumed** -- the recovery report is clean, so the page says the
+      positions match the rows the test would manage and points at Start.  Nothing
+      needs closing and no close is offered.
+    * **It cannot** -- the page names what refused it and offers the one action that
+      writes the book flat, with the simulation stated on the button's own form.
+      That action is the only place on this page that writes anything.
+    * **Nobody said** -- an open book with no recovery report at all (a state file
+      that is missing).  The page refuses to claim a resume it cannot prove and
+      offers the same close.
+    """
+
+    if not positions:
+        return ""
+    session = dict(account.get("session") or {})
+    recovery = dict(session.get("recovery") or {})
+    if recovery.get("ok") is True:
+        # The paper test proved it can manage every one of these positions, so a
+        # close would throw away a trade it can still follow.
+        return notice(
+            "ok",
+            "These positions can be resumed exactly",
+            f"{len(positions)} stored position(s) match the rows the paper test would "
+            "manage and carry every field its exit rules read, so there is nothing to "
+            "close: start the paper autopilot to carry on. Nothing needs flattening.",
+        )
+    if not recovery:
+        return (
+            "<div class='notice notice--warn'><div>"
+            "<strong>This page cannot prove these positions can be resumed</strong>"
+            f"<p class='small' style='margin:6px 0'>{len(positions)} open position(s) "
+            "are in the paper ledger, but the state file carries no recovery report, so "
+            "there is nothing here that says the paper test could manage them again. "
+            "Starting it is the honest next step: if it refuses, the reason is shown on "
+            "this page. Closing them is the other way out, and it is all-or-nothing.</p>"
+            "<p class='small muted' style='margin:6px 0'>Simulated paper accounting only: "
+            "no order is sent to a broker, no MetaTrader 5 position is touched, and the "
+            "execution mode does not change.</p>"
+            f"{_close_all_paper_form(ctx)}"
+            "<p class='small muted' style='margin:8px 0 0'>Once the book is flat you can "
+            "retry starting the paper autopilot.</p>"
+            "</div></div>"
+        )
+    failed = [item for item in recovery.get("failed") or () if isinstance(item, Mapping)]
+    names = ", ".join(
+        f"{escape(str(item.get('symbol') or item.get('key') or 'a position'))} "
+        f"({escape(str(item.get('reason') or 'incomplete'))})"
+        for item in failed[:4]
+    )
+    if len(failed) > 4:
+        names += f", and {len(failed) - 4} more"
+    detail = (
+        "The paper test refused to resume this book"
+        + (f": {escape(str(recovery.get('detail') or ''))}" if recovery.get("detail") else "")
+        + (f". Affected: {names}" if names else "")
+        + ". It will not carry a position with a substituted value, and it will not "
+        "attach a stored position to a different strategy row."
+    )
+    return (
+        "<div class='notice notice--warn'><div>"
+        "<strong>This stored paper book has to be closed before the paper test can start</strong>"
+        f"<p class='small' style='margin:6px 0'>{detail}</p>"
+        "<p class='small' style='margin:6px 0'>Closing is the documented way out: each "
+        "position is closed once, at its own closing side, from a fresh quote, and "
+        "written to the same paper ledger as any other exit. If even one quote is "
+        "stale or missing, or one position is missing a field a close needs, "
+        "<strong>nothing is closed at all</strong> and the reason is shown here.</p>"
+        "<p class='small muted' style='margin:6px 0'>Simulated paper accounting only: "
+        "no order is sent to a broker, no MetaTrader 5 position is touched, and the "
+        "execution mode does not change.</p>"
+        f"{_close_all_paper_form(ctx)}"
+        "<p class='small muted' style='margin:8px 0 0'>Once the book is flat you can "
+        "retry starting the paper autopilot.</p>"
+        "</div></div>"
+    )
+
+
 def render_positions(ctx: PageContext) -> str:
     """Every open paper position and every closed trade, from the one ledger read."""
 
@@ -3269,6 +3379,7 @@ def render_positions(ctx: PageContext) -> str:
 
     body = (
         _account_alerts(account)
+        + _paper_book_recovery_card(ctx, account=account, positions=positions)
         + _paper_vs_live_strip(ctx)
         + _freshness_row(account)
         + card(
@@ -3317,6 +3428,9 @@ _EVENT_LABELS = {
     "position_restored": ("Position restored", "muted"),
     "paper_test_started": ("Session started", "ok"),
     "paper_test_stopped": ("Session stopped", "muted"),
+    "paper_book_flattened": ("Paper book closed by the operator", "warn"),
+    "state_migrated": ("State migrated", "muted"),
+    "state_recovery_failed": ("Resume refused", "warn"),
 }
 
 

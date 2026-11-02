@@ -333,14 +333,51 @@ class Autopilot:
         return result
 
     def flatten(self) -> dict[str, Any]:
-        """Close the open *simulated* positions.  A separate, explicit click."""
+        """Close the open *simulated* positions.  A separate, explicit click.
+
+        The stored book is what gets closed, not a page's idea of it: this goes
+        through the paper runner's recovery close, which pairs each position with
+        its own open ledger entry and refuses the whole action if any one of them
+        cannot be priced from a fresh quote.  That also means it works after a
+        restart, when this process no longer holds the positions at all -- which is
+        exactly when an operator needs it.
+        """
 
         with self._lock:
             paper = self._paper
-        if paper is None:
-            return {"ok": False, "reason": "no_paper_test", "message": "No paper test exists in this process."}
-        outcome = paper.close_all(reason="operator_flat")
-        return {"ok": bool(outcome.get("ok", True)), **outcome}
+        runner = paper if paper is not None else self._close_only_runner()
+        if runner is None:
+            return {
+                "ok": False,
+                "reason": "no_paper_test",
+                "message": (
+                    "No paper test exists in this process and the terminal is not "
+                    "connected, so there is no quote to price a simulated close from. "
+                    "Nothing was closed."
+                ),
+            }
+        outcome = dict(runner.close_stored_book(reason="operator_flat"))
+        if outcome.get("ok") and not outcome.get("closed") and not outcome.get("reconciled"):
+            outcome["message"] = (
+                "The paper book is already flat: there is no open simulated position. "
+                "No order was sent."
+            )
+        return outcome
+
+    def _close_only_runner(self) -> CatalogPaperTest | None:
+        """A paper runner that can only close: no watches, so nothing is managed."""
+
+        terminal = self._terminal()
+        if terminal is None:
+            return None
+        panel_lot = float(getattr(self._panel, "lot", 0.10) or 0.10)
+        return CatalogPaperTest(
+            quotes=terminal,
+            watches=(),
+            root=self._panel_data_root() / "paper",
+            lot=panel_lot,
+            clock=self.clock,
+        )
 
     # -- the preparation thread -------------------------------------------
 

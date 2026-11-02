@@ -54,9 +54,23 @@ ACTION_EVALUATE = "catalog-evaluate"
 ACTION_PAPER_START = "catalog-paper-start"
 ACTION_PAPER_STOP = "catalog-paper-stop"
 ACTION_PAPER_FLAT = "catalog-paper-flat"
+#: The recovery close: every stored paper position, priced from a fresh quote, or
+#: none of them.  This is the documented way out of a book the run cannot resume.
+ACTION_PAPER_CLOSE_ALL = "catalog-paper-close-all"
 ACTIONS: frozenset[str] = frozenset(
-    {ACTION_EVALUATE, ACTION_PAPER_START, ACTION_PAPER_STOP, ACTION_PAPER_FLAT}
+    {
+        ACTION_EVALUATE,
+        ACTION_PAPER_START,
+        ACTION_PAPER_STOP,
+        ACTION_PAPER_FLAT,
+        ACTION_PAPER_CLOSE_ALL,
+    }
 )
+
+#: The value the confirmation box must carry.  A ticked box posts it; an unticked
+#: one posts nothing, and nothing is closed.  The nonce proves the form came from
+#: this process; this proves a person meant *this* button.
+CONFIRM_CLOSE_ALL = "close-all-paper-positions"
 
 #: Timeframes the evaluation may use.  Short enough to finish in a browser-sized
 #: budget, long enough that a year of bars is a real sample.
@@ -626,6 +640,8 @@ class CatalogPanel:
             return self._paper_stop()
         if action == ACTION_PAPER_FLAT:
             return self._paper_flat()
+        if action == ACTION_PAPER_CLOSE_ALL:
+            return self.close_all_paper_positions(payload)
         return self._refuse("unknown_action", "That action is not part of this panel.")
 
     # -- evaluation --------------------------------------------------------
@@ -952,12 +968,77 @@ class CatalogPanel:
         with self._lock:
             paper = self._paper
         if paper is None:
-            return self._refuse("paper_test_not_built", "No paper test is built.")
+            return self._refuse(
+                "paper_test_not_built",
+                "No paper test is built in this process. If a stored paper book is "
+                "open, the Paper positions page can close it: it prices every position "
+                "from a fresh quote first and refuses rather than closing some of them.",
+            )
         result = paper.close_all()
-        return self._ok(
-            f"Simulated closing {result.get('closed', 0)} open paper position(s).",
-            path="/quick-setup",
+        still_open = int(result.get("open", 0) or 0)
+        message = f"Simulated closing {result.get('closed', 0)} open paper position(s)."
+        if still_open:
+            # ``close_all`` skips a position it cannot price.  Saying so is the least
+            # this button can do; the confirmed action on the positions page closes
+            # all of them or none.
+            message += (
+                f" {still_open} position(s) had no fresh quote and are still open. "
+                "Nothing was invented for them."
+            )
+        return self._ok(message, path="/quick-setup")
+
+    def close_all_paper_positions(
+        self, payload: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Simulate closing every stored paper position.  Paper accounting only.
+
+        Used when the run cannot resume because the stored book no longer matches
+        the rows it would manage.  The work is done by the paper runner's own
+        :meth:`~axiom_forex.paper_runner.catalog_paper.CatalogPaperTest.close_stored_book`,
+        so every fill goes through the same closing side, the same cost labels and
+        the same ledger as any other paper close -- and it is all-or-nothing: one
+        stale quote or one incomplete record and nothing is written.
+
+        No broker order is sent, no MT5 position is touched, and the execution mode
+        is not read or changed.  The only thing this needs from the terminal is a
+        read-only quote.
+        """
+
+        confirm = str((payload or {}).get("confirm") or "").strip()
+        if confirm != CONFIRM_CLOSE_ALL:
+            return self._refuse(
+                "confirmation_required",
+                "Nothing was closed: tick the confirmation box first. This writes one "
+                "simulated close per open paper position and cannot be undone, so it "
+                "is a deliberate second step.",
+            )
+        terminal = self._terminal()
+        if terminal is None:
+            return self._refuse(
+                "no_terminal",
+                "Nothing was closed: the terminal is not connected. A simulated close "
+                "is priced from its newest quote, and there is no other price source.",
+            )
+        runner = CatalogPaperTest(
+            quotes=terminal,
+            watches=(),
+            root=self.paper_root(),
+            lot=self.lot,
+            clock=self.clock,
         )
+        outcome = dict(runner.close_stored_book())
+        if not outcome.get("ok"):
+            return self._refuse(
+                str(outcome.get("reason") or "paper_close_refused"),
+                str(outcome.get("message") or "Nothing was closed."),
+                rows=outcome.get("refusals") or None,
+            )
+        message = str(outcome.get("message") or "The paper book is flat.")
+        message += (
+            " You can now retry starting the paper autopilot. This is simulated paper "
+            "accounting: no broker order was sent and no MT5 position was changed."
+        )
+        return self._ok(message, path="/positions")
 
     # -- plumbing ----------------------------------------------------------
 

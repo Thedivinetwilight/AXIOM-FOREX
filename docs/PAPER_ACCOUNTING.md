@@ -139,6 +139,39 @@ The accounting read model surfaces the same thing: a state file whose `recovery.
 is false becomes an integrity warning on every page that reads the ledger, so a
 blocked restart can never look like a flat book.
 
+### Closing a book that cannot be resumed
+
+A refused record cannot be *managed*, but it can be *closed*, and that is the
+documented way out: **Simulate closing all paper positions** on the Paper positions
+page. It is the one action on that page that writes anything.
+
+* **All or nothing.** Every position is paired with its own open entry fill and
+  priced from a fresh quote **before** a single byte is written. One stale or
+  missing quote, one record missing a field a close needs (symbol, side, lot size,
+  entry price, when it opened), or one position the ledger has no entry fill for,
+  and the action refuses and names the reason: the ledger and the state file are
+  left exactly as they were.
+* **Through the ordinary close path.** Each position is closed by the same `_close`
+  call the loop uses: the closing side of the spread (a long sells the bid, a short
+  buys the ask), the same modelled slippage, `exit_basis: BID_ASK`,
+  `costs_modelled`/`costs_not_modelled`, `OPERATOR_FLAT`, one close event and one
+  `close_recorded` note per position, then one `paper_book_flattened` summary event.
+* **Reconciliation, not double counting.** A record whose entry fill the ledger
+  already pairs with a close is not closed again: it is dropped from the state file
+  and reported as reconciled. Running the action twice — or after a crash between
+  the ledger write and the state write — therefore cannot produce two closes for one
+  entry.
+* **What survives.** The state document is rewritten from the one that was read, so
+  the watch list, the bar stamps and any key a newer build added are preserved. Each
+  closed record is appended, in full, to `flattened` (the newest 200), with the exit
+  price, the instant and the reason. `recovery` becomes `ok: true` with a
+  `closed_by_operator` count and a plain statement of what happened, so the page
+  warning clears because the condition it described is gone — not because it was
+  hidden.
+* **Paper only.** No broker order is sent, no MT5 position is touched, and the
+  execution mode is neither read nor changed. It is refused while the loop is
+  running: stop the test first, so a close and the next cycle cannot disagree.
+
 ## When a trailing stop is allowed to act
 
 A trailing stop is a level the next bar is compared against, so it needs two

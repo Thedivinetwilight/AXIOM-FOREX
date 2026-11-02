@@ -718,11 +718,15 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "strategy-monitor",
         # The catalog: one evaluation on the terminal's own bars, then the
         # live-market paper test. Fills are simulated locally; no order surface is
-        # reachable from any of these four actions, and none changes a mode.
+        # reachable from any of these five actions, and none changes a mode.
         "catalog-evaluate",
         "catalog-paper-start",
         "catalog-paper-stop",
         "catalog-paper-flat",
+        # The recovery close: every stored paper position, at a fresh quote, or
+        # nothing. Simulated ledger fills only -- it cannot send, arm, close a
+        # broker position, or change the mode.
+        "catalog-paper-close-all",
         # The autopilot: one start and one stop for the whole paper workflow,
         # an explicit flatten of the simulated book, and the optional forecast
         # switch. Starting evaluates and selects on the terminal's own history and

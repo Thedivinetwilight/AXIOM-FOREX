@@ -62,6 +62,27 @@ REASON_LEDGER = "ledger_not_writable"
 #: A stored paper position cannot be continued exactly.  Starting is refused
 #: rather than resumed with a substituted zero or an invented stop.
 REASON_STATE_RECOVERY = "paper_state_incomplete"
+# -- reasons the recovery close can be refused ------------------------------
+#: A simulated close was asked for while the loop is live.  The loop manages the
+#: same positions, so it is stopped first rather than raced.
+REASON_FLATTEN_RUNNING = "paper_test_running"
+#: The state file cannot be read, so the book to close is not known.
+REASON_FLATTEN_STATE = "paper_state_unreadable"
+#: The ledger cannot be read (or has a line that is not an event), so which
+#: positions are open cannot be established -- and a close with no entry fill to
+#: pair with is not a trade.
+REASON_FLATTEN_LEDGER = "paper_ledger_unreadable"
+#: A stored position is missing something a close needs (symbol, side, lots,
+#: entry price, the time it opened).  Without those the fill cannot be priced and
+#: recorded honestly, so nothing is closed.
+REASON_FLATTEN_FIELDS = "paper_position_incomplete"
+#: A position has no fresh quote.  A close is priced from a live quote or not at
+#: all: a stale price would write a fill that never existed.
+REASON_FLATTEN_QUOTE = "paper_close_quote_unavailable"
+#: The state file accepted the closes but could not be rewritten, so the book
+#: still looks open.  The ledger has the fills; a second run reconciles them
+#: rather than closing twice.
+REASON_FLATTEN_STATE_WRITE = "paper_state_not_writable"
 
 # -- events -----------------------------------------------------------------
 EVENT_STARTED = "paper_test_started"
@@ -83,6 +104,9 @@ EVENT_RESTORED = "position_restored"
 EVENT_MIGRATED = "state_migrated"
 #: A stored position could not be resumed; the run stays blocked.
 EVENT_RECOVERY_FAILED = "state_recovery_failed"
+#: The operator flattened the stored book explicitly.  One event per action, in
+#: addition to the close event and the ``close_recorded`` note each position gets.
+EVENT_FLATTENED = "paper_book_flattened"
 
 #: Exit reasons a locally simulated fill can carry.
 EXIT_SIGNAL = "SIGNAL_EXIT"
@@ -722,6 +746,619 @@ class CatalogPaperTest:
             self._write_state()
             return {"closed": closed, "open": len(self._positions)}
 
+    # -- the recovery close ------------------------------------------------
+
+    #: How many closed records the state document keeps as evidence of a flatten.
+    FLATTEN_ARCHIVE_LIMIT = 200
+
+    def close_stored_book(self, *, reason: str = EXIT_OPERATOR) -> dict[str, Any]:
+        """Simulate closing **every** stored paper position, or none of them.
+
+        This exists for one situation: a run cannot resume because a stored
+        position no longer matches what the test would manage (the operator
+        re-evaluated and selected different rows, so nothing would ever manage
+        the old book).  The refused record cannot be *managed* -- but it can be
+        *closed*, and closing it is the operator's documented way out.
+
+        The rule: nothing is written until everything can be priced.
+
+        1. Read the stored book and the ledger.  A record pairs with its open
+           entry fill; a record the ledger already shows closed is reconciled
+           away without a second fill (so running this twice cannot close twice).
+        2. Refuse -- writing nothing at all -- when any position lacks a field a
+           close needs (symbol, side, lots, entry price, when it opened), has no
+           open entry fill to pair with, or has no **fresh** quote.
+        3. Only then write: one close event per position through the ordinary
+           ``_close`` path (same closing side, same spread and slippage, same
+           cost labels, one ``close_recorded`` note each), one summary event, and
+           one state document that archives the closed records under
+           ``flattened`` and clears the recovery block.
+
+        The state document is rewritten from the one that was read, so keys this
+        build does not know about (the watch list, the bar stamps, anything a
+        later build added) survive untouched.  No broker order is sent, and no
+        MT5 position is reached: ``self._quotes`` is the read-only quote surface.
+        """
+
+        with self._lock:
+            if self.running:
+                return self._flatten_refusal(
+                    REASON_FLATTEN_RUNNING,
+                    "The paper test is running. Stop it first: the loop manages the "
+                    "same positions, and closing underneath it would race the next "
+                    "cycle. Nothing was closed and the ledger is unchanged.",
+                )
+            document, problem = self._read_state_document()
+            if problem:
+                return self._flatten_refusal(REASON_FLATTEN_STATE, problem)
+            records = [
+                dict(item)
+                for item in (document.get("positions") or ())
+                if isinstance(item, Mapping)
+            ]
+            open_fills, already_closed, ledger_problem = self._ledger_open_book()
+            if ledger_problem:
+                return self._flatten_refusal(REASON_FLATTEN_LEDGER, ledger_problem)
+
+            # -- what there is to close, before a single write ----------------
+            work: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+            reconciled: list[str] = []
+            refusals: list[dict[str, Any]] = []
+            claimed: set[str] = set()
+            for record in records:
+                key = str(record.get("key") or "").strip()
+                fill = open_fills.get(key)
+                if fill is None:
+                    if key and key in already_closed:
+                        # The ledger already pairs this record's entry with a close:
+                        # it is not open, so there is nothing to fill.  Drop the
+                        # stale record instead of closing it a second time.
+                        reconciled.append(key)
+                        continue
+                    refusals.append(
+                        {
+                            "key": key,
+                            "symbol": str(record.get("symbol") or ""),
+                            "reason": "no_entry_fill",
+                            "detail": (
+                                "the ledger has no open entry fill for this position, "
+                                "so a simulated close could not be paired with one"
+                            ),
+                        }
+                    )
+                    continue
+                claimed.add(key)
+                work.append((record, fill))
+            for key, fill in open_fills.items():
+                if key in claimed:
+                    continue
+                # In the ledger, not in the state file: the position is open and
+                # its entry fill carries everything a close needs.
+                work.append(({}, fill))
+
+            priced: list[tuple[Position, dict[str, Any]]] = []
+            for record, fill in work:
+                position, missing = self._closable_position(record, fill or {})
+                if position is None:
+                    refusals.append(
+                        {
+                            "key": str(record.get("key") or (fill or {}).get("key") or ""),
+                            "symbol": str(record.get("symbol") or (fill or {}).get("symbol") or ""),
+                            "reason": "fields_missing",
+                            "detail": (
+                                "the stored position has no usable "
+                                + ", ".join(missing)
+                                + ", so the close could not be priced and recorded "
+                                "honestly"
+                            ),
+                        }
+                    )
+                    continue
+                priced.append((position, record))
+
+            if refusals:
+                return self._flatten_refusal(
+                    REASON_FLATTEN_FIELDS,
+                    f"{len(refusals)} paper position(s) cannot be closed honestly, so "
+                    "none were: the book and the ledger are unchanged. Each one is "
+                    "named below.",
+                    refusals=refusals,
+                )
+
+            # -- a price for every side, or none ------------------------------
+            quotes: dict[str, Any] = {}
+            evidence: list[dict[str, Any]] = []
+            quote_refusals: list[dict[str, Any]] = []
+            for symbol in sorted({position.symbol for position, _record in priced}):
+                quote, seen = self._quote_evidence(symbol)
+                evidence.append(seen)
+                if quote is None:
+                    quote_refusals.append(seen)
+                else:
+                    quotes[symbol] = quote
+            if quote_refusals:
+                names = ", ".join(str(item.get("symbol") or "?") for item in quote_refusals)
+                return self._flatten_refusal(
+                    REASON_FLATTEN_QUOTE,
+                    f"No fresh quote for {names}, so nothing was closed: a simulated "
+                    "fill at a stale or missing price would record a trade that never "
+                    "happened. The book and the ledger are unchanged. Try again when "
+                    "the terminal is streaming quotes for those symbols.",
+                    refusals=quote_refusals,
+                    quotes=evidence,
+                )
+
+            if not priced and not reconciled:
+                return {
+                    "ok": True,
+                    "closed": 0,
+                    "open": 0,
+                    "reconciled": 0,
+                    "reason": "",
+                    "message": (
+                        "The paper book is already flat: there is no open position to "
+                        "close. Nothing was written, and no broker order was sent."
+                    ),
+                    "refusals": [],
+                    "quotes": evidence,
+                }
+
+            # -- write: one close event per position, then one state document --
+            stamp = _iso(self._clock())
+            closed: list[tuple[Position, dict[str, Any], float]] = []
+            ledger_failure = ""
+            for position, record in priced:
+                quote = quotes[position.symbol]
+                price = self._fill_price(position.direction, quote, closing=True)
+                # ``write=False``: the state document is written once below, so a
+                # refused or failed close cannot leave a half-rewritten book.
+                if not self._close(position, price, quote, reason, write=False):
+                    ledger_failure = position.key
+                    break
+                closed.append((position, record, price))
+
+            closed_keys = {position.key for position, _record, _price in closed}
+            reconciled_keys = set(reconciled)
+            leftovers = [
+                record
+                for record in records
+                if str(record.get("key") or "").strip() not in closed_keys
+                and str(record.get("key") or "").strip() not in reconciled_keys
+            ]
+
+            archive = [
+                dict(item)
+                for item in (document.get("flattened") or ())
+                if isinstance(item, Mapping)
+            ]
+            for position, record, price in closed:
+                entry = dict(record) if record else {
+                    "key": position.key,
+                    "symbol": position.symbol,
+                    "direction": "LONG" if position.direction > 0 else "SHORT",
+                    "lots": position.lots,
+                    "entry_at": position.entry_at,
+                    "entry_price": position.entry_price,
+                    "quote_currency": position.quote_currency,
+                    "contract_size": position.contract_size,
+                }
+                entry.update(
+                    {
+                        "closed_at": stamp,
+                        "closed_by": "operator",
+                        "reason": reason,
+                        "exit_price": round(price, 8),
+                        "exit_basis": BASIS_BID_ASK,
+                        "simulated": True,
+                        "priced_from": "BROKER_TICK",
+                    }
+                )
+                archive.append(entry)
+            archive = archive[-self.FLATTEN_ARCHIVE_LIMIT :]
+
+            # A position whose fill did not reach the ledger is still open, so the
+            # block it caused must stay until it is really closed.
+            recovery_ok = not leftovers
+            if not recovery_ok:
+                recovery_detail = (
+                    f"{len(closed)} stored position(s) were closed, and {len(leftovers)} "
+                    "are still open because their simulated close could not be written "
+                    "to the ledger; nothing was substituted"
+                )
+            elif closed:
+                recovery_detail = (
+                    f"the operator closed {len(closed)} stored paper position(s) as "
+                    "simulated fills because they could not be resumed exactly; "
+                    "nothing was substituted, and the book is flat"
+                )
+            else:
+                recovery_detail = (
+                    "the operator reconciled the stored book; nothing was left open"
+                )
+            recovery = {
+                "ok": recovery_ok,
+                "version": STATE_VERSION,
+                "restored": 0,
+                "migrated": 0,
+                "failed": [
+                    {
+                        "key": str(record.get("key") or ""),
+                        "symbol": str(record.get("symbol") or ""),
+                        "reason": "the simulated close could not be written to the "
+                        "ledger, so this position is still open",
+                    }
+                    for record in leftovers
+                ],
+                "closed_by_operator": len(closed),
+                "closed_at": stamp,
+                "detail": recovery_detail,
+            }
+            updated = dict(document)
+            # Only claim the current schema when every record in the document is one
+            # this build wrote.  A leftover record keeps the document at its own
+            # version, so a later resume still reports the derivation it makes.
+            if not leftovers:
+                updated["version"] = STATE_VERSION
+            updated.update(
+                {
+                    "updated_at": stamp,
+                    "status": STOPPED,
+                    "running": False,
+                    "reason": reason,
+                    "positions": leftovers,
+                    "recovery": recovery,
+                    "flattened": archive,
+                    "last_flatten": {
+                        "at": stamp,
+                        "reason": reason,
+                        "closed": len(closed),
+                        "reconciled": len(reconciled),
+                        "open": len(leftovers),
+                        "simulated": True,
+                        "broker_orders": 0,
+                    },
+                }
+            )
+            written = self._write_document(updated)
+            if written and not ledger_failure and recovery_ok:
+                self._recovery = recovery
+                self._status = STOPPED
+                self._blockers = ()
+                self._reason = reason
+            if not ledger_failure:
+                self._record(
+                    EVENT_FLATTENED,
+                    {
+                        "closed": len(closed),
+                        "reconciled": len(reconciled),
+                        "open": len(leftovers),
+                        "reason": reason,
+                        "simulated": True,
+                        "broker_orders": 0,
+                    },
+                )
+
+            if ledger_failure:
+                return {
+                    "ok": False,
+                    "reason": REASON_FLATTEN_LEDGER,
+                    "closed": len(closed),
+                    "open": len(leftovers),
+                    "reconciled": len(reconciled),
+                    "message": (
+                        f"The close event for {ledger_failure} could not be written to "
+                        "the paper ledger, so the run stopped there: "
+                        f"{len(closed)} position(s) are closed and recorded, and the "
+                        "rest are still listed as open. Nothing was invented to fill "
+                        "the gap. Check that the paper folder is writable and try again."
+                    ),
+                    "refusals": [],
+                    "quotes": evidence,
+                }
+            if not written:
+                items = ", ".join(position.symbol for position, _record, _price in closed)
+                return {
+                    "ok": False,
+                    "reason": REASON_FLATTEN_STATE_WRITE,
+                    "closed": len(closed),
+                    "open": len(leftovers),
+                    "reconciled": len(reconciled),
+                    "message": (
+                        f"Simulated closing {len(closed)} position(s) ({items}) was "
+                        "written to the paper ledger, but the state file could not be "
+                        "updated, so they still look open. Run the action again: the "
+                        "ledger proves they are closed and they will be reconciled "
+                        "without a second fill."
+                    ),
+                    "refusals": [],
+                    "quotes": evidence,
+                }
+
+            note = (
+                f"Simulated closing {len(closed)} paper position(s) at a fresh quote. "
+                "Every fill is in the paper ledger; no broker order was sent and no "
+                "MT5 position was touched."
+            )
+            if reconciled:
+                note += (
+                    f" {len(reconciled)} stored record(s) were already closed in the "
+                    "ledger and were reconciled without a second fill."
+                )
+            return {
+                "ok": True,
+                "closed": len(closed),
+                "open": len(leftovers),
+                "reconciled": len(reconciled),
+                "reason": "",
+                "message": note,
+                "refusals": [],
+                "quotes": evidence,
+                "state_written": True,
+            }
+
+    def _flatten_refusal(
+        self,
+        reason: str,
+        message: str,
+        *,
+        refusals: Sequence[Mapping[str, Any]] = (),
+        quotes: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """A refusal that changed nothing, in the shape the caller and page read."""
+
+        return {
+            "ok": False,
+            "reason": reason,
+            "message": message,
+            "closed": 0,
+            "open": None,
+            "reconciled": 0,
+            "refusals": [dict(item) for item in refusals],
+            "quotes": [dict(item) for item in quotes],
+        }
+
+    def _read_state_document(self) -> tuple[dict[str, Any], str]:
+        """The stored document exactly as written, or why it cannot be used."""
+
+        try:
+            raw = self._state_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}, ""
+        except OSError as error:
+            return {}, (
+                "the paper state file exists but could not be read "
+                f"({type(error).__name__}); nothing was closed and the file is "
+                "exactly as it was"
+            )
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return {}, (
+                "the paper state file is not valid JSON; nothing was closed and the "
+                "file is exactly as it was"
+            )
+        if not isinstance(payload, dict):
+            return {}, (
+                "the paper state document is not an object; nothing was closed and "
+                "the file is exactly as it was"
+            )
+        return dict(payload), ""
+
+    def _ledger_open_book(self) -> tuple[dict[str, dict[str, Any]], set[str], str]:
+        """Which positions the ledger says are open, and which it says are closed.
+
+        Pairing is per position key in file order, exactly as the accounting read
+        model does it: an entry fill opens, a priced close closes.  A line that is
+        not an event leaves the open book unknown, and an unknown book is a
+        refusal -- not a guess and not a silently skipped line.
+        """
+
+        open_fills: dict[str, dict[str, Any]] = {}
+        closed: set[str] = set()
+        try:
+            raw = self._ledger_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}, set(), ""
+        except OSError as error:
+            return {}, set(), (
+                "the paper ledger could not be read "
+                f"({type(error).__name__}), so which positions are open cannot be "
+                "established; nothing was closed"
+            )
+        for number, line in enumerate(raw.splitlines(), start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except ValueError:
+                return {}, set(), (
+                    f"line {number} of the paper ledger is not valid JSON, so which "
+                    "positions are open cannot be established; nothing was closed "
+                    "and the ledger is exactly as it was"
+                )
+            if not isinstance(event, Mapping):
+                return {}, set(), (
+                    f"line {number} of the paper ledger is not an event object, so "
+                    "which positions are open cannot be established; nothing was "
+                    "closed and the ledger is exactly as it was"
+                )
+            kind = str(event.get("kind") or "")
+            key = str(event.get("key") or "")
+            if not key:
+                continue
+            if kind == EVENT_FILL:
+                open_fills[key] = dict(event)
+                closed.discard(key)
+            elif kind == EVENT_CLOSED and key in open_fills:
+                # A close without its prices is a note, not a trade (an older build
+                # wrote one of those); it must not close anything here either.
+                if any(
+                    name in event
+                    for name in ("exit_price", "entry_price", "simulated_net_quote")
+                ):
+                    open_fills.pop(key, None)
+                    closed.add(key)
+        return open_fills, closed, ""
+
+    def _closable_position(
+        self, record: Mapping[str, Any], fill: Mapping[str, Any]
+    ) -> tuple[Position | None, list[str]]:
+        """One position a simulated close can be recorded from, or what is missing.
+
+        This is deliberately *not* :meth:`_position_from_state`: resuming needs
+        every field an exit rule reads, whereas closing needs only the trade's
+        identity and the price it opened at.  A record that cannot be managed can
+        still be closed honestly, and that difference is the whole recovery path.
+        Nothing is defaulted: a missing identity field is named and refused.
+        """
+
+        def first(*values: Any) -> Any:
+            for value in values:
+                if value is None or value == "":
+                    continue
+                return value
+            return None
+
+        missing: list[str] = []
+        key = str(first(record.get("key"), fill.get("key")) or "").strip()
+        symbol = str(first(record.get("symbol"), fill.get("symbol")) or "").strip()
+        direction_text = str(first(record.get("direction"), fill.get("direction")) or "").strip().upper()
+        lots = _state_number(first(record.get("lots"), fill.get("lots")))
+        entry_price = _state_number(first(record.get("entry_price"), fill.get("price")))
+        entry_at = str(first(record.get("entry_at"), fill.get("at")) or "").strip()
+        if not key:
+            missing.append("position key")
+        if not symbol:
+            missing.append("symbol")
+        if direction_text not in {"LONG", "SHORT"}:
+            missing.append("LONG or SHORT direction")
+        if lots is None or lots <= 0:
+            missing.append("positive lot size")
+        if entry_price is None or entry_price <= 0:
+            missing.append("entry price")
+        if _parse_iso(entry_at) is None:
+            missing.append("time the trade opened")
+        if missing:
+            return None, missing
+
+        entry_mid = _state_number(record.get("entry_mid"))
+        if entry_mid is None:
+            bid = _state_number(fill.get("quote_bid"))
+            ask = _state_number(fill.get("quote_ask"))
+            # The fill's own recorded quote is evidence, not a substitution: the
+            # entry mid is exactly what the terminal showed when the fill was made.
+            if bid is not None and ask is not None and bid > 0 and ask >= bid:
+                entry_mid = (bid + ask) / 2.0
+        return (
+            Position(
+                key=key,
+                candidate_id=str(first(record.get("candidate_id"), fill.get("candidate_id")) or ""),
+                symbol=symbol,
+                timeframe=str(first(record.get("timeframe"), fill.get("timeframe")) or ""),
+                direction=1 if direction_text == "LONG" else -1,
+                lots=float(lots),
+                entry_at=entry_at,
+                entry_price=float(entry_price),
+                entry_mid=float(entry_mid or 0.0),
+                atr=_state_number(record.get("atr")) or 0.0,
+                stop=_state_number(record.get("stop")),
+                target=_state_number(record.get("target")),
+                trail=_state_number(record.get("trail")),
+                best=_state_number(record.get("best")) or 0.0,
+                notional_quote=0.0,
+                bar_index=-1,
+                restored=True,
+                entry_bar_at=str(record.get("entry_bar_at") or ""),
+                quote_currency=str(
+                    first(record.get("quote_currency"), fill.get("quote_currency")) or ""
+                ).upper(),
+                contract_size=_state_number(
+                    first(record.get("contract_size"), fill.get("contract_size"))
+                )
+                or 0.0,
+            ),
+            [],
+        )
+
+    def _quote_evidence(self, symbol: str) -> tuple[Any, dict[str, Any]]:
+        """A quote that may be filled against, or the evidence it may not.
+
+        Deliberately side-effect free: it writes no ledger event and no snapshot,
+        because it runs *before* the decision to write anything.  A refused close
+        must leave the ledger byte-for-byte as it was.
+        """
+
+        seen: dict[str, Any] = {
+            "symbol": symbol,
+            "state": "unavailable",
+            "reason": "no_tick",
+            "quote_time": None,
+            "age_seconds": None,
+            "bid": None,
+            "ask": None,
+            "detail": "",
+        }
+        try:
+            quote = self._quotes.tick(symbol)
+        except Exception as error:  # a quote source that fails is a missing quote
+            seen["reason"] = "no_tick"
+            seen["detail"] = (
+                "the terminal did not return a tick for this symbol "
+                f"({type(error).__name__})"
+            )
+            return None, seen
+
+        when = getattr(quote, "time", None)
+        if isinstance(when, datetime):
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            quote_time: datetime | None = when
+        else:
+            quote_time = None
+        bid = _decimal(getattr(quote, "bid", None))
+        ask = _decimal(getattr(quote, "ask", None))
+        age = (
+            None
+            if quote_time is None
+            else max(0.0, (self._clock() - quote_time).total_seconds())
+        )
+        seen.update(
+            {
+                "quote_time": _iso(quote_time),
+                "age_seconds": None if age is None else round(age, 1),
+                "bid": bid,
+                "ask": ask,
+                "allowance_seconds": self._max_age,
+            }
+        )
+        if bid is None or ask is None or bid <= 0 or ask < bid:
+            seen["reason"] = "incomplete_quote"
+            seen["detail"] = "the tick has no usable bid and ask"
+            return None, seen
+        if age is None:
+            seen["reason"] = "unknown_age"
+            seen["detail"] = (
+                "the tick carries no time, so its age cannot be established and it "
+                "cannot be shown to be fresh"
+            )
+            return None, seen
+        if age > self._max_age:
+            seen["reason"] = "stale_quote"
+            seen["state"] = "stale"
+            seen["detail"] = (
+                f"the newest tick is {age:.0f} s old, beyond the {self._max_age:.0f} s "
+                "freshness allowance"
+            )
+            return None, seen
+        seen["state"] = "fresh"
+        seen["reason"] = ""
+        with self._lock:
+            # Evidence for the page, the same shape the decision loop writes.  This
+            # is memory, not the ledger: it cannot turn a refusal into a write.
+            self._quotes_seen[symbol] = dict(seen)
+        return quote, seen
+
     # -- the loop ---------------------------------------------------------
 
     def _loop(self) -> None:
@@ -1039,7 +1676,16 @@ class CatalogPaperTest:
         reason: str,
         *,
         basis: str = BASIS_BID_ASK,
-    ) -> None:
+        write: bool = True,
+    ) -> bool:
+        """Record one simulated close.  Returns whether the ledger took it.
+
+        ``write=False`` is for a caller that closes several positions and writes
+        the state document once at the end (the recovery flatten).  It must then
+        check the return value: a close whose event did not reach the ledger is
+        not a close, and the caller must leave the position in the book.
+        """
+
         facts = self._facts(position.symbol)
         contract = _decimal(position.contract_size) or _decimal(
             getattr(facts, "contract_size", None)
@@ -1054,9 +1700,13 @@ class CatalogPaperTest:
             if priced
             else None
         )
+        # A record with no mid at entry (an older schema, or a position known only
+        # from its ledger entry) has no honest mid-move figure: ``None``, never a
+        # number measured from a substituted zero.
+        mid_base = position.entry_mid if _finite_positive(position.entry_mid) else 0.0
         mid_move = (
-            position.direction * ((float(quote.bid) + float(quote.ask)) / 2.0 - position.entry_mid)
-            if point > 0
+            position.direction * ((float(quote.bid) + float(quote.ask)) / 2.0 - mid_base)
+            if point > 0 and mid_base > 0
             else None
         )
         # What the two fill prices already contain, stated per leg rather than
@@ -1091,7 +1741,9 @@ class CatalogPaperTest:
             # The trailing state the exit was decided on, so why a trade closed on
             # its trail (and from which extreme) is read from the ledger, not inferred.
             "trail": None if position.trail is None else round(position.trail, 8),
-            "trail_extreme": round(position.best, 8),
+            "trail_extreme": round(position.best, 8)
+            if _finite_positive(position.best)
+            else None,
             "entry_bar_at": position.entry_bar_at,
             "exit_basis": basis,
             "costs_modelled": modelled,
@@ -1104,11 +1756,13 @@ class CatalogPaperTest:
             "priced_from": "BROKER_TICK",
         }
         self._fills.append(event)
-        self._append_ledger(event)
+        recorded = self._append_ledger(event)
         self._positions.pop(position.key, None)
         self._stats.closes += 1
         self._record(EVENT_CLOSE_RECORDED, {"key": position.key, "reason": reason})
-        self._write_state()
+        if write:
+            self._write_state()
+        return recorded
 
     def _record(self, kind: str, fields: Mapping[str, Any]) -> None:
         event = {"at": _iso(self._clock()), "kind": kind}
@@ -1118,16 +1772,23 @@ class CatalogPaperTest:
             self._events = self._events[-500:]
         self._append_ledger(event)
 
-    def _append_ledger(self, event: Mapping[str, Any]) -> None:
+    def _append_ledger(self, event: Mapping[str, Any]) -> bool:
+        """Append one event.  ``False`` means it did not reach the file."""
+
         try:
             self._root.mkdir(parents=True, exist_ok=True)
             with self._ledger_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
         except OSError:
             self._reason = REASON_LEDGER
+            return False
+        return True
 
-    def _write_state(self) -> None:
-        payload = {
+    def _write_state(self) -> bool:
+        return self._write_document(self._state_payload())
+
+    def _state_payload(self) -> dict[str, Any]:
+        return {
             "version": STATE_VERSION,
             "updated_at": _iso(self._clock()),
             "status": self._status,
@@ -1152,6 +1813,14 @@ class CatalogPaperTest:
             "last_bar": dict(self._last_bar),
             "recovery": dict(self._recovery),
         }
+
+    def _write_document(self, payload: Mapping[str, Any]) -> bool:
+        """Write a whole state document atomically.  ``False`` means it did not.
+
+        A temporary file beside the real one and a rename over it: a crash leaves
+        either the old document or the new one, never half of each.
+        """
+
         try:
             self._root.mkdir(parents=True, exist_ok=True)
             temporary = self._state_path.with_name(self._state_path.name + ".tmp")
@@ -1159,6 +1828,8 @@ class CatalogPaperTest:
             temporary.replace(self._state_path)
         except OSError:
             self._reason = REASON_LEDGER
+            return False
+        return True
 
     def _restore_state(self) -> dict[str, Any]:
         """Resume open positions after a restart, exactly or not at all.
