@@ -744,6 +744,11 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         # one report file. It evaluates nothing, re-ranks nothing, promotes
         # nothing, and holds no order, arming or mode surface at all.
         "catalog-audit",
+        # The paper starting capital: one local, Git-ignored document holding the
+        # amount and currency the operator typed. It is the basis of the paper
+        # P&L percentages and of nothing else: it is not a broker balance, it is
+        # never read from an account, and it cannot size, arm or send anything.
+        "paper-capital",
     }
 
 

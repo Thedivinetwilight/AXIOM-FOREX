@@ -288,8 +288,15 @@ class PageContext:
         return bool(self.runner.get("running", False))
 
     def nav_badge(self, page: str) -> str:
-        if page == "positions" and self.paper.open_positions:
-            return str(len(self.paper.open_positions))
+        """A count beside a navigation entry, from the same reading the page uses."""
+
+        if page == "positions":
+            counts = dict((self.extra or {}).get("account") or {}).get("counts") or {}
+            if counts:
+                open_positions = int(counts.get("open_positions") or 0)
+                return str(open_positions) if open_positions else ""
+            if self.paper.open_positions:
+                return str(len(self.paper.open_positions))
         return ""
 
 

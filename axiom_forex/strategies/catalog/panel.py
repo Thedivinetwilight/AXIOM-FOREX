@@ -560,6 +560,48 @@ class CatalogPanel:
             "record_origin": record.data_origin if record is not None else "",
         }
 
+    # -- what the paper accounting page reads ----------------------------
+
+    def paper_root(self) -> Path:
+        """Where the paper test's ledger and state file live."""
+
+        return self.data_root / "paper"
+
+    def paper_snapshot(self) -> dict[str, Any]:
+        """The running test's own snapshot, or an empty one when nothing is built.
+
+        The snapshot is the only place the newest *quote* is known while the loop
+        is running; the durable ledger keeps the fills.  Reading it here does not
+        start, stop, or touch the loop.
+        """
+
+        with self._lock:
+            paper = self._paper
+        if paper is None:
+            return {}
+        try:
+            return dict(paper.snapshot())
+        except Exception:  # a read model never raises into a page
+            return {}
+
+    def cost_model(self, symbol: str) -> Any:
+        """One symbol's cost model, from the terminal's own reported terms.
+
+        Used only to price commission and swap for the paper accounting, and only
+        when the terminal reports terms that are usable.  ``None`` means unknown,
+        which the accounting then reports as unknown rather than as zero.
+        """
+
+        terminal = self._terminal()
+        facts = _symbol_facts(terminal, symbol)
+        if facts is None:
+            return None
+        try:
+            model = cost_model_for(facts, account_currency="")
+        except Exception:
+            return None
+        return None if getattr(model, "unusable", False) else model
+
     def view(self) -> dict[str, Any]:
         return {
             "available": True,

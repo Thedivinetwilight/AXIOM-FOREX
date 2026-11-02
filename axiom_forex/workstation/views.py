@@ -23,6 +23,15 @@ from __future__ import annotations
 from html import escape
 from typing import Any, Iterable, Mapping, Sequence
 
+from axiom_forex.paper_runner.accounting import (
+    CURRENCY_CHOICES,
+    age_text,
+    count as count_text,
+    money,
+    percent,
+    price,
+)
+
 from . import guide
 from .context import PageContext, data_class_label
 from .symbols import MAX_EXCLUDED_SHOWN, SymbolRead, build_catalogue, catalogue_message
@@ -40,16 +49,19 @@ MAX_SYMBOL_ROWS_SHOWN = 200
 #: page comes first because it is the only page a new operator needs; everything
 #: else is a detail page that the guide links to when it is the next thing to do.
 NAV: tuple[tuple[str, str, str], ...] = (
+    # The four pages the paper workflow actually uses, in the order it uses them.
     ("start", "/", "Start paper trading"),
+    ("performance", "/performance", "Paper performance"),
     ("positions", "/positions", "Paper positions"),
     ("activity", "/activity", "Activity"),
+    # What has to be set up, once.
     ("account", "/account", "Account & symbols"),
     ("data", "/data", "Data & evaluation"),
     ("strategies", "/strategies", "Strategy library"),
+    # Everything else.  These are not needed for paper trading, and the LIVE
+    # entries keep their own safeguards on their own pages.
     ("quick-setup", "/quick-setup", "Quick setup"),
-    # Kept, and kept later: live execution still needs this document. The short
-    # setup above is what the normal flow now uses.
-    ("provider-setup", "/provider-setup", "Broker terms (advanced)"),
+    ("provider-setup", "/provider-setup", "Broker terms"),
     ("mode", "/mode", "Trading mode"),
     ("live", "/live", "Live execution"),
     ("setup", "/setup", "Setup steps"),
@@ -62,17 +74,17 @@ NAV: tuple[tuple[str, str, str], ...] = (
 #: How the sidebar groups the same links: the guided path first, then the pages
 #: the guide opens, then everything an experienced operator may still need.
 NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Start here", ("start", "positions", "activity")),
-    ("Steps in detail", ("account", "data", "strategies")),
+    ("Paper trading", ("start", "performance", "positions", "activity")),
+    ("Set up", ("account", "data", "strategies")),
     (
         "Advanced",
         (
-            "autopilot",
             "quick-setup",
             "provider-setup",
             "mode",
             "live",
             "setup",
+            "autopilot",
             "kronos",
             "overview",
             "health",
@@ -89,6 +101,7 @@ ICONS: dict[str, str] = {
     "setup": "M4 6h10M4 12h16M4 18h7M18 4v4M16 18h4M20 16v4",
     "account": "M12 12a4 4 0 100-8 4 4 0 000 8zM4 20a8 8 0 0116 0",
     "positions": "M4 18V9M10 18V5M16 18v-6M22 18h-20",
+    "performance": "M4 20V4M4 20h16M7 16l4-6 3 3 5-8",
     "data": "M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
     "quick-setup": "M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2zM5 17l1 2 2 1-2 1-1 2-1-2-2-1 2-1z",
     "provider-setup": "M9 3h7l4 4v14H9zM4 7v14h5M12 8h4M12 12h4M12 16h4",
@@ -422,6 +435,46 @@ select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;
 .field--check input{width:16px;height:16px;accent-color:var(--accent-2)}
 .list{margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px}
 
+/* ---------- paper account: callout, metrics, chart ---------- */
+.split-callout{display:grid;gap:var(--s3);grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.split-callout > div{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:var(--radius);padding:12px var(--s4);background:rgba(0,0,0,.16)}
+.callout-tag{font-size:10.5px;font-weight:700;letter-spacing:.1em;padding:3px 8px;border-radius:999px;white-space:nowrap;flex:0 0 auto}
+.callout-tag--live{background:rgba(76,209,160,.14);color:var(--live);border:1px solid rgba(76,209,160,.4)}
+.callout-tag--paper{background:rgba(201,167,255,.14);color:var(--paper);border:1px solid rgba(201,167,255,.4)}
+.callout-text{font-size:12.5px;color:var(--text-2);line-height:1.5}
+
+.section-head{display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap;margin:var(--s2) 0 calc(-1 * var(--s2))}
+.section-head h2{margin:0;font-size:16px;font-weight:660;letter-spacing:-.01em}
+.section-head .hint{margin:0;color:var(--text-3);font-size:12.5px}
+
+.metric-grid{display:grid;gap:var(--s3);grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.metric{border:1px solid var(--line);border-radius:var(--radius);padding:var(--s4);background:var(--panel);min-width:0}
+.metric--accent{border-color:rgba(94,200,255,.32);background:linear-gradient(160deg,rgba(94,200,255,.12),rgba(17,24,35,.92) 60%)}
+.metric--paper{border-left:3px solid var(--paper)}
+.metric .m-label{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-3);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.metric .m-value{margin-top:6px;font-size:23px;font-weight:680;letter-spacing:-.02em;font-variant-numeric:tabular-nums;word-break:break-word}
+.metric .m-value.is-na{font-size:15px;font-weight:600;color:var(--warn);letter-spacing:0}
+.metric .m-note{margin-top:6px;font-size:12px;color:var(--text-3);line-height:1.45;word-break:break-word}
+.metric .m-def{margin-top:4px;font-size:11.5px;color:var(--text-3);opacity:.85}
+
+.chart{display:flex;flex-direction:column;gap:6px;margin:0}
+.chart-row{display:grid;grid-template-columns:88px minmax(0,1fr) 132px;gap:var(--s3);align-items:center;font-size:12.5px}
+.chart-date{color:var(--text-3);font-variant-numeric:tabular-nums}
+.chart-track{position:relative;height:16px;border-radius:4px;background:rgba(255,255,255,.05);overflow:hidden}
+.chart-fill{position:absolute;top:0;bottom:0;border-radius:4px}
+.chart-fill--up{left:50%;background:linear-gradient(90deg,rgba(69,217,154,.6),var(--ok))}
+.chart-fill--down{right:50%;background:linear-gradient(270deg,rgba(255,138,138,.6),var(--danger))}
+.chart-zero{position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--line)}
+.chart-value{text-align:right;font-variant-numeric:tabular-nums}
+.chart-value--up{color:var(--ok)}
+.chart-value--down{color:var(--danger)}
+
+.headline-row{display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;margin-bottom:var(--s3)}
+.headline-row .spacer{margin-left:auto}
+.warning-banner{border:1px solid rgba(255,138,138,.45);background:linear-gradient(120deg,rgba(255,138,138,.16),rgba(17,24,35,.94));border-radius:var(--radius);padding:var(--s4)}
+.warning-banner strong{font-size:14px;display:block}
+.warning-banner p{margin:4px 0 0;font-size:13px;color:var(--text-2)}
+
 /* ---------- responsive ---------- */
 @media (max-width:1120px){
   .grid--two{grid-template-columns:minmax(0,1fr)}
@@ -430,6 +483,7 @@ select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;
   .topbar{padding:var(--s4) var(--s5)}
 }
 @media (max-width:860px){
+  .chart-row{grid-template-columns:72px minmax(0,1fr) 104px}
   .shell{grid-template-columns:minmax(0,1fr)}
   .sidebar{position:static;height:auto;flex-direction:row;align-items:center;gap:var(--s4);overflow-x:auto;padding:var(--s3) var(--s4)}
   .sidebar-foot{display:none}
@@ -633,6 +687,228 @@ def connect_label(ctx: PageContext, *, long: bool = True) -> str:
 
 
 # --------------------------------------------------------------------------
+# the paper account: one reading, rendered everywhere
+# --------------------------------------------------------------------------
+
+#: Rows per page for the complete lists (positions, trades, ledger events).  The
+#: pages say how many rows there are in total and link to the rest; nothing is
+#: silently dropped.
+ROWS_PER_PAGE = 25
+
+
+def _utc(value: Any) -> str:
+    """One stored UTC instant, written the way a person reads a timestamp."""
+
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    return text[:19].replace("T", " ") + " UTC"
+
+
+def _account(ctx: PageContext) -> dict[str, Any]:
+    """The one paper-account reading this render was given."""
+
+    return dict((ctx.extra or {}).get("account") or {})
+
+
+def _account_metric(account: Mapping[str, Any], key: str) -> dict[str, Any]:
+    return dict((account.get("metric_by_key") or {}).get(key) or {})
+
+
+def _account_kpi(
+    account: Mapping[str, Any],
+    key: str,
+    *,
+    label: str = "",
+    foot: str = "",
+    chip_html: str = "",
+) -> str:
+    """One figure, exactly as the accounting module worded it."""
+
+    metric = _account_metric(account, key)
+    value = str(metric.get("value") or "—")
+    if not metric:
+        value = "Unavailable"
+    tone = "accent" if metric.get("tone") == "accent" else ""
+    note = foot or str(metric.get("note") or "")
+    if metric and not metric.get("available", True) and not foot:
+        note = str(metric.get("note") or "Not available")
+    return kpi(
+        label or str(metric.get("label") or key),
+        escape(value),
+        foot=escape(note),
+        tone=tone,
+        label_chip=chip_html,
+    )
+
+
+def _account_alerts(account: Mapping[str, Any], *, include_capital: bool = True) -> str:
+    """Everything that makes a figure on the page untrustworthy, said plainly."""
+
+    if not account or not account.get("available", False):
+        return notice(
+            "warn",
+            "The paper ledger could not be read",
+            str(
+                account.get("error")
+                or "No paper account is wired into this process, so no paper figure is shown."
+            ),
+        )
+    blocks: list[str] = []
+    trading = dict(account.get("trading") or {})
+    if trading.get("paused"):
+        blocks.append(
+            notice(
+                "warn",
+                "Trading decisions are paused",
+                " ".join(str(item) for item in (trading.get("reasons") or [trading.get("reason")]))[:400],
+            )
+        )
+    integrity = dict(account.get("integrity") or {})
+    if integrity.get("warnings"):
+        rows = "".join(
+            f"<li>{escape(str(item.get('detail') or ''))}</li>"
+            for item in integrity.get("warnings") or ()
+        )
+        blocks.append(
+            f"<div class='notice notice--error' role='alert'><div>"
+            f"<strong>Data integrity warning — figures that depend on this are unavailable</strong>"
+            f"<ul class='list'>{rows}</ul></div></div>"
+        )
+    if include_capital and not (account.get("capital") or {}).get("configured"):
+        blocks.append(
+            notice(
+                "warn",
+                "No paper starting capital is configured",
+                "Cash, equity and return are unavailable until you set one. AXIOM does "
+                "not guess a balance; the broker account's balance is never used here.",
+            )
+        )
+    return "".join(blocks)
+
+
+def _query_value(ctx: PageContext, key: str, default: str = "") -> str:
+    values = ((ctx.extra or {}).get("query") or {}).get(key) or []
+    return str(values[0]) if values else default
+
+
+def _query_page(ctx: PageContext, key: str = "page") -> int:
+    try:
+        return max(1, int(_query_value(ctx, key, "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _nav_href(page: str) -> str:
+    for key, href, _label in NAV:
+        if key == page:
+            return href
+    return "/"
+
+
+def _pager(
+    ctx: PageContext,
+    *,
+    page: int,
+    total: int,
+    per_page: int = ROWS_PER_PAGE,
+    param: str = "page",
+    label: str = "rows",
+) -> str:
+    """A plain next/previous link: no script, and it says what it is paging."""
+
+    pages = max(1, (total + per_page - 1) // per_page)
+    if pages <= 1:
+        return f"<p class='small muted'>All {total:,} {label} shown.</p>"
+    href = _nav_href(ctx.page)
+    parts = [f"<span class='small muted'>Page {page} of {pages} · {total:,} {label}</span>"]
+    if page > 1:
+        parts.append(
+            f"<a class='btn btn-sm' href='{escape(href)}?{escape(param)}={page - 1}'>Previous</a>"
+        )
+    if page < pages:
+        parts.append(
+            f"<a class='btn btn-sm' href='{escape(href)}?{escape(param)}={page + 1}'>Next</a>"
+        )
+    return f"<div class='row' style='margin-top:12px'>{''.join(parts)}</div>"
+
+
+def _page_of(rows: Sequence[Any], page: int, per_page: int = ROWS_PER_PAGE) -> list[Any]:
+    start = (max(1, page) - 1) * per_page
+    return list(rows[start : start + per_page])
+
+
+def _session_freshness_chip(account: Mapping[str, Any]) -> str:
+    trading = dict(account.get("trading") or {})
+    quotes = list(account.get("quotes") or ())
+    if trading.get("paused"):
+        if not quotes:
+            return chip("PAUSED · NO QUOTES", "warn", dot=True)
+        return chip("PAUSED · STALE QUOTE", "warn", dot=True)
+    if not quotes:
+        return chip("NO QUOTE YET", "muted")
+    return chip("QUOTES FRESH", "ok", dot=True)
+
+
+def _freshness_row(account: Mapping[str, Any]) -> str:
+    """The freshness verdict with the instant and the age it was judged from.
+
+    Every page that shows a mark shows this: a quote is fresh or stale against the
+    clock at the moment the page is built, and the page says which quote, how old,
+    and what the allowance is.
+    """
+
+    quotes = list(account.get("quotes") or ())
+    trading = dict(account.get("trading") or {})
+    session = dict(account.get("session") or {})
+    allowance = session.get("max_quote_age_seconds")
+    if not quotes:
+        return (
+            "<p class='small muted' style='margin:6px 0 0'>"
+            f"{_session_freshness_chip(account)} No quote has been recorded yet, so no "
+            "mark can be judged and no decision can be taken.</p>"
+        )
+    newest = max((str(row.get("quote_time") or "") for row in quotes), default="")
+    parts = ", ".join(
+        f"{escape(str(row.get('symbol') or ''))} {escape(str(row.get('age_text') or 'age unknown'))}"
+        + (f" (quote {escape(_utc(row.get('quote_time')))})" if row.get("quote_time") else "")
+        for row in quotes
+    )
+    lead = (
+        f"{chip('PAUSED', 'warn', dot=True)} Trading decisions are paused: "
+        if trading.get("paused")
+        else f"{chip('QUOTES FRESH', 'ok', dot=True)} "
+    )
+    return (
+        "<p class='small muted' style='margin:6px 0 0'>"
+        f"{lead}{parts}. Newest quote {escape(_utc(newest))} · allowed age "
+        f"{escape(str(allowance if allowance is not None else '—'))} s.</p>"
+    )
+
+
+def _paper_vs_live_strip(ctx: PageContext) -> str:
+    """The one sentence that must never be ambiguous: what is real, what is paper."""
+
+    terminal = ctx.terminal
+    if terminal.connected and not terminal.simulated:
+        broker = "A real MetaTrader 5 account is connected (read-only)."
+    elif terminal.simulated:
+        broker = "The offline simulator is running, so even the quotes are samples."
+    else:
+        broker = "No terminal is connected, so there are no broker quotes at all."
+    return (
+        "<div class='split-callout' role='note'>"
+        f"<div><span class='callout-tag callout-tag--live'>REAL BROKER</span>"
+        f"<span class='callout-text'>{escape(broker)} Its balance and equity are "
+        "never read into these figures.</span></div>"
+        "<div><span class='callout-tag callout-tag--paper'>PAPER</span>"
+        "<span class='callout-text'>Every order, fill, position and P&amp;L on this page is "
+        "simulated on this machine. No order is sent and no broker capital is used.</span></div>"
+        "</div>"
+    )
+
+
+# --------------------------------------------------------------------------
 # shell
 # --------------------------------------------------------------------------
 
@@ -794,11 +1070,20 @@ def _session_kpis(ctx: PageContext) -> str:
         symbol_foot = f"{selected_count} selected for observation"
     else:
         symbol_foot = "None selected yet — choose on Account & symbols"
-    paper_label = data_chip(ctx.paper_label) if ctx.paper.available else ""
-    if ctx.paper.available:
+    account = _account(ctx)
+    account_equity = _account_metric(account, "equity") if account else {}
+    if account_equity:
+        # The paper ledger's own figure, from the same reading the performance
+        # page renders: the overview may not show a second, different equity.
+        paper_label = chip("PAPER", "paper", dot=True)
+        paper_value = escape(str(account_equity.get("value") or "—"))
+        paper_foot = str(account_equity.get("note") or "paper ledger only")
+    elif ctx.paper.available:
+        paper_label = data_chip(ctx.paper_label)
         paper_value = escape(ctx.paper.equity or "—")
         paper_foot = f"{escape(ctx.paper.account_currency or 'fixture')} · paper only"
     else:
+        paper_label = data_chip(ctx.paper_label) if ctx.paper.available else ""
         paper_value = "—"
         paper_foot = "Paper platform unavailable"
     return (
@@ -811,7 +1096,7 @@ def _session_kpis(ctx: PageContext) -> str:
             foot=escape(symbol_foot),
         )
         + kpi(
-            "Paper account equity",
+            "Paper equity",
             paper_value,
             foot=escape(paper_foot),
             label_chip=paper_label,
@@ -1145,7 +1430,19 @@ def _runner_card(ctx: PageContext) -> str:
                     ),
                 ),
                 ("Cycles / bars", f"{escape(str(counters.get('cycles', 0)))} / {escape(str(counters.get('bars', 0)))}"),
-                ("Signals / orders / fills", f"{escape(str(counters.get('signals', 0)))} / {escape(str(counters.get('orders', 0)))} / {escape(str(counters.get('fills', 0)))}"),
+                # This runner keeps its own book.  Its counters are labelled as
+                # such so they are never read as the paper test's ledger figures,
+                # which live on the performance page and are counted there.
+                (
+                    "Signals / orders (this runner)",
+                    f"{escape(str(counters.get('signals', 0)))} / {escape(str(counters.get('orders', 0)))}",
+                ),
+                (
+                    "Simulated fills (this runner)",
+                    f"{escape(str(counters.get('fills', 0)))} "
+                    f"<span class='muted small'>of {escape(str(counters.get('orders', 0)))} order(s) "
+                    "it recorded itself</span>",
+                ),
                 ("Refusals", escape(str(counters.get("refusals", 0)))),
                 ("Why", f"{escape(reason)} <span class='muted small'>{escape(detail[:120])}</span>"),
                 ("Restored", "yes" if runner.get("restored") else "no (fresh state)"),
@@ -1205,7 +1502,11 @@ def _runner_card(ctx: PageContext) -> str:
         card(
             "Paper strategy runner",
             body,
-            hint="Simulated fills only. This is not a live trading system and makes no promise of profit.",
+            hint=(
+                "Simulated fills only, kept in this runner's own book. The paper test's "
+                "ledger figures are on Paper performance; the two are separate engines and "
+                "their counters are labelled accordingly."
+            ),
             right=_runner_state_chip(ctx),
         )
         + card(
@@ -1227,13 +1528,25 @@ def _runner_card(ctx: PageContext) -> str:
     )
 
 
+#: How many open positions the overview's compact card draws.  The card says how
+#: many it left, and the positions page always shows every one of them.
+OVERVIEW_POSITION_ROWS = 10
+
+
 def _positions_card(ctx: PageContext) -> str:
-    paper = ctx.paper
-    if not paper.available:
-        return card("Open positions", empty_state("Positions unavailable", paper.error or ""))
-    rows = []
-    for position in paper.open_positions:
-        rows.append(
+    """The compact open-positions card on the overview page.
+
+    It reads the same paper-account ledger the performance page reads, so the two
+    cannot show different books.  It draws a bounded number of rows and says, in
+    so many words, how many more there are.
+    """
+
+    account = _account(ctx)
+    if not account:
+        paper = ctx.paper
+        if not paper.available:
+            return card("Open positions", empty_state("Positions unavailable", paper.error or ""))
+        rows = [
             (
                 escape(str(position.get("pair", ""))),
                 escape(str(position.get("side", ""))),
@@ -1241,10 +1554,35 @@ def _positions_card(ctx: PageContext) -> str:
                 escape(str(position.get("entry_price", ""))),
                 escape(str(position.get("entry_timestamp", ""))),
             )
+            for position in paper.open_positions
+        ]
+        body = table(
+            "Open paper positions (simulated ledger)",
+            (("Pair", "text"), ("Side", "text"), ("Quantity", "num"), ("Entry", "num"), ("Opened", "text")),
+            rows,
+            empty=empty_state(
+                "No open paper positions",
+                "The paper ledger is flat. Positions appear here only after paper fills; "
+                "this interface cannot open one.",
+            ),
         )
+        return card("Open positions", body, right=data_chip(ctx.paper_label), flush=True)
+
+    positions = list(account.get("positions") or ())
+    rows = [
+        (
+            escape(str(item.get("symbol") or "")),
+            escape(str(item.get("side") or "")),
+            escape(str(item.get("lots") or "")),
+            escape(price(item.get("entry_price"))),
+            escape(str(item.get("entry_at") or "")[:16].replace("T", " ")),
+        )
+        for item in positions[:OVERVIEW_POSITION_ROWS]
+    ]
+    hidden = len(positions) - len(rows)
     body = table(
         "Open paper positions (simulated ledger)",
-        (("Pair", "text"), ("Side", "text"), ("Quantity", "num"), ("Entry", "num"), ("Opened", "text")),
+        (("Pair", "text"), ("Side", "text"), ("Lots", "num"), ("Entry", "num"), ("Opened (UTC)", "text")),
         rows,
         empty=empty_state(
             "No open paper positions",
@@ -1252,7 +1590,19 @@ def _positions_card(ctx: PageContext) -> str:
             "this interface cannot open one.",
         ),
     )
-    return card("Open positions", body, right=data_chip(ctx.paper_label), flush=True)
+    if hidden > 0:
+        body += (
+            f"<p class='small muted' style='padding:10px var(--s5) 0'>"
+            f"{hidden} more position(s) are open. "
+            f"<a href='/positions'>See every open position</a>.</p>"
+        )
+    return card(
+        "Open positions",
+        body,
+        hint=f"{len(positions)} open in the paper ledger.",
+        right=chip("PAPER", "paper", dot=True),
+        flush=True,
+    )
 
 
 def _activity_card(ctx: PageContext) -> str:
@@ -1769,6 +2119,120 @@ def _start_step(
     )
 
 
+def _primary_actions(ctx: PageContext, model: Mapping[str, Any], account: Mapping[str, Any]) -> str:
+    """The four things an operator comes here to do, in one obvious row.
+
+    Each one is either a working control or a genuinely disabled control with the
+    reason beside it: no action is hidden, and nothing pretends to be available
+    when the workstation would refuse it.
+    """
+
+    steps = {step.key: step for step in model.get("steps") or ()}
+    paper_step = steps.get("paper")
+    session = dict(account.get("session") or {})
+    running = bool(paper_step is not None and paper_step.state == guide.RUNNING)
+    notes: list[str] = []
+    parts: list[str] = []
+
+    # Connect
+    if not ctx.terminal.connected:
+        parts.append(
+            action_form("connect", ctx.action_nonce, connect_label(ctx), tone="primary")
+        )
+        notes.append("Connect reads the terminal you are already signed in to; it never logs in.")
+    else:
+        parts.append(
+            "<button class='btn' type='button' disabled aria-disabled='true'>"
+            + escape("Simulator preview running" if ctx.terminal.simulated else "Terminal connected")
+            + "</button>"
+        )
+        notes.append("Already connected: there is nothing to connect to twice.")
+
+    # Start / stop paper
+    if running:
+        parts.append(action_form("catalog-paper-stop", ctx.action_nonce, "Stop paper trading", tone="warn", extra="<input type='hidden' name='return_to' value='/'>"))
+        notes.append("Stop ends the paper loop. It closes nothing and sends nothing.")
+    elif paper_step is not None and paper_step.state in {guide.NEXT, guide.RUNNING}:
+        parts.append(
+            "<a class='btn' href='#step-paper'>Start paper trading</a>"
+        )
+        notes.append("Starting needs the ticked candidates in step 5, so that button is there.")
+    else:
+        reason = (
+            paper_step.detail
+            if paper_step is not None and paper_step.detail
+            else "The paper session cannot start yet."
+        )
+        parts.append(
+            "<button class='btn' type='button' disabled aria-disabled='true'>"
+            "Start paper trading</button>"
+        )
+        notes.append(f"Why it is disabled: {reason}")
+
+    # View performance — always available; an empty ledger has a helpful state.
+    parts.append("<a class='btn' href='/performance'>View performance</a>")
+    if not session.get("running"):
+        notes.append("Paper performance shows the ledger even while the session is stopped.")
+
+    return (
+        "<div class='row' style='margin-top:14px'>"
+        + "".join(parts)
+        + "</div><p class='small muted' style='margin:8px 0 0'>"
+        + escape(" ".join(notes))
+        + "</p>"
+    )
+
+
+def _start_performance_summary(ctx: PageContext, account: Mapping[str, Any]) -> str:
+    """The concise paper-P&L summary on the home page.
+
+    It renders the same metric dictionaries the performance page renders, so the
+    two can never show different numbers for the same ledger.
+    """
+
+    if not account:
+        return ""
+    metrics = account.get("metric_by_key") or {}
+    if not metrics:
+        return ""
+    counts = dict(account.get("counts") or {})
+    kpis = (
+        "<div class='grid grid--kpi'>"
+        + _account_kpi(account, "equity")
+        + _account_kpi(account, "realized_gross")
+        + _account_kpi(account, "net_pnl")
+        + _account_kpi(
+            account,
+            "open_positions",
+            foot=(
+                f"{counts.get('closed_trades', 0)} closed · "
+                f"{counts.get('fills', 0)} simulated fill(s)"
+            ),
+        )
+        + "</div>"
+    )
+    capital = dict(account.get("capital") or {})
+    setup = ""
+    if not capital.get("configured"):
+        setup = (
+            "<p class='small' style='margin:12px 0 0'>"
+            "<a href='/performance'>Set the paper starting capital</a> to see cash, equity "
+            "and return. No balance is guessed.</p>"
+        )
+    return card(
+        "Paper performance",
+        kpis + setup,
+        hint=(
+            "Paper ledger only. The broker account's balance and equity are never mixed "
+            "into these figures."
+        ),
+        right=(
+            f"{chip('PAPER', 'paper', dot=True)}"
+            f"<a class='btn btn-sm btn--primary' href='/performance'>View performance</a>"
+        ),
+    )
+
+
 def render_start(ctx: PageContext) -> str:
     """The guided start page: five steps, one summary, one obvious next click.
 
@@ -1779,6 +2243,7 @@ def render_start(ctx: PageContext) -> str:
     """
 
     catalog = dict((ctx.extra or {}).get("catalog") or {})
+    account = _account(ctx)
     model = guide.build(
         terminal=ctx.terminal,
         wizard_view=ctx.wizard.view(),
@@ -1786,6 +2251,9 @@ def render_start(ctx: PageContext) -> str:
         catalog=catalog,
         data_check=dict((ctx.extra or {}).get("data_check") or {}),
         runner=dict(ctx.runner or {}),
+        # The same reading the performance and positions pages render, so no two
+        # cards on this workstation can count the same fill differently.
+        account=account,
     )
     summary = dict(model["summary"])
     next_key = str(summary.get("next_key") or "")
@@ -1837,12 +2305,14 @@ def render_start(ctx: PageContext) -> str:
             if model.get("next_step") is not None
             else ""
         )
+        + _primary_actions(ctx, model, account)
         + f"<p class='small muted'>{summary.get('steps_done', 0)} of "
         f"{summary.get('steps_total', 5)} steps complete.</p>"
         "</div></section>"
     )
 
     tiles = "<div class='tile-grid'>" + "".join(_start_tile(tile) for tile in summary.get("tiles") or []) + "</div>"
+    performance = _start_performance_summary(ctx, account)
     candidates = tuple(model.get("candidates") or ())
     steps = (
         "<ol class='guide-steps'>"
@@ -1867,7 +2337,9 @@ def render_start(ctx: PageContext) -> str:
     )
 
     body = (
-        hero
+        _account_alerts(account)
+        + hero
+        + performance
         + card(
             "Where things stand",
             tiles,
@@ -1888,6 +2360,7 @@ def render_start(ctx: PageContext) -> str:
 def render_overview(ctx: PageContext) -> str:
     body = (
         mode_banner(ctx)
+        + _paper_vs_live_strip(ctx)
         + _session_kpis(ctx)
         + "<div class='grid grid--two'>"
         + _terminal_card(ctx)
@@ -2361,53 +2834,557 @@ def render_account(ctx: PageContext) -> str:
     return render_shell(ctx, body)
 
 
-def render_positions(ctx: PageContext) -> str:
+# --------------------------------------------------------------------------
+# paper performance
+# --------------------------------------------------------------------------
+
+
+def _capital_setup_card(ctx: PageContext, account: Mapping[str, Any]) -> str:
+    """Ask for the paper starting capital, plainly, and never guess one."""
+
+    capital = dict(account.get("capital") or {})
+    if capital.get("configured"):
+        return ""
+    options = "".join(
+        f"<option value='{escape(code)}'>{escape(code)}</option>" for code in CURRENCY_CHOICES
+    )
     body = (
-        notice(
-            "warn",
-            "Paper positions only",
-            "This screen shows the simulated paper ledger. Broker positions are not read "
-            "into this build, and no position can be opened, changed, or closed here.",
+        "<p class='small' style='margin:0 0 12px'>This is the amount the <em>local "
+        "simulation</em> starts with. It is not your broker balance, it is not read from "
+        "your account, and it changes nothing about the terminal: no order is sent and no "
+        "broker capital is used. Without it, cash, equity and return cannot be computed, "
+        "and AXIOM will not invent one.</p>"
+        f"<form method='post' action='/actions/paper-capital' class='row' "
+        f"style='align-items:flex-end;gap:12px'>"
+        f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
+        "<div class='field' style='max-width:220px'><label for='paper-capital-amount'>"
+        "Paper starting capital</label>"
+        "<input type='text' inputmode='decimal' id='paper-capital-amount' name='amount' "
+        "placeholder='e.g. 10000' autocomplete='off' required>"
+        "<span class='help'>A positive number, no currency symbol.</span></div>"
+        "<div class='field' style='max-width:150px'><label for='paper-capital-currency'>"
+        "Currency</label>"
+        f"<select id='paper-capital-currency' name='currency'>{options}</select>"
+        "<span class='help'>The capital's own currency.</span></div>"
+        "<button class='btn btn--primary' type='submit'>Save paper capital</button>"
+        "</form>"
+        + (
+            notice("warn", "The stored paper capital could not be used", str(capital.get("reason") or ""))
+            if capital.get("problem")
+            else ""
         )
-        + _positions_card(ctx)
-        + _runner_card(ctx)
+    )
+    return card(
+        "Set the paper starting capital",
+        body,
+        hint="One local, Git-ignored document. No credential, no account number, no order.",
+        right=chip("NOT SET", "warn", dot=True),
+    )
+
+
+def _equity_chart(account: Mapping[str, Any]) -> str:
+    """A dated P&L/equity chart drawn with divs: no script, no external asset."""
+
+    points = list(account.get("equity_curve") or ())
+    currency = str(account.get("currency") or "")
+    if not points:
+        return empty_state(
+            "No dated performance yet",
+            "The chart fills in as closed paper trades accumulate. A flat line drawn "
+            "before the first trade would be a made-up result.",
+        )
+    scale = float(account.get("equity_curve_scale") or 0.0) or 1.0
+    rows = []
+    for point in points:
+        value = float(point.get("realized_gross") or 0.0)
+        width = max(2.0, min(50.0, abs(value) / scale * 50.0))
+        klass = "up" if value >= 0 else "down"
+        rows.append(
+            "<div class='chart-row'>"
+            f"<span class='chart-date'>{escape(str(point.get('date') or ''))}</span>"
+            "<span class='chart-track'>"
+            "<span class='chart-zero' aria-hidden='true'></span>"
+            f"<span class='chart-fill chart-fill--{klass}' style='width:{width:.1f}%'></span>"
+            "</span>"
+            f"<span class='chart-value chart-value--{klass}'>{escape(money(value, currency))}</span>"
+            "</div>"
+        )
+    caption = (
+        "Cumulative realised price P&L by day, newest shown last. "
+        f"{len(points)} day(s) with a closed trade. Before commission and swap."
+    )
+    return (
+        f"<div class='chart' role='img' aria-label='{escape(caption)}'>{''.join(rows)}</div>"
+        f"<p class='small muted' style='margin:10px 0 0'>{escape(caption)}</p>"
+    )
+
+
+def _trade_table(account: Mapping[str, Any], page: int) -> tuple[str, int]:
+    trades = list(account.get("trades") or ())
+    rows = []
+    for trade in reversed(_page_of(trades, page)):
+        net = trade.get("net")
+        costs = "known" if trade.get("costs_complete") else "incomplete"
+        candidate = str(trade.get("candidate_id") or "")
+        facts = guide._candidate_facts(candidate)
+        strategy = facts.get("family") or candidate or "—"
+        rows.append(
+            (
+                escape(str(trade.get("symbol") or "")),
+                f"{escape(strategy)}"
+                + (
+                    f"<br><span class='small muted mono'>{escape(candidate)}</span>"
+                    if facts.get("family") and candidate
+                    else ""
+                ),
+                escape(str(trade.get("side") or "")),
+                escape(str(trade.get("lots") or "")),
+                escape(str(trade.get("entry_at") or "")[:16].replace("T", " ")),
+                escape(price(trade.get("entry_price"))),
+                escape(str(trade.get("exit_at") or "")[:16].replace("T", " ")),
+                escape(price(trade.get("exit_price"))),
+                escape(str(trade.get("reason") or "").replace("_", " ").lower())
+                + (
+                    " <span class='small muted'>· filled at a level</span>"
+                    if str(trade.get("exit_basis")) == "LEVEL"
+                    else " <span class='small muted'>· filled on the spread</span>"
+                ),
+                escape(money(trade.get("gross"), str(trade.get("currency") or ""))),
+                escape(
+                    "—" if net is None else money(net, str(trade.get("currency") or ""))
+                ),
+                f"{chip(costs, 'ok' if trade.get('costs_complete') else 'warn')}",
+            )
+        )
+    body = table(
+        "Closed paper trades, newest first (simulated fills)",
+        (
+            ("Symbol", "text"),
+            ("Strategy", "text"),
+            ("Side", "text"),
+            ("Lots", "num"),
+            ("Entry time (UTC)", "text"),
+            ("Entry", "num"),
+            ("Exit time (UTC)", "text"),
+            ("Exit", "num"),
+            ("Closed by", "text"),
+            ("Price P&L", "num"),
+            ("Net after costs", "num"),
+            ("Costs", "text"),
+        ),
+        rows,
+        empty=empty_state(
+            "No closed paper trades yet",
+            "A trade appears here only after the paper test has opened and closed one. "
+            "Nothing is simulated for display.",
+        ),
+    )
+    return body, len(trades)
+
+
+def _costs_card(account: Mapping[str, Any]) -> str:
+    costs = dict(account.get("costs") or {})
+    missing = [str(item) for item in (costs.get("missing") or ())]
+    modelled = [str(item).replace("_", " ") for item in (costs.get("modelled") or ())]
+    body = dl(
+        [
+            (
+                "In the fill prices",
+                escape(", ".join(modelled) or "nothing recorded"),
+            ),
+            (
+                "Not simulated at all",
+                escape(", ".join(str(item) for item in (costs.get("not_modelled") or ())) or "—"),
+            ),
+            (
+                "Status",
+                chip("cost-complete", "ok")
+                if costs.get("complete")
+                else chip("cost-incomplete", "warn"),
+            ),
+            ("Why not", escape("; ".join(missing)) if missing else "every cost is known"),
+        ]
+    )
+    return card(
+        "What the P&L does and does not include",
+        body
+        + "<p class='small muted' style='margin:10px 0 0'>"
+        + escape(str(costs.get("note") or ""))
+        + "</p>",
+        hint="A net figure is only shown when every part of it is known.",
+    )
+
+
+def _definitions_card(account: Mapping[str, Any]) -> str:
+    """Every figure on the page, with the sentence that defines it.
+
+    The rows are built from the same metric dictionaries the tiles are built from,
+    so a definition can never describe a different number than the one shown.
+    """
+
+    metrics = [dict(item) for item in (account.get("metrics") or ())]
+    rows = [
+        (escape(str(item.get("label") or "")), escape(str(item.get("definition") or "")))
+        for item in metrics
+        if item.get("definition")
+    ]
+    if not rows:
+        return ""
+    return card(
+        "What each figure means",
+        table("Definitions used on this page", (("Metric", "text"), ("Definition", "text")), rows),
+        flush=True,
+        hint="The same definitions are used on the dashboard, so the numbers cannot drift apart.",
+    )
+
+
+def render_performance(ctx: PageContext) -> str:
+    """Paper performance and capital: paper ledger only, never the broker account."""
+
+    account = _account(ctx)
+    trade_page = _query_page(ctx, "trades")
+    capital = dict(account.get("capital") or {})
+    currency = str(account.get("currency") or "")
+    session = dict(account.get("session") or {})
+    trading = dict(account.get("trading") or {})
+    counts = dict(account.get("counts") or {})
+
+    header = (
+        "<div class='headline-row'>"
+        "<div><h2 style='margin:0;font-size:20px'>Paper performance</h2>"
+        "<p class='small muted' style='margin:2px 0 0'>"
+        f"Source: {escape(str(account.get('source') or 'durable paper ledger'))} · "
+        f"read {escape(_utc(account.get('read_at')))} · "
+        f"last ledger update {escape(_utc(account.get('latest_update')))}"
+        "</p></div>"
+        "<div class='spacer'></div>"
+        f"{_session_freshness_chip(account)}"
+        + (
+            chip(f"SESSION {session.get('status') or 'NOT RUNNING'}", "paper" if session.get("running") else "muted")
+        )
+        + "</div>"
+    )
+
+    metrics = account.get("metrics") or []
+    metric_html = "<div class='metric-grid'>" + "".join(
+        "<div class='metric metric--{tone}'><div class='m-label'>{label}</div>"
+        "<div class='m-value{pna}'>{value}</div>"
+        "<div class='m-note'>{note}</div>"
+        "<div class='m-def'>{definition}</div></div>".format(
+            tone=str(item.get("tone") or "flat"),
+            label=escape(str(item.get("label") or "")),
+            pna="" if item.get("available") else " is-na",
+            value=escape(str(item.get("value") or "Unavailable")),
+            note=escape(str(item.get("note") or "")),
+            definition=escape(str(item.get("definition") or "")),
+        )
+        for item in metrics
+    ) + "</div>"
+
+    positions = list(account.get("positions") or ())
+    position_rows = [
+        (
+            escape(str(item.get("symbol") or "")),
+            escape(str(item.get("side") or "")),
+            escape(str(item.get("lots") or "")),
+            escape(str(item.get("entry_at") or "")[:16].replace("T", " ")),
+            escape(price(item.get("entry_price"))),
+            f"{escape(str(item.get('mark_side') or ''))} {escape(price(item.get('mark')))}"
+            + (
+                ""
+                if item.get("mark_fresh")
+                else f" {chip(str(item.get('mark_age_text') or 'stale'), 'warn')}"
+            ),
+            escape(
+                "—"
+                if item.get("unrealized_gross") is None
+                else money(item.get("unrealized_gross"), str(item.get("currency") or ""))
+            ),
+            escape(str(item.get("unavailable_reason") or "") or "marked"),
+        )
+        for item in positions
+    ]
+
+    trade_body, trade_total = _trade_table(account, trade_page)
+
+    body = (
+        header
+        + _account_alerts(account)
+        + _paper_vs_live_strip(ctx)
+        + _capital_setup_card(ctx, account)
         + card(
-            "About this ledger",
-            "<p class='small muted' style='margin:0'>Fills come from the offline paper engine. "
-            "They are simulated, are not broker confirmations, and are labelled with their "
-            "data class throughout.</p>",
+            "Capital and P&L (paper only)",
+            metric_html,
+            hint=(
+                f"Local simulated capital in {escape(currency or 'an unset currency')}. "
+                "The connected broker account's balance and equity are never read into "
+                "these figures."
+            ),
+            right=chip("PAPER", "paper", dot=True),
+        )
+        + "<div class='grid grid--two'>"
+        + card(
+            "Equity and P&L over time",
+            _equity_chart(account),
+            hint="One point per UTC day that closed a paper trade.",
+        )
+        + "<div class='grid'>"
+        + _costs_card(account)
+        + card(
+            "Open paper positions",
+            table(
+                "Every open paper position, with its mark and the side it would close at",
+                (
+                    ("Symbol", "text"),
+                    ("Side", "text"),
+                    ("Lots", "num"),
+                    ("Opened (UTC)", "text"),
+                    ("Entry", "num"),
+                    ("Mark (closing side)", "num"),
+                    ("Unrealised", "num"),
+                    ("Status", "text"),
+                ),
+                position_rows,
+                empty=empty_state(
+                    "No open paper positions",
+                    "The paper ledger is flat. Positions appear only from simulated fills.",
+                ),
+            ),
+            flush=True,
+            right=chip(f"{counts.get('open_positions', 0)} open", "paper"),
+        )
+        + "</div></div>"
+        + card(
+            "Trade history",
+            trade_body
+            + _pager(
+                ctx, page=trade_page, total=trade_total, label="closed trades", param="trades"
+            )
+            + f"<p class='small muted' style='margin:8px 0 0'>Entry and exit prices are the "
+            "simulated fill prices; the exit basis says whether that leg filled on the "
+            "spread or at a stop/target level.</p>",
+            hint="Complete list. Every row is a locally simulated fill on a terminal quote.",
+            right=chip(f"{trade_total} trade(s)", "paper"),
+        )
+        + _definitions_card(account)
+        + card(
+            "Where these numbers come from",
+            dl(
+                [
+                    ("Data source", escape(str(account.get("source") or "durable paper ledger"))),
+                    ("Ledger file", f"<span class='mono'>{escape(str(account.get('ledger_path') or 'not found'))}</span>"),
+                    ("State file", f"<span class='mono'>{escape(str(account.get('state_path') or 'not found'))}</span>"),
+                    ("Latest ledger update", escape(_utc(account.get("latest_update")))),
+                    ("Latest quote", escape(_utc(account.get("latest_quote_at")))),
+                    (
+                        "Trading decisions",
+                        (
+                            f"{chip('PAUSED', 'warn', dot=True)} "
+                            f"<span class='small muted'>{escape(str(trading.get('reason') or ''))}</span>"
+                        )
+                        if trading.get("paused")
+                        else chip("CAN TAKE DECISIONS", "ok", dot=True),
+                    ),
+                    ("Allowed quote age", escape(f"{session.get('max_quote_age_seconds', '—')} s")),
+                    (
+                        "Broker account",
+                        "Not read, not used, and never mixed into a paper figure.",
+                    ),
+                ]
+            )
+            + "<p class='small muted' style='margin:10px 0 0'>"
+            + escape(str(account.get("claim") or ""))
+            + "</p>",
         )
     )
     return render_shell(ctx, body)
 
 
+def render_positions(ctx: PageContext) -> str:
+    """Every open paper position and every closed trade, from the one ledger read."""
+
+    account = _account(ctx)
+    page = _query_page(ctx)
+    trade_page = _query_page(ctx, "trades")
+    positions = list(account.get("positions") or ())
+    counts = dict(account.get("counts") or {})
+    grouped: dict[str, int] = {}
+    for item in positions:
+        grouped[str(item.get("symbol") or "")] = grouped.get(str(item.get("symbol") or ""), 0) + 1
+    grouped_text = ", ".join(f"{name} ×{number}" for name, number in sorted(grouped.items()))
+    rows = []
+    for item in _page_of(sorted(positions, key=lambda entry: str(entry.get("symbol") or "")), page):
+        rows.append(
+            (
+                escape(str(item.get("symbol") or "")),
+                escape(str(item.get("side") or "")),
+                escape(str(item.get("lots") or "")),
+                escape(str(item.get("entry_at") or "")[:16].replace("T", " ")),
+                escape(price(item.get("entry_price"))),
+                escape(str(item.get("stop") if item.get("stop") is not None else "—")),
+                escape(str(item.get("target") if item.get("target") is not None else "—")),
+                f"{escape(str(item.get('mark_side') or ''))} {escape(price(item.get('mark')))}",
+                escape(
+                    "—"
+                    if item.get("unrealized_gross") is None
+                    else money(item.get("unrealized_gross"), str(item.get("currency") or ""))
+                ),
+                escape(str(item.get("unavailable_reason") or "") or "marked from a fresh quote"),
+            )
+        )
+    positions_body = (
+        table(
+            "Every open paper position, priced at the side it would close on",
+            (
+                ("Symbol", "text"),
+                ("Side", "text"),
+                ("Lots", "num"),
+                ("Opened (UTC)", "text"),
+                ("Entry", "num"),
+                ("Stop", "num"),
+                ("Target", "num"),
+                ("Mark (closing side)", "num"),
+                ("Unrealised", "num"),
+                ("Status", "text"),
+            ),
+            rows,
+            empty=empty_state(
+                "No open paper positions",
+                "The paper ledger is flat. A position appears here only after a simulated "
+                "fill; this screen cannot open, change or close one.",
+            ),
+        )
+        + _pager(ctx, page=page, total=len(positions), label="open positions")
+    )
+    trade_body, trade_total = _trade_table(account, trade_page)
+
+    body = (
+        _account_alerts(account)
+        + _paper_vs_live_strip(ctx)
+        + _freshness_row(account)
+        + card(
+            "Open paper positions",
+            positions_body,
+            hint=(
+                (f"{len(positions)} open across {len(grouped)} symbol(s): {grouped_text}.")
+                if positions
+                else "Nothing open."
+            ),
+            right=chip(f"{counts.get('open_positions', 0)} open", "paper"),
+            flush=True,
+        )
+        + card(
+            "Closed paper trades",
+            trade_body
+            + _pager(
+                ctx, page=trade_page, total=trade_total, label="closed trades", param="trades"
+            ),
+            hint="Every close event in the ledger, newest first. Simulated fills only.",
+            right=chip(f"{trade_total} trade(s)", "paper"),
+            flush=True,
+        )
+        + _runner_card(ctx)
+        + card(
+            "About this ledger",
+            "<p class='small muted' style='margin:0'>Fills come from the paper test's own "
+            "ledger file. They are simulated, are not broker confirmations, and are labelled "
+            "with their data class throughout. The paper strategy runner's card on this page "
+            "keeps its own separate book; it is labelled as such, and its counters are not "
+            "mixed into the figures above.</p>",
+        )
+    )
+    return render_shell(ctx, body)
+
+
+#: What each ledger event kind means, for the activity page.
+_EVENT_LABELS = {
+    "simulated_fill": ("Entry fill", "paper"),
+    "simulated_close": ("Exit fill", "paper"),
+    "stale_quote": ("Stale quote skipped", "warn"),
+    "market_closed": ("Market closed", "warn"),
+    "signal": ("Signal", "muted"),
+    "signal_skipped": ("Signal skipped", "warn"),
+    "waiting_for_history": ("Waiting for history", "muted"),
+    "position_restored": ("Position restored", "muted"),
+    "paper_test_started": ("Session started", "ok"),
+    "paper_test_stopped": ("Session stopped", "muted"),
+}
+
+
 def render_activity(ctx: PageContext) -> str:
-    events = list(ctx.paper.activity)
-    rows = [
+    account = _account(ctx)
+    page = _query_page(ctx)
+    events = list(account.get("events") or ())
+    rows = []
+    for event in reversed(_page_of(events, page)):
+        label, tone = _EVENT_LABELS.get(
+            str(event.get("kind") or ""), (str(event.get("kind") or "event"), "muted")
+        )
+        rows.append(
+            (
+                escape(str(event.get("at") or "")[:19].replace("T", " ")),
+                f"{chip(label, tone)}",
+                escape(str(event.get("symbol") or "—")),
+                escape(str(event.get("reason") or "—")),
+                escape(str(event.get("detail") or "")),
+            )
+        )
+    audit = list(ctx.paper.activity)
+    audit_rows = [
         (
             escape(str(event.get("recorded_at", ""))[:19]),
             escape(str(event.get("event_type", ""))),
             escape(str(event.get("mode", ""))),
             escape("allowed" if event.get("allowed") else ("refused" if event.get("allowed") is False else "—")),
         )
-        for event in events
+        for event in audit
     ]
+    truncated = int(account.get("events_truncated") or 0)
     body = (
-        notice(
-            "ok",
-            "Sanitized audit trail",
-            "Credential-shaped fields are redacted before they reach this page.",
+        _account_alerts(account, include_capital=False)
+        + _paper_vs_live_strip(ctx)
+        + _freshness_row(account)
+        + card(
+            "Paper ledger timeline",
+            table(
+                "Every event in the paper ledger, newest first",
+                (
+                    ("When (UTC)", "text"),
+                    ("Event", "text"),
+                    ("Symbol", "text"),
+                    ("Reason", "text"),
+                    ("Detail", "text"),
+                ),
+                rows,
+                empty=empty_state(
+                    "The paper ledger is empty",
+                    "Once the paper session runs, each cycle's decision, stale-quote skip, "
+                    "simulated fill and close is written here.",
+                ),
+            )
+            + _pager(ctx, page=page, total=len(events), label="events")
+            + (
+                f"<p class='small muted' style='margin:8px 0 0'>Showing the most recent "
+                f"{len(events):,} of {int(account.get('events_total') or 0):,} events "
+                f"({truncated:,} older ones are on disk but not paged here).</p>"
+                if truncated
+                else ""
+            ),
+            hint="Read from the same ledger file the performance page uses.",
+            right=chip(f"{int(account.get('events_total') or 0):,} events", "paper"),
+            flush=True,
         )
         + card(
-            "Recent events",
+            "Platform audit trail",
             table(
                 "Audit events, newest first",
                 (("When", "text"), ("Event", "text"), ("Mode", "text"), ("Outcome", "text")),
-                rows,
+                audit_rows,
                 empty=empty_state("No audit events yet", "Run the offline paper workflow to create some."),
             ),
             right=data_chip(ctx.paper_label),
             flush=True,
+            hint="Sanitized; credential-shaped fields are redacted before they reach this page.",
         )
         + _runner_card(ctx)
     )
@@ -3581,7 +4558,18 @@ def render_live(ctx: PageContext) -> str:
     candidates = [dict(item) for item in view.get("candidates") or []]
     symbols = [str(item) for item in view.get("symbols") or []]
 
-    body = [live_status_banner(ctx)]
+    body = [
+        live_status_banner(ctx),
+        # The warning that has to come before anything on this page is used: it
+        # states the consequence, the default, and what this page cannot do.
+        "<div class='warning-banner' role='alert'><strong>Before you use this page</strong>"
+        "<p>Everything here acts on a <em>real</em> MetaTrader 5 account. Paper mode is the "
+        "default and nothing on this page changes that by itself. Arming writes a plan and "
+        "authorises the adapter without sending anything; starting a session can send a real "
+        "order on the next strategy signal. No button here connects, signs in, switches "
+        "account, or edits your broker settings, and none of these settings is changed by "
+        "anything on the paper pages.</p></div>",
+    ]
 
     if not configured:
         body.append(
@@ -5889,7 +6877,7 @@ def render_catalog_section(ctx: PageContext) -> str:
     if orders:
         body.append(
             table(
-                "Simulated orders and fills",
+                "Simulated entry fills from this session (the newest ten)",
                 (
                     ("key", "Row"),
                     ("direction", "Side"),
@@ -7275,9 +8263,9 @@ def render_autopilot(ctx: PageContext) -> str:
         fills = [dict(item) for item in (paper.get("fills") or [])]
         body.append(
             card(
-                "Simulated orders and fills",
+                "Simulated fills from this session",
                 table(
-                    "Simulated entries",
+                    "Entry fills",
                     (
                         ("at", "At"),
                         ("symbol", "Symbol"),
@@ -7300,14 +8288,14 @@ def render_autopilot(ctx: PageContext) -> str:
                     empty="No simulated entry yet.",
                 )
                 + table(
-                    "Simulated closes, with the simulated result in the quote currency",
+                    "Exit fills (closed trades), with the price P&L in the quote currency",
                     (
                         ("at", "At"),
                         ("symbol", "Symbol"),
                         ("direction", "Side"),
                         ("entry_price", "Entry"),
                         ("exit_price", "Exit"),
-                        ("simulated_net_quote", "Simulated net (quote ccy)"),
+                        ("simulated_net_quote", "Price P&L (before costs)"),
                         ("simulated_mid_move_pips", "Mid move (pips)"),
                         ("reason", "Reason"),
                     ),
@@ -7440,6 +8428,7 @@ def render_autopilot(ctx: PageContext) -> str:
 
 PAGES = {
     "start": render_start,
+    "performance": render_performance,
     "autopilot": render_autopilot,
     "overview": render_overview,
     "mode": render_mode,
@@ -7482,6 +8471,7 @@ __all__ = [
     "render_mode",
     "render_overview",
     "render_page",
+    "render_performance",
     "render_positions",
     "render_setup",
     "render_shell",

@@ -21,7 +21,7 @@ here can place an order, change the execution mode, or start a live session.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 #: Step states.  ``next`` is the one the operator should do; ``blocked`` needs
 #: something else first; ``running`` is in progress; ``unavailable`` means this
@@ -171,7 +171,9 @@ def _age_words(seconds: Any) -> str:
 
 
 def _paper_state(
-    paper: Mapping[str, Any], runner: Mapping[str, Any]
+    paper: Mapping[str, Any],
+    runner: Mapping[str, Any],
+    account: Mapping[str, Any] | None = None,
 ) -> tuple[str, str, str, tuple[str, ...]]:
     """The paper session's state, as (state, status text, detail, blockers).
 
@@ -190,11 +192,22 @@ def _paper_state(
     )
     if running:
         cycles = dict(snapshot.get("stats") or {})
-        detail = (
-            f"Following {len(snapshot.get('watches') or ())} screened row(s) · "
-            f"{cycles.get('cycles', 0)} cycle(s), {cycles.get('signals', 0)} signal(s), "
-            f"{cycles.get('fills', 0)} simulated fill(s)."
-        )
+        counts = dict((account or {}).get("counts") or {})
+        if counts:
+            # The ledger's own totals: the same figures the performance page shows.
+            # The loop's in-memory counters describe one run and are not quoted here.
+            detail = (
+                f"Following {len(snapshot.get('watches') or ())} screened row(s) · "
+                f"{counts.get('entry_fills', 0)} entry fill(s), "
+                f"{counts.get('closed_trades', 0)} closed trade(s) in the ledger "
+                f"({cycles.get('cycles', 0)} cycle(s) this run)."
+            )
+        else:
+            detail = (
+                f"Following {len(snapshot.get('watches') or ())} screened row(s) · "
+                f"{cycles.get('cycles', 0)} cycle(s), {cycles.get('signals', 0)} signal(s), "
+                f"{cycles.get('fills', 0)} simulated fill(s)."
+            )
         return RUNNING, "RUNNING", detail, ()
     if bool(runner.get("running")) and str(runner.get("state", "")).upper() in {"RUNNING"}:
         return (
@@ -284,6 +297,145 @@ def _market_data(
     return "NO HISTORY", "warn", str(data_check.get("message") or "No usable history yet.")
 
 
+#: How many grouped symbols the open-positions tile names before it says, in so
+#: many words, that the rest are on their own page.  The count above it is always
+#: the full count; this only bounds the sentence.
+MAX_TILE_SYMBOLS = 12
+
+
+def _account_market_data(account: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Freshness of the quotes the paper session is following, judged now.
+
+    The age is computed by the accounting read against the clock at the moment the
+    page was built, from each quote's own timestamp.  Nothing here re-uses a
+    verdict from an earlier render.
+    """
+
+    quotes = [dict(item) for item in (account.get("quotes") or ()) if isinstance(item, Mapping)]
+    trading = dict(account.get("trading") or {})
+    allowance = account.get("session", {}).get("max_quote_age_seconds") or ""
+    if not quotes:
+        return (
+            "NO QUOTE YET",
+            "warn",
+            "No quote has been read yet, so no price can be shown and no decision can be made.",
+        )
+    fresh = [item for item in quotes if item.get("fresh")]
+    tone = "ok" if len(fresh) == len(quotes) else "warn"
+    label = "FRESH" if tone == "ok" else ("STALE · PAUSED" if trading.get("paused") else "STALE")
+    newest = max(
+        (item for item in quotes if item.get("quote_time")),
+        key=lambda item: str(item.get("quote_time")),
+        default={},
+    )
+    detail = (
+        f"{len(fresh)}/{len(quotes)} quote(s) inside the "
+        f"{allowance or 'declared'} s limit · newest quote "
+        f"{str(newest.get('quote_time') or 'unknown')[:19].replace('T', ' ')} UTC"
+        + (f" ({newest.get('age_text')})" if newest.get("age_text") else "")
+    )
+    if trading.get("paused"):
+        detail = f"{detail}. Trading decisions are paused: {trading.get('reason')}."
+    return label, tone, detail
+
+
+def _order_tile(
+    account: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    latest_order: Mapping[str, Any] | None,
+    latest_fill: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Simulated orders and fills, from one count.
+
+    An entry that opened a position *is* a fill.  This tile says so by deriving
+    both halves of its sentence from the same number, instead of counting entry
+    events as "orders" and close events as "filled" -- which is exactly how "5
+    orders, 0 filled" used to appear beside five entries.
+    """
+
+    counts = dict(account.get("counts") or {}) if account else {}
+    if counts:
+        orders = int(counts.get("orders") or 0)
+        entries = int(counts.get("entry_fills") or 0)
+        exits = int(counts.get("exit_fills") or 0)
+        return {
+            "key": "order",
+            "label": "Simulated orders and fills",
+            "value": f"{orders} filled",
+            "tone": "paper" if orders else "muted",
+            "detail": (
+                f"{entries} entry fill(s) and {exits} exit fill(s) · every paper order "
+                "fills where it is priced, and no order was sent to a broker."
+                if orders
+                else "No paper order has filled yet. Locally simulated only."
+            ),
+        }
+    entries = len(snapshot.get("entry_fills") or snapshot.get("orders") or ())
+    exits = len(snapshot.get("exit_fills") or snapshot.get("fills") or ())
+    total = entries + exits
+    return {
+        "key": "order",
+        "label": "Simulated orders and fills",
+        "value": f"{total} filled" if snapshot else "None yet",
+        "tone": "paper" if total else "muted",
+        "detail": (
+            f"{entries} entry fill(s) and {exits} exit fill(s) · locally simulated, "
+            "no order sent to a broker."
+            if total or latest_order or latest_fill
+            else "Paper fills appear here once a signal fires."
+        ),
+    }
+
+
+def _position_detail(positions: Sequence[Mapping[str, Any]]) -> str:
+    """Every open position, grouped by symbol and side."""
+
+    if not positions:
+        return "Nothing open."
+    grouped: dict[tuple[str, str], int] = {}
+    for item in positions:
+        key = (str(item.get("symbol") or ""), str(item.get("side") or ""))
+        grouped[key] = grouped.get(key, 0) + 1
+    parts = [
+        f"{symbol} {side}" + (f" ×{lots}" if lots > 1 else "")
+        for (symbol, side), lots in sorted(grouped.items())
+    ]
+    shown = parts[:MAX_TILE_SYMBOLS]
+    extra = len(parts) - len(shown)
+    return ", ".join(shown) + (
+        f" — and {extra} more (see Paper positions)" if extra > 0 else ""
+    )
+
+
+def _performance_tile(account: Mapping[str, Any]) -> dict[str, Any]:
+    """The paper P&L, in the same words the performance page uses."""
+
+    if not account or not account.get("metric_by_key"):
+        return {
+            "key": "performance",
+            "label": "Paper P&L",
+            "value": "No ledger yet",
+            "tone": "muted",
+            "detail": "Open Paper performance once the paper session has filled something.",
+        }
+    metrics = dict(account.get("metric_by_key") or {})
+    equity = dict(metrics.get("equity") or {})
+    realized = dict(metrics.get("realized_gross") or {})
+    unrealized = dict(metrics.get("unrealized_gross") or {})
+    net = dict(metrics.get("net_pnl") or {})
+    return {
+        "key": "performance",
+        "label": "Paper P&L",
+        "value": str(equity.get("value") or "—"),
+        "tone": "paper",
+        "detail": (
+            f"Realised {realized.get('value', '—')} · unrealised "
+            f"{unrealized.get('value', '—')} · net after costs {net.get('value', '—')} "
+            "· paper ledger only, never the broker account."
+        ),
+    }
+
+
 def build(
     *,
     terminal: Any,
@@ -292,15 +444,23 @@ def build(
     catalog: Mapping[str, Any],
     data_check: Mapping[str, Any],
     runner: Mapping[str, Any] | None = None,
+    account: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the guided start model from read-only views.
 
     ``symbols`` carries what the symbol pages already computed -- whether the
     terminal reported symbols at all, how many, and how many could be selected in
     one click -- so this page never re-walks the terminal on its own.
+
+    ``account`` is the workstation's paper-account reading (see
+    :mod:`axiom_forex.paper_runner.accounting`).  When it is supplied, every
+    count, position, P&L figure and quote age on this page comes from it and from
+    nowhere else -- that is what stops the summary disagreeing with the
+    performance page.
     """
 
     selected = _selected(wizard_view)
+    account_view = dict(account or {})
     runner_view = dict(runner or {})
     catalog = dict(catalog or {})
     data_check = dict(data_check or {})
@@ -607,7 +767,9 @@ def build(
         )
 
     # 5 -- the paper session ----------------------------------------------
-    paper_state, paper_status, paper_detail, paper_blockers = _paper_state(paper, runner_view)
+    paper_state, paper_status, paper_detail, paper_blockers = _paper_state(
+        paper, runner_view, account_view
+    )
     if paper_set:
         # Nothing has been built yet on this page, so "build the test first" is not
         # a reason the operator is blocked: the button below builds and starts it.
@@ -702,11 +864,22 @@ def build(
             else "Every step is complete; press Start PAPER trading."
         )
 
-    data_label, data_tone, data_detail = _market_data(paper, data_check)
+    if account_view:
+        data_label, data_tone, data_detail = _account_market_data(account_view)
+    else:
+        data_label, data_tone, data_detail = _market_data(paper, data_check)
     latest_signal = _first(snapshot.get("signals"))
     latest_order = _first(snapshot.get("orders"))
     latest_fill = _first(snapshot.get("fills"))
-    positions = [dict(item) for item in (snapshot.get("positions") or ()) if isinstance(item, Mapping)]
+    positions = (
+        [dict(item) for item in (account_view.get("positions") or ()) if isinstance(item, Mapping)]
+        if account_view
+        else [
+            dict(item)
+            for item in (snapshot.get("positions") or ())
+            if isinstance(item, Mapping)
+        ]
+    )
     strategy_ids = sorted({str(row.get("candidate_id") or "") for row in paper_set} - {""})
     strategy_names = sorted(
         {
@@ -790,35 +963,17 @@ def build(
                     else "The session records a decision for every cycle."
                 ),
             },
-            {
-                "key": "order",
-                "label": "Simulated orders and fills",
-                "value": (
-                    f"{len(snapshot.get('orders') or ())} order(s) · "
-                    f"{len(snapshot.get('fills') or ())} filled"
-                    if snapshot
-                    else "None yet"
-                ),
-                "tone": "paper" if latest_order or latest_fill else "muted",
-                "detail": (
-                    "Locally simulated. No order was sent to a broker."
-                    if latest_order or latest_fill
-                    else "Paper fills appear here once a signal fires."
-                ),
-            },
+            _order_tile(account_view, snapshot, latest_order, latest_fill),
             {
                 "key": "positions",
                 "label": "Open paper positions",
                 "value": str(len(positions)),
                 "tone": "paper" if positions else "muted",
-                "detail": (
-                    ", ".join(
-                        f"{item.get('symbol', '')} {item.get('side', '')}".strip()
-                        for item in positions[:4]
-                    )
-                    or "Nothing open."
-                ),
+                # Every position, grouped by symbol: the count and the names are
+                # the same list, so "10 open" can never sit beside four names.
+                "detail": _position_detail(positions),
             },
+            _performance_tile(account_view),
         ],
         "steps_done": sum(1 for step in steps if step.complete),
         "steps_total": len(steps),

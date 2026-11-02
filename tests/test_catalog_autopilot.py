@@ -428,7 +428,9 @@ def test_a_required_forecast_that_is_missing_refuses_and_says_why():
 
 def test_an_opposing_forecast_can_only_veto_the_entry():
     forecast = _falling_forecast()
-    gate = KronosGate(mode=KRONOS_VETO, provider=lambda symbol, timeframe: forecast)
+    gate = KronosGate(
+        mode=KRONOS_VETO, provider=lambda symbol, timeframe: forecast, clock=lambda: NOW
+    )
     long_verdict = gate.confirm("EURUSD.pro", TIMEFRAME, 1)
     short_verdict = gate.confirm("EURUSD.pro", TIMEFRAME, -1)
     assert long_verdict.allowed is False
@@ -463,7 +465,14 @@ def test_a_vetoed_signal_is_recorded_in_the_paper_ledger(tmp_path):
         lambda boundaries: [
             _passing_row(boundaries[("EURUSD.pro", TIMEFRAME)] - timedelta(hours=1), candidate_id)
         ],
-        gate=KronosGate(mode=KRONOS_VETO, provider=lambda symbol, timeframe: _falling_forecast()),
+        # The clock is pinned to the fixture's own instant: a forecast is judged
+        # against the time it was made, and a wall clock would make this test
+        # pass or fail depending on the day it runs.
+        gate=KronosGate(
+            mode=KRONOS_VETO,
+            provider=lambda symbol, timeframe: _falling_forecast(),
+            clock=lambda: NOW,
+        ),
     )
     try:
         paper = autopilot._paper

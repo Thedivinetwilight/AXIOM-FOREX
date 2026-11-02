@@ -59,6 +59,9 @@ REASON_NO_FACTS = "symbol_facts_unavailable"
 REASON_TIMEFRAME = "timeframe_not_offered_by_candidate"
 REASON_TOO_MANY = "too_many_watches"
 REASON_LEDGER = "ledger_not_writable"
+#: A stored paper position cannot be continued exactly.  Starting is refused
+#: rather than resumed with a substituted zero or an invented stop.
+REASON_STATE_RECOVERY = "paper_state_incomplete"
 
 # -- events -----------------------------------------------------------------
 EVENT_STARTED = "paper_test_started"
@@ -69,8 +72,17 @@ EVENT_SIGNAL = "signal"
 EVENT_SIGNAL_SKIPPED = "signal_skipped"
 EVENT_STALE = "stale_quote"
 EVENT_CLOSED = "simulated_close"
+#: A *note* that a close happened, kept out of the close-event kind on purpose.
+#: Writing the summary under the same kind as the priced close made the ledger
+#: contain two "simulated_close" entries per trade -- one with both prices and one
+#: without -- which is exactly how a ledger starts counting a trade twice.
+EVENT_CLOSE_RECORDED = "close_recorded"
 EVENT_MARKET = "market_closed"
 EVENT_RESTORED = "position_restored"
+#: A stored position was resumed from an older schema with a *stated* derivation.
+EVENT_MIGRATED = "state_migrated"
+#: A stored position could not be resumed; the run stays blocked.
+EVENT_RECOVERY_FAILED = "state_recovery_failed"
 
 #: Exit reasons a locally simulated fill can carry.
 EXIT_SIGNAL = "SIGNAL_EXIT"
@@ -80,6 +92,15 @@ EXIT_TARGET = "TARGET"
 EXIT_TRAIL = "TRAILING_STOP"
 EXIT_TIME = "TIME_EXIT"
 EXIT_OPERATOR = "OPERATOR_FLAT"
+
+#: How the price of a simulated close was arrived at.  ``BID_ASK`` means the
+#: closing side of the spread was used and the modelled slippage was applied;
+#: ``LEVEL`` means a stop, trailing stop or target level was touched, so no
+#: spread and no slippage were applied to that leg.  The distinction is written
+#: into the ledger because it decides what the P&L figure does and does not
+#: include.
+BASIS_BID_ASK = "BID_ASK"
+BASIS_LEVEL = "LEVEL"
 
 #: The freshness allowance.  A quote older than this is not a price to trade on.
 DEFAULT_MAX_QUOTE_AGE_SECONDS = 120.0
@@ -102,6 +123,16 @@ STATE_NAME = "catalog-paper-state.json"
 
 NUMBER_OF_LEDGER_EVENTS = 60
 
+#: The state document's schema version.
+#:
+#: Version 2 records every field the exit logic reads -- the ATR the trailing stop
+#: is measured in, the bar index the trail trigger compares against, the initial
+#: and active stop/target/trail, and the trailing extreme -- so a restart resumes
+#: a position *exactly*.  Version 1 records (written by the first build) omitted
+#: all of them, which is how a restart could change an exit: ``atr=0.0`` alone
+#: silently disabled the trailing stop.
+STATE_VERSION = 2
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -109,6 +140,28 @@ def _utc_now() -> datetime:
 
 def _iso(value: datetime | None) -> str:
     return value.isoformat() if value is not None else ""
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """One stored timestamp, as an aware datetime, or ``None``.
+
+    Every instant this module writes is ISO-8601 UTC.  A value it cannot parse
+    is treated as absent: an unreadable time is not a reason to call a quote
+    fresh.
+    """
+
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _decimal(value: Any) -> float | None:
@@ -125,6 +178,22 @@ def _finite_positive(value: Any) -> bool:
 
     number = _decimal(value)
     return number is not None and math.isfinite(number) and number > 0
+
+
+def _state_number(value: Any) -> float | None:
+    """One stored number, or ``None`` when it is absent or not a usable number.
+
+    A missing field and a corrupt field are the same answer here -- "not known" --
+    because both mean the record cannot be resumed from its own contents.  Booleans
+    are refused: ``True`` is not a price.
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+    number = _decimal(value)
+    if number is None or not math.isfinite(number):
+        return None
+    return number
 
 
 @dataclass(frozen=True)
@@ -184,6 +253,66 @@ class Position:
     notional_quote: float
     bar_index: int
     restored: bool = False
+    #: The levels the position opened with, before any trailing ratchet.  Kept so
+    #: a resumed position can be checked against the record it came from, and so
+    #: the page can say what the trade was *meant* to risk.
+    stop_initial: float | None = None
+    target_initial: float | None = None
+    trail_initial: float | None = None
+    #: The stamp of the completed bar the last decision in this position ran on.
+    bar_at: str = ""
+    #: True when this position was resumed from an older state schema; ``migration``
+    #: says exactly what was derived and why it cannot change an exit.
+    migrated: bool = False
+    migration: str = ""
+    #: The pair's quote (profit) currency and contract size, exactly as the
+    #: terminal reported them when the position was opened.  A money figure is
+    #: meaningless without its currency, and recovering these later would mean
+    #: asking a terminal that may no longer be connected -- or guessing.  They
+    #: travel with the position (and with its ledger events) instead.
+    quote_currency: str = ""
+    contract_size: float = 0.0
+
+    def state_view(self) -> dict[str, Any]:
+        """Everything the exit logic reads, in one document.
+
+        This is the state a restart resumes from.  It is deliberately wider than
+        :meth:`audit_view` (which is for a page): a page needs a readable summary,
+        whereas a restart needs every number the next ``_manage`` call will compare
+        a bar's high and low against.
+        """
+
+        return {
+            "state_version": STATE_VERSION,
+            "key": self.key,
+            "candidate_id": self.candidate_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "direction": "LONG" if self.direction > 0 else "SHORT",
+            "lots": self.lots,
+            "entry_at": self.entry_at,
+            "entry_price": self.entry_price,
+            "entry_mid": self.entry_mid,
+            # -- what the exit rules consume --------------------------------
+            "atr": self.atr,
+            "bar_index": self.bar_index,
+            "bar_at": self.bar_at,
+            "stop": self.stop,
+            "target": self.target,
+            "trail": self.trail,
+            "best": self.best,
+            "stop_initial": self.stop_initial,
+            "target_initial": self.target_initial,
+            "trail_initial": self.trail_initial,
+            "notional_quote": self.notional_quote,
+            "quote_currency": self.quote_currency,
+            "contract_size": self.contract_size,
+            "restored_after_restart": self.restored,
+            "migrated": self.migrated,
+            "migration": self.migration,
+            "priced_from": "BROKER_TICK",
+            "simulated": True,
+        }
 
     def audit_view(self) -> dict[str, Any]:
         return {
@@ -198,7 +327,19 @@ class Position:
             "stop": None if self.stop is None else round(self.stop, 8),
             "target": None if self.target is None else round(self.target, 8),
             "trail": None if self.trail is None else round(self.trail, 8),
+            "quote_currency": self.quote_currency,
+            "contract_size": self.contract_size,
             "restored_after_restart": self.restored,
+            # The management levels a reader needs to judge what a restart did.
+            "atr": self.atr,
+            "bar_index": self.bar_index,
+            "bar_at": self.bar_at,
+            "best": self.best,
+            "stop_initial": self.stop_initial,
+            "target_initial": self.target_initial,
+            "trail_initial": self.trail_initial,
+            "migrated": self.migrated,
+            "migration": self.migration,
             "priced_from": "BROKER_TICK",
             "simulated": True,
         }
@@ -344,6 +485,16 @@ class CatalogPaperTest:
         self._positions: dict[str, Position] = {}
         self._quotes_seen: dict[str, dict[str, Any]] = {}
         self._last_bar: dict[str, str] = {}
+        #: What the last state read said.  ``{"ok": True}`` until a read finds
+        #: something it cannot resume exactly.
+        self._recovery: dict[str, Any] = {
+            "ok": True,
+            "version": 0,
+            "restored": 0,
+            "migrated": 0,
+            "failed": [],
+            "detail": "",
+        }
         self._last_decision: dict[str, dict[str, Any]] = {}
         self._fills: list[dict[str, Any]] = []
         self._events: list[dict[str, Any]] = []
@@ -414,7 +565,33 @@ class CatalogPaperTest:
                     "detail": "The paper ledger directory could not be created.",
                 }
             )
+        if not self._recovery.get("ok", True):
+            found.append(self._recovery_blocker())
         return tuple(found)
+
+    def _recovery_blocker(self) -> dict[str, str]:
+        """The one sentence a page needs when a stored position cannot be resumed."""
+
+        failed = self._recovery.get("failed") or []
+        names = ", ".join(
+            f"{item.get('symbol') or item.get('key') or 'a position'} "
+            f"({item.get('reason') or 'incomplete state'})"
+            for item in failed[:4]
+        )
+        more = "" if len(failed) <= 4 else f", and {len(failed) - 4} more"
+        return {
+            "reason": REASON_STATE_RECOVERY,
+            "detail": (
+                "The paper test will not resume: a stored position cannot be "
+                "continued exactly, and it will not be continued with a substituted "
+                "value. "
+                + (f"{self._recovery.get('detail')}. " if self._recovery.get("detail") else "")
+                + (f"Affected: {names}{more}. " if names else "")
+                + "The state file has been left untouched. Review the paper ledger, "
+                "then either flatten with \"Simulate closing open positions\" or "
+                "restore the missing fields before starting again."
+            ),
+        }
 
     # -- lifecycle --------------------------------------------------------
 
@@ -441,13 +618,29 @@ class CatalogPaperTest:
                 self._blockers = blockers
                 self._reason = blockers[0]["reason"]
                 return {"started": False, "blockers": list(blockers), "status": self._status}
+            # Resume *before* claiming to run.  If any stored position cannot be
+            # resumed exactly, refuse to start: a position managed with a
+            # substituted ATR or stop would exit somewhere the uninterrupted run
+            # never would, and the ledger would record that as a trade.
+            recovery = self._restore_state()
+            if not recovery["ok"]:
+                self._status = BLOCKED
+                self._reason = REASON_STATE_RECOVERY
+                self._blockers = (self._recovery_blocker(),)
+                # The state file is left exactly as it was found: it is the
+                # evidence of what could not be resumed.
+                return {
+                    "started": False,
+                    "blockers": list(self._blockers),
+                    "status": self._status,
+                    "recovery": recovery,
+                }
             self._stop.clear()
             self._status = RUNNING
             self._reason = ""
             self._started_at = _iso(self._clock())
             self._stopped_at = ""
             self._blockers = ()
-            self._restore_state()
             self._write_state()
             self._record(EVENT_STARTED, {"watches": len(self._watches)})
             self._thread = threading.Thread(
@@ -591,10 +784,17 @@ class CatalogPaperTest:
             position = self._positions.get(watch.key)
             if position is not None:
                 position.bar_index = index
+                position.bar_at = _iso(series.timestamps[index])
                 closed = self._manage(watch, position, series, quote, exit_now, long_now, short_now)
                 if closed:
                     return
                 if self._positions.get(watch.key) is not None:
+                    # Persist the *managed* state, not just the state at entry.
+                    # A trailing stop ratchets inside ``_manage``; if that ratchet
+                    # only lived in memory, a restart would resume a looser trail
+                    # than the one the running test is honouring -- a restart would
+                    # change the exit.  One small atomic write per completed bar.
+                    self._write_state()
                     self._last_decision[watch.key] = {
                         "at": _iso(self._clock()),
                         "action": "HOLD_OPEN",
@@ -662,6 +862,20 @@ class CatalogPaperTest:
                 best=price,
                 notional_quote=abs(mid * contract * self._lot),
                 bar_index=index,
+                quote_currency=str(getattr(facts, "profit_currency", "") or "").upper(),
+                contract_size=float(contract),
+                stop_initial=(
+                    price - direction * policy.stop_atr * atr_value
+                    if (policy.stop_atr and atr_value)
+                    else None
+                ),
+                target_initial=(
+                    price + direction * policy.target_atr * atr_value
+                    if (policy.target_atr and atr_value)
+                    else None
+                ),
+                trail_initial=(price if (policy.trail_atr and atr_value) else None),
+                bar_at=_iso(series.timestamps[index]),
             )
             self._positions[watch.key] = position
             self._stats.signals += 1
@@ -721,10 +935,10 @@ class CatalogPaperTest:
         if hit_stop or hit_trail:
             level = float(position.stop if hit_stop else position.trail)  # type: ignore[arg-type]
             reason = EXIT_STOP if hit_stop else EXIT_TRAIL
-            self._close(position, level, quote, reason)
+            self._close(position, level, quote, reason, basis=BASIS_LEVEL)
             return True
         if hit_target and position.target is not None:
-            self._close(position, float(position.target), quote, EXIT_TARGET)
+            self._close(position, float(position.target), quote, EXIT_TARGET, basis=BASIS_LEVEL)
             return True
         if exit_now:
             self._close(position, self._fill_price(direction, quote, closing=True), quote, EXIT_SIGNAL)
@@ -758,6 +972,11 @@ class CatalogPaperTest:
             "direction": "LONG" if position.direction > 0 else "SHORT",
             "lots": position.lots,
             "price": round(position.entry_price, 8),
+            # What a money figure needs to mean anything.  Written here, at the
+            # moment the fill is simulated, so the ledger can be read years later
+            # without a terminal and without a guess.
+            "quote_currency": position.quote_currency,
+            "contract_size": position.contract_size,
             "quote_bid": _decimal(getattr(quote, "bid", None)),
             "quote_ask": _decimal(getattr(quote, "ask", None)),
             "quote_time": _iso(getattr(quote, "time", None)),
@@ -765,13 +984,40 @@ class CatalogPaperTest:
             "priced_from": "BROKER_TICK",
         }
 
-    def _close(self, position: Position, price: float, quote: Any, reason: str) -> None:
-        contract = _decimal(getattr(self._facts(position.symbol), "contract_size", None)) or 0.0
-        point = _decimal(getattr(self._facts(position.symbol), "point", None)) or 0.0
-        gross = position.direction * (price - position.entry_price) * contract * position.lots
-        mid_move = position.direction * (
-            (float(quote.bid) + float(quote.ask)) / 2.0 - position.entry_mid
+    def _close(
+        self,
+        position: Position,
+        price: float,
+        quote: Any,
+        reason: str,
+        *,
+        basis: str = BASIS_BID_ASK,
+    ) -> None:
+        facts = self._facts(position.symbol)
+        contract = _decimal(position.contract_size) or _decimal(
+            getattr(facts, "contract_size", None)
+        ) or 0.0
+        point = _decimal(getattr(facts, "point", None)) or 0.0
+        # A contract size that is not a positive number makes the money figure
+        # meaningless.  The close still happens (a ledger must not be left
+        # half-open) but the P&L is recorded as unknown, never as zero.
+        priced = contract > 0
+        gross = (
+            position.direction * (price - position.entry_price) * contract * position.lots
+            if priced
+            else None
         )
+        mid_move = (
+            position.direction * ((float(quote.bid) + float(quote.ask)) / 2.0 - position.entry_mid)
+            if point > 0
+            else None
+        )
+        # What the two fill prices already contain, stated per leg rather than
+        # claimed in general: a stopped-out exit fills at the level, so it carries
+        # neither the spread nor the modelled slippage on that side.
+        modelled = ["spread_open", "slippage_open"]
+        if basis == BASIS_BID_ASK:
+            modelled.extend(["spread_close", "slippage_close"])
         event = {
             "at": _iso(self._clock()),
             "kind": EVENT_CLOSED,
@@ -782,10 +1028,22 @@ class CatalogPaperTest:
             "timeframe": position.timeframe,
             "direction": "LONG" if position.direction > 0 else "SHORT",
             "lots": position.lots,
+            "entry_at": position.entry_at,
             "entry_price": round(position.entry_price, 8),
             "exit_price": round(price, 8),
-            "simulated_net_quote": round(gross, 4),
-            "simulated_mid_move_pips": round(mid_move / point, 1) if point else 0.0,
+            # Price P&L only: whatever the two fill prices contain (see
+            # ``costs_modelled``), and nothing for commission or swap, which this
+            # paper test does not simulate at all.  ``None`` means unpriceable --
+            # never a zero standing in for an unknown.
+            "simulated_net_quote": None if gross is None else round(gross, 4),
+            "simulated_gross_quote": None if gross is None else round(gross, 4),
+            "simulated_mid_move_pips": None if mid_move is None else round(mid_move / point, 1),
+            "unpriced": "" if priced else "contract_size_unknown",
+            "quote_currency": position.quote_currency,
+            "contract_size": position.contract_size or float(contract),
+            "exit_basis": basis,
+            "costs_modelled": modelled,
+            "costs_not_modelled": ["commission", "swap"],
             "quote_bid": _decimal(getattr(quote, "bid", None)),
             "quote_ask": _decimal(getattr(quote, "ask", None)),
             "quote_time": _iso(getattr(quote, "time", None)),
@@ -797,7 +1055,7 @@ class CatalogPaperTest:
         self._append_ledger(event)
         self._positions.pop(position.key, None)
         self._stats.closes += 1
-        self._record(EVENT_CLOSED, {"key": position.key, "reason": reason})
+        self._record(EVENT_CLOSE_RECORDED, {"key": position.key, "reason": reason})
         self._write_state()
 
     def _record(self, kind: str, fields: Mapping[str, Any]) -> None:
@@ -818,7 +1076,7 @@ class CatalogPaperTest:
 
     def _write_state(self) -> None:
         payload = {
-            "version": 1,
+            "version": STATE_VERSION,
             "updated_at": _iso(self._clock()),
             "status": self._status,
             "running": self.running,
@@ -835,8 +1093,12 @@ class CatalogPaperTest:
                 "closes": self._stats.closes,
                 "waiting": self._stats.waiting,
             },
-            "positions": [position.audit_view() for position in self._positions.values()],
+            # ``state_view``, not ``audit_view``: a page and a restart need
+            # different things, and resuming from a page summary is exactly how a
+            # position came back with ``atr=0.0`` and no trail.
+            "positions": [position.state_view() for position in self._positions.values()],
             "last_bar": dict(self._last_bar),
+            "recovery": dict(self._recovery),
         }
         try:
             self._root.mkdir(parents=True, exist_ok=True)
@@ -846,46 +1108,258 @@ class CatalogPaperTest:
         except OSError:
             self._reason = REASON_LEDGER
 
-    def _restore_state(self) -> None:
-        """Resume open positions after a restart, and say so in the ledger."""
+    def _restore_state(self) -> dict[str, Any]:
+        """Resume open positions after a restart, exactly or not at all.
+
+        The rule this method exists to keep: a resumed position must be managed
+        by the *same* numbers the uninterrupted run would have used.  Three ways
+        that can fail, all of them reported rather than papered over:
+
+        * the state document is missing or unreadable (an empty folder is not a
+          failure -- there is simply nothing to resume);
+        * a record is missing a field the exit logic reads (the ATR of a trailing
+          stop, an entry price, a direction, a lot size);
+        * a record names a watch this run no longer follows, so nothing will ever
+          manage it.
+
+        When any of those happen the caller refuses to start and the state file is
+        left untouched.  Nothing is defaulted, and no stop is invented.
+        """
 
         self._positions = {}
+        self._last_bar = {}
+        report: dict[str, Any] = {
+            "ok": True,
+            "version": 0,
+            "restored": 0,
+            "migrated": 0,
+            "failed": [],
+            "detail": "",
+        }
         try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, ValueError):
-            return
-        if not isinstance(payload, dict):
-            return
+            raw = self._state_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            self._recovery = report  # nothing stored: the first run
+            return report
+        except OSError as error:
+            report.update(
+                ok=False,
+                detail=(
+                    "the paper state file exists but could not be read "
+                    f"({type(error).__name__}); nothing will be resumed"
+                ),
+            )
+            self._recovery = report
+            return report
+        try:
+            payload = json.loads(raw)
+        except ValueError as error:
+            report.update(
+                ok=False,
+                detail=(
+                    "the paper state file is not valid JSON "
+                    f"({type(error).__name__}); nothing will be resumed, and the file "
+                    "has been left as it was"
+                ),
+            )
+            self._recovery = report
+            return report
+        if not isinstance(payload, Mapping):
+            report.update(
+                ok=False,
+                detail="the paper state document is not an object; nothing will be resumed",
+            )
+            self._recovery = report
+            return report
+
+        version = payload.get("version")
+        report["version"] = version if isinstance(version, int) else 0
+        watches = {watch.key: watch for watch in self._watches}
+
         for entry in payload.get("positions") or ():
             if not isinstance(entry, Mapping):
-                continue
-            key = str(entry.get("key") or "")
-            if not key:
-                continue
-            try:
-                position = Position(
-                    key=key,
-                    candidate_id=str(entry.get("candidate_id") or ""),
-                    symbol=str(entry.get("symbol") or ""),
-                    timeframe=str(entry.get("timeframe") or ""),
-                    direction=1 if str(entry.get("direction")) == "LONG" else -1,
-                    lots=float(entry.get("lots") or self._lot),
-                    entry_at=str(entry.get("entry_at") or ""),
-                    entry_price=float(entry.get("entry_price") or 0.0),
-                    entry_mid=float(entry.get("entry_price") or 0.0),
-                    atr=0.0,
-                    stop=None if entry.get("stop") is None else float(entry["stop"]),
-                    target=None if entry.get("target") is None else float(entry["target"]),
-                    trail=None if entry.get("trail") is None else float(entry["trail"]),
-                    best=float(entry.get("entry_price") or 0.0),
-                    notional_quote=0.0,
-                    bar_index=0,
-                    restored=True,
+                report["failed"].append(
+                    {"key": "", "symbol": "", "reason": "position record is not an object"}
                 )
-            except (TypeError, ValueError):
                 continue
-            self._positions[key] = position
-            self._record(EVENT_RESTORED, {"key": key})
+            position, problem = self._position_from_state(entry, watches=watches)
+            if position is None:
+                report["failed"].append(
+                    {
+                        "key": str(entry.get("key") or ""),
+                        "symbol": str(entry.get("symbol") or ""),
+                        "reason": problem,
+                    }
+                )
+                continue
+            self._positions[position.key] = position
+            report["restored"] += 1
+            if position.migrated:
+                report["migrated"] += 1
+                self._record(
+                    EVENT_MIGRATED,
+                    {
+                        "key": position.key,
+                        "symbol": position.symbol,
+                        "from_version": report["version"],
+                        "derivation": position.migration,
+                    },
+                )
+            self._record(
+                EVENT_RESTORED,
+                {
+                    "key": position.key,
+                    "symbol": position.symbol,
+                    "atr": position.atr,
+                    "bar_index": position.bar_index,
+                    "stop": position.stop,
+                    "target": position.target,
+                    "trail": position.trail,
+                    "best": position.best,
+                    "migrated": position.migrated,
+                },
+            )
+
+        # The bars already decided on.  Without this a restart re-decides the bar
+        # it stopped on and can act on a signal the uninterrupted run had spent.
+        stored_bars = payload.get("last_bar")
+        if isinstance(stored_bars, Mapping):
+            for key, stamp in stored_bars.items():
+                if str(key) in watches and isinstance(stamp, str) and stamp:
+                    self._last_bar[str(key)] = stamp
+
+        if report["failed"]:
+            report["ok"] = False
+            report["detail"] = (
+                f"{len(report['failed'])} stored paper position(s) cannot be resumed "
+                "exactly; the run is blocked and the state file is untouched"
+            )
+            self._record(
+                EVENT_RECOVERY_FAILED,
+                {
+                    "failed": len(report["failed"]),
+                    "reasons": sorted({item["reason"] for item in report["failed"]})[:4],
+                },
+            )
+        self._recovery = report
+        return report
+
+    def _position_from_state(
+        self, entry: Mapping[str, Any], *, watches: Mapping[str, Watch]
+    ) -> tuple[Position | None, str]:
+        """One stored record, resumed exactly, migrated with a note, or refused."""
+
+        key = str(entry.get("key") or "").strip()
+        symbol = str(entry.get("symbol") or "").strip()
+        if not key:
+            return None, "the record has no position key"
+        if not symbol:
+            return None, "the record has no symbol"
+        watch = watches.get(key)
+        if watch is None:
+            return None, (
+                "no watched row matches this position, so nothing would manage it "
+                "(it would sit open for ever)"
+            )
+
+        direction_text = str(entry.get("direction") or "").strip().upper()
+        if direction_text not in {"LONG", "SHORT"}:
+            return None, "the record's direction is not LONG or SHORT"
+        direction = 1 if direction_text == "LONG" else -1
+
+        lots = _state_number(entry.get("lots"))
+        if lots is None or lots <= 0:
+            return None, "the record's lot size is missing or not a positive number"
+        entry_price = _state_number(entry.get("entry_price"))
+        if entry_price is None or entry_price <= 0:
+            return None, "the record's entry price is missing or not a positive number"
+        entry_at = str(entry.get("entry_at") or "").strip()
+        if not entry_at:
+            return None, "the record has no entry time"
+
+        recorded_version = entry.get("state_version")
+        version = recorded_version if isinstance(recorded_version, int) else 0
+
+        # -- the trailing stop's unit ---------------------------------------
+        # ``_manage`` reads ``position.atr`` only when the position has a trail
+        # *and* the candidate's policy trails by ATR.  Where it does, a missing
+        # ATR changes the exit and cannot be derived: refuse.  Where it does not,
+        # the value is never read, so it may be absent -- but the record says so.
+        policy = watch.candidate.policy()
+        trails_by_atr = bool(policy.trail_atr)
+        trail = _state_number(entry.get("trail"))
+        needs_atr = trail is not None and trails_by_atr
+        atr = _state_number(entry.get("atr"))
+        derived: list[str] = []
+        if atr is None or atr <= 0:
+            if needs_atr:
+                return None, (
+                    "the trailing stop is measured in an ATR this record does not "
+                    "carry, so the next bar's trail cannot be computed"
+                )
+            atr = 0.0
+            derived.append("atr: not recorded, and not read by this candidate's exit rules")
+
+        stored_index = entry.get("bar_index")
+        if isinstance(stored_index, bool) or not isinstance(stored_index, int) or stored_index < 0:
+            bar_index = 0
+            derived.append(
+                "bar_index: not recorded; it is re-derived from the next completed bar, "
+                "exactly as the previous build did on every decision"
+            )
+        else:
+            bar_index = stored_index
+
+        best = _state_number(entry.get("best"))
+        if best is None:
+            best = entry_price
+            derived.append(
+                "best: not recorded; it starts again at the entry price, and the trail "
+                "itself is carried over unchanged"
+            )
+
+        stop = _state_number(entry.get("stop"))
+        target = _state_number(entry.get("target"))
+        stop_initial = _state_number(entry.get("stop_initial"))
+        target_initial = _state_number(entry.get("target_initial"))
+        trail_initial = _state_number(entry.get("trail_initial"))
+        entry_mid = _state_number(entry.get("entry_mid"))
+        notional = _state_number(entry.get("notional_quote"))
+        contract = _state_number(entry.get("contract_size"))
+        if entry_mid is None or entry_mid <= 0:
+            entry_mid = entry_price
+            derived.append(
+                "entry_mid: not recorded; the mid at fill is not used by any exit rule"
+            )
+
+        position = Position(
+            key=key,
+            candidate_id=str(entry.get("candidate_id") or watch.candidate_id),
+            symbol=symbol,
+            timeframe=str(entry.get("timeframe") or watch.timeframe),
+            direction=direction,
+            lots=lots,
+            entry_at=entry_at,
+            entry_price=entry_price,
+            entry_mid=entry_mid,
+            atr=atr,
+            stop=stop,
+            target=target,
+            trail=trail,
+            best=best,
+            notional_quote=0.0 if notional is None else notional,
+            bar_index=bar_index,
+            restored=True,
+            quote_currency=str(entry.get("quote_currency") or "").upper(),
+            contract_size=0.0 if contract is None else max(0.0, contract),
+            stop_initial=stop if stop_initial is None else stop_initial,
+            target_initial=target if target_initial is None else target_initial,
+            trail_initial=trail if trail_initial is None else trail_initial,
+            bar_at=str(entry.get("bar_at") or ""),
+            migrated=bool(version < STATE_VERSION),
+            migration="; ".join(derived),
+        )
+        return position, ""
 
     # -- inputs -----------------------------------------------------------
 
@@ -933,33 +1407,52 @@ class CatalogPaperTest:
         return None if getattr(model, "unusable", False) else model
 
     def _fresh_quote(self, symbol: str) -> Any:
+        """The current quote, and what this cycle saw of it.
+
+        What is stored here is *evidence*, not a verdict: the quote's own
+        timestamp, when it was read, and the prices.  Whether it is fresh is a
+        question about the page's clock, so it is answered when the page is
+        built (see :meth:`snapshot`), never frozen at read time.
+        """
+
         try:
             quote = self._quotes.tick(symbol)
         except Exception:
             with self._lock:
                 self._quotes_seen[symbol] = {
-                    "at": _iso(self._clock()),
+                    "checked_at": _iso(self._clock()),
+                    "quote_time": None,
                     "state": "unavailable",
-                    "age_seconds": None,
+                    "bid": None,
+                    "ask": None,
                 }
             return None
         when = getattr(quote, "time", None)
-        age = None
         if isinstance(when, datetime):
             if when.tzinfo is None:
                 when = when.replace(tzinfo=timezone.utc)
-            age = max(0.0, (self._clock() - when).total_seconds())
+            quote_time = when
+        else:
+            quote_time = None
+        age = (
+            None
+            if quote_time is None
+            else max(0.0, (self._clock() - quote_time).total_seconds())
+        )
         bid = _decimal(getattr(quote, "bid", None))
         ask = _decimal(getattr(quote, "ask", None))
         with self._lock:
             self._quotes_seen[symbol] = {
-                "at": _iso(self._clock()),
+                # When the read happened, and the quote's own time.  Both are
+                # absolute instants, so any later reader can work out the age
+                # for itself instead of inheriting this cycle's answer.
+                "checked_at": _iso(self._clock()),
+                "quote_time": _iso(quote_time),
                 "state": (
                     "fresh"
                     if (age is not None and age <= self._max_age)
                     else ("stale" if age is not None else "unknown_age")
                 ),
-                "age_seconds": None if age is None else round(age, 1),
                 "bid": bid,
                 "ask": ask,
             }
@@ -1068,18 +1561,46 @@ class CatalogPaperTest:
         }
 
     def snapshot(self) -> dict[str, Any]:
+        """Everything a page may show, with freshness judged *now*.
+
+        Two rules this method exists to keep:
+
+        * a quote's age and freshness are computed against the clock at the
+          moment of reading, from the quote's own timestamp -- a page rendered
+          ten minutes after the last tick says "ten minutes", not the verdict
+          that was true when the tick arrived;
+        * an entry fill *is* a fill.  ``orders``/``fills`` keep their historical
+          names for the two ledger lists, and the explicit ``entry_fills`` /
+          ``exit_fills`` / ``fills_total`` keys say the same thing without the
+          ambiguity that once produced "5 orders, 0 filled".
+        """
+
+        now = self._clock()
         with self._lock:
             age_limit = self._max_age
             quotes = []
             for symbol, seen in sorted(self._quotes_seen.items()):
-                age = seen.get("age_seconds")
+                quote_time = _parse_iso(seen.get("quote_time"))
+                age = (
+                    None
+                    if quote_time is None
+                    else max(0.0, (now - quote_time).total_seconds())
+                )
+                fresh = bool(age is not None and age <= age_limit)
                 quotes.append(
                     {
                         "symbol": symbol,
-                        "state": seen.get("state") or "unknown",
-                        "age_seconds": age,
-                        "fresh": bool(age is not None and age <= age_limit),
-                        "checked_at": seen.get("at") or "",
+                        "state": (
+                            "fresh"
+                            if fresh
+                            else ("stale" if age is not None else "unavailable")
+                        ),
+                        "age_seconds": None if age is None else round(age, 1),
+                        "fresh": fresh,
+                        # Both absolute instants, so a reader never has to trust
+                        # this cycle's arithmetic.
+                        "quote_time": seen.get("quote_time") or "",
+                        "checked_at": seen.get("checked_at") or "",
                         # The last quote the loop saw, so the page can show feed
                         # health and a mark.  Strings: the page never does maths on
                         # a price, and a Decimal in HTML is a rendering accident.
@@ -1088,9 +1609,12 @@ class CatalogPaperTest:
                     }
                 )
             closed = [event for event in self._fills if event.get("kind") == EVENT_CLOSED]
+            opened = [event for event in self._fills if event.get("kind") == EVENT_FILL]
             return {
                 "status": self._status,
                 "running": self.running,
+                "state_version": STATE_VERSION,
+                "recovery": dict(self._recovery),
                 "started_at": self._started_at,
                 "stopped_at": self._stopped_at,
                 "reason": self._reason,
@@ -1102,9 +1626,16 @@ class CatalogPaperTest:
                 "active_symbols": sorted({watch.symbol for watch in self._watches}),
                 "quotes": quotes,
                 "signals": [dict(self._last_decision[key]) | {"key": key} for key in self._last_decision],
-                "orders": [event for event in self._fills if event.get("kind") == EVENT_FILL][
-                    -NUMBER_OF_LEDGER_EVENTS:
-                ],
+                # One name per question.  An entry that opened a position is an
+                # entry fill; a close is an exit fill; both are simulated fills.
+                "entry_fills": opened[-NUMBER_OF_LEDGER_EVENTS:],
+                "exit_fills": closed[-NUMBER_OF_LEDGER_EVENTS:],
+                "fills_total": len(opened) + len(closed),
+                "closed_trades": len(closed),
+                # Historical keys, kept so a reader sees the same list under the
+                # old name.  ``orders`` is the *entry* list and ``fills`` the
+                # *exit* list; nothing may count one as the other's outcome.
+                "orders": opened[-NUMBER_OF_LEDGER_EVENTS:],
                 "fills": closed[-NUMBER_OF_LEDGER_EVENTS:],
                 "positions": [position.audit_view() for position in self._positions.values()],
                 "events": [dict(event) for event in self._events[-NUMBER_OF_LEDGER_EVENTS:]],
@@ -1148,7 +1679,9 @@ __all__ = [
     "DEFAULT_MAX_QUOTE_AGE_SECONDS",
     "IDLE",
     "MAX_WATCHES",
+    "REASON_STATE_RECOVERY",
     "RUNNING",
+    "STATE_VERSION",
     "STOPPED",
     "Watch",
     "summarise",

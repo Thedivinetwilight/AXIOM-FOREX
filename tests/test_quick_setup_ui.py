@@ -283,8 +283,9 @@ def test_quick_setup_is_a_route_and_a_navigation_entry():
     assert GET_ROUTES["/quick-setup"] == ("quick-setup", "Quick setup")
     labels = [label for _key, _path, label in views.NAV]
     assert "Quick setup" in labels
-    # The provider-terms document is kept, and moved after the short setup.
-    provider = labels.index("Broker terms (advanced)")
+    # The provider-terms document is kept, and moved after the short setup into
+    # the "Advanced" group (the group title carries the "advanced" now).
+    provider = labels.index("Broker terms")
     assert provider > labels.index("Quick setup")
     assert "Provider setup" not in labels
 

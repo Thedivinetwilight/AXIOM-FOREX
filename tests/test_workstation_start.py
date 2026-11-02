@@ -564,11 +564,13 @@ def test_the_guided_page_is_the_home_page_and_its_actions_are_allowlisted():
     assert GET_ROUTES["/"] == ("start", "Start paper trading")
     # The sidebar leads with the guided page; everything else is grouped after it.
     assert views.NAV[0][0] == "start"
+    # Essential paper pages first, setup next, everything else behind "Advanced".
     assert [title for title, _keys in views.NAV_GROUPS] == [
-        "Start here",
-        "Steps in detail",
+        "Paper trading",
+        "Set up",
         "Advanced",
     ]
+    assert views.NAV_GROUPS[0][1][:2] == ("start", "performance")
     # The classic overview is still reachable, and reachable on purpose.
     assert GET_ROUTES["/overview"] == ("overview", "Overview")
     # The page only posts actions the workstation already had.

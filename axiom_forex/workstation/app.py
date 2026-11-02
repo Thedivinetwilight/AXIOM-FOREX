@@ -58,6 +58,9 @@ from .mode import (
     build_controller,
     default_mode_view,
 )
+from axiom_forex.paper_runner.accounting import write_capital
+
+from .paper_account import paper_root, read_paper_account
 from .preflight import LivePreflight, StrategyBinding, facts_from
 from .setup import SetupWizard
 from .symbols import build_catalogue
@@ -71,7 +74,11 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/overview": ("overview", "Overview"),
     "/setup": ("setup", "Setup"),
     "/account": ("account", "Account & symbols"),
-    "/positions": ("positions", "Positions"),
+    "/positions": ("positions", "Paper positions"),
+    # The paper performance page: the configured local simulated capital, the
+    # ledger's own P&L, an equity curve and the complete trade history.  Paper
+    # figures only -- the broker account's balance is never read into it.
+    "/performance": ("performance", "Paper performance"),
     "/data": ("data", "Data & evaluation"),
     "/quick-setup": ("quick-setup", "Quick setup"),
     "/provider-setup": ("provider-setup", "Broker terms (advanced)"),
@@ -205,6 +212,11 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "live-stop",
         "live-stop-settings",
         "catalog-audit",
+        # The paper starting capital: one local, Git-ignored document holding the
+        # amount and currency the operator typed.  It is the basis of the paper
+        # P&L percentages and of nothing else: it is not a broker balance, it is
+        # never read from an account, and it cannot size, arm or send anything.
+        "paper-capital",
     }
 )
 
@@ -387,6 +399,10 @@ class WorkstationApp:
     #: The project root: where ``provider_setup.local.json`` is written.  It is
     #: deliberately the same folder the launcher and the updater use.
     project_root: str = ""
+    #: The clock the paper account is read against.  ``None`` means "the real one",
+    #: which is what a running workstation uses; a test pins it so that quote ages
+    #: are judged against a fixed instant instead of the day the test runs.
+    clock: Any = None
 
     def __post_init__(self) -> None:
         if self.paper is None and self.platform is not None:
@@ -672,6 +688,17 @@ class WorkstationApp:
             }
         return summary
 
+    def paper_account(self) -> dict[str, Any]:
+        """The one paper-account view, built from the durable ledger.
+
+        Every page that shows an order count, an open position or a P&L figure
+        renders this dictionary.  Building it once per render is what makes the
+        dashboard, the positions page and the performance page agree.
+        """
+
+        now = self.clock() if callable(self.clock) else None
+        return read_paper_account(self, now=now)
+
     def _context(
         self,
         page: str,
@@ -685,6 +712,9 @@ class WorkstationApp:
         # One read of the import folder per render: the runner card and the data
         # page must never disagree about which files exist.
         data = self.data_view()
+        # One read of the paper ledger per render, for the same reason: two cards
+        # may not count the same fills differently.
+        account = self.paper_account()
         return build_context(
             platform=self.platform,
             paper=self.paper,
@@ -697,6 +727,16 @@ class WorkstationApp:
             preflight=preflight,
             runner=self.runner_view(data=data),
             extra={
+                # The paper account, on every page: orders, fills, open positions,
+                # P&L, freshness and integrity all come from this one reading.
+                "account": account,
+                # The page's own query string, so a long list can be paged with a
+                # plain link.  It is read, never written, and every value used
+                # from it is clamped by the view that reads it.
+                "query": {
+                    str(key): [str(item) for item in values]
+                    for key, values in (query or {}).items()
+                },
                 "data": data,
                 "provider_setup": (
                     self.provider_setup_view() if page == "provider-setup" else {}
@@ -1107,6 +1147,35 @@ class WorkstationApp:
             return HTTPStatus.SEE_OTHER, "/autopilot", ""
         return HTTPStatus.CONFLICT, "/autopilot", str(outcome.get("message") or "")
 
+    def _paper_capital_action(
+        self, form: Mapping[str, list[str]]
+    ) -> tuple[int, str, str]:
+        """Record the local simulated paper starting capital.
+
+        One document, two values, both typed by the operator.  It changes no
+        execution mode, touches no broker setting, is never read from or written
+        to an account, and cannot size or send anything: it is the basis for the
+        paper P&L percentages and for nothing else.  An amount that is not a
+        positive number is refused rather than guessed at.
+        """
+
+        amount = str((form.get("amount") or [""])[0])
+        currency = str((form.get("currency") or [""])[0])
+        try:
+            capital = write_capital(paper_root(self), amount, currency)
+        except (ValueError, OSError) as exc:
+            self._log("paper capital refused")
+            return HTTPStatus.CONFLICT, "/performance", f"Not saved: {exc}"
+        self._log(
+            f"paper starting capital set to {capital.amount} {capital.currency} (local, simulated)"
+        )
+        return (
+            HTTPStatus.SEE_OTHER,
+            "/performance",
+            f"Paper starting capital set to {capital.amount} {capital.currency} "
+            "(local simulated capital, not a broker balance).",
+        )
+
     def _catalog_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         if self.catalog is None:
             return (
@@ -1209,6 +1278,8 @@ class WorkstationApp:
 
     def _dispatch(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         wizard = self.wizard
+        if action == "paper-capital":
+            return self._paper_capital_action(form)
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
         if action.startswith("autopilot-"):
