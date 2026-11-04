@@ -1058,16 +1058,21 @@ class WorkstationApp:
         """Start or stop the session /live wired.  Never arms, never sends."""
 
         pilot = self.autopilot_live
+        starting = action == "autopilot-live-start"
         if pilot is None:
+            # Say what was asked for.  A Stop answered with a sentence about
+            # starting reads as if the click did something it did not.
             return {
                 "ok": False,
                 "reason": "live_autopilot_unavailable",
                 "message": (
                     "This workstation has no live bridge, so no live session can be "
-                    "started here. Nothing changed and nothing was sent."
+                    "started or stopped here. Nothing changed and nothing was sent."
+                    if starting
+                    else "This workstation has no live bridge, so there is no live "
+                    "session here to stop. Nothing changed and nothing was sent."
                 ),
             }
-        starting = action == "autopilot-live-start"
         view = pilot.start() if starting else pilot.stop()
         state = str(getattr(view, "state", "") or "")
         blockers = [item.as_dict() for item in getattr(view, "blockers", ()) or ()]
@@ -1200,7 +1205,7 @@ class WorkstationApp:
         # return targets, so a form cannot bounce an operator somewhere else.
         back = (
             return_to
-            if return_to in {"/", "/quick-setup", "/strategies", "/positions"}
+            if return_to in {"/", "/quick-setup", "/strategies", "/positions", "/autopilot"}
             else "/quick-setup"
         )
         try:
@@ -1544,6 +1549,15 @@ class WorkstationApp:
                 # and confirmation still requires a real terminal and account.
                 chosen = wanted
             message = f"{len(chosen)} symbol(s) selected."
+            if not catalogue.available and chosen:
+                # Nothing was reported to check the names against, so they are kept
+                # as typed -- and the operator is told that, rather than being left
+                # with a count that reads like a verification.
+                message += (
+                    " The terminal did not report a symbol list, so these names were "
+                    "kept exactly as posted and could not be verified here; "
+                    "confirmation still needs a connected terminal and account."
+                )
         was_confirmed = bool(wizard.choices.confirmed)
         wizard.choose_symbols(chosen)
         self._log(f"symbols selected: {len(chosen)}")

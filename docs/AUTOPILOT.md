@@ -72,6 +72,11 @@ history selects nothing.
 * feed health: the last quote per symbol, its age, its bid/ask and whether it is
   fresh enough to use;
 * open simulated positions, entries, simulated closes and the local ledger path;
+* **the book as stored on disk**, even when this process has not loaded it. A restart
+  — or a refusal to resume a book that no longer matches the selected rows — leaves
+  positions the in-memory snapshot knows nothing about, and the page used to say
+  nothing about them while /positions listed them. It now reads the same ledger
+  /positions reads, so the two pages cannot disagree;
 * the last decision per symbol and timeframe, including every refusal;
 * **observed** latency: the selection pass, the evaluation, and the paper loop's own
   decision time, with the sample count. These are measurements from this process on
@@ -89,8 +94,42 @@ history selects nothing.
 | Market closed | Reads as missing quotes, so the loop idles; nothing is invented |
 | Restart | Open positions come back from the state file, marked `restored_after_restart` |
 | Stop | The loop ends; **open positions stay open and stay visible** |
-| Flatten | A separate, explicit click; closes the *simulated* book only |
+| Stored book will not resume | `paper_state_incomplete`: the page shows the stored positions, names what refused them, and offers the confirmed close (below) |
+| Flatten | A separate, explicit click, offered only when it can work (not while the loop is running); closes the *simulated* book only |
 | Evaluation fails | `evaluation_failed`; no row is selected and nothing is traded |
+
+## When a stored book will not resume
+
+A position is resumed only if the *same* row that opened it is still followed. When
+the operator re-evaluates and the selection changes, the stored book no longer
+matches, and the paper test refuses to start (`paper_state_incomplete`) rather than
+attach a stored position to a strategy that did not open it, or substitute a level
+it cannot prove.
+
+The Autopilot page and the Paper positions page both show that book and both offer
+the same way out — **Simulate closing all paper positions**:
+
+1. Tick the confirmation box, then press the button. Two proofs travel with the
+   request: the per-process nonce and the ticked box.
+2. Every position is paired with its own open entry fill and priced from a **fresh**
+   quote, all before anything is written. One stale or missing quote, one record
+   missing a field a close needs, or one position the ledger has no entry fill for,
+   and **nothing is closed** — the ledger and the state file are left exactly as they
+   were, and the reason is named on the page.
+3. Each close goes through the ordinary paper close path: the closing side of the
+   spread, the same cost labels, `OPERATOR_FLAT`, one close event and one audit note
+   per position, then one summary event. A position the ledger already shows closed
+   is reconciled, never closed twice.
+4. The state file is rewritten from the one that was read (watch list, bar stamps and
+   unknown keys preserved) and each closed record is archived under `flattened` with
+   its exit price.
+5. Press Start again. The block is gone because the book is flat — not because a
+   warning was hidden.
+
+It is refused while the loop is running (stop first, so a close and the next cycle
+cannot disagree) and it is refused with no terminal (there would be no price to fill
+against). It is **simulated paper accounting**: no broker order is sent, no MT5
+position is opened or closed, and the execution mode is neither read nor changed.
 
 ## Kronos is optional, and can only veto
 

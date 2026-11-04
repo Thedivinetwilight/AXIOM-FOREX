@@ -3200,7 +3200,7 @@ def render_performance(ctx: PageContext) -> str:
     return render_shell(ctx, body)
 
 
-def _close_all_paper_form(ctx: PageContext) -> str:
+def _close_all_paper_form(ctx: PageContext, *, return_to: str = "/positions") -> str:
     """The explicit, confirmed, simulated close of the whole paper book.
 
     Two proofs travel with the request: the process nonce (this form came from a
@@ -3220,7 +3220,7 @@ def _close_all_paper_form(ctx: PageContext) -> str:
     return (
         "<form method='post' action='/actions/catalog-paper-close-all'>"
         f"<input type='hidden' name='nonce' value='{escape(ctx.action_nonce)}'>"
-        "<input type='hidden' name='return_to' value='/positions'>"
+        f"<input type='hidden' name='return_to' value='{escape(return_to)}'>"
         f"{tick}"
         "<button class='btn btn--danger' type='submit'>"
         "Simulate closing all paper positions</button></form>"
@@ -6781,11 +6781,11 @@ def render_catalog_section(ctx: PageContext) -> str:
                         else ""
                     ),
                     (
-                        ("broker_symbol", "Symbol"),
-                        ("pair", "Pair"),
-                        ("major", "Major"),
-                        ("usable", "Usable"),
-                        ("reason", "If not usable, why"),
+                        ("Symbol", "mono"),
+                        ("Pair", "text"),
+                        ("Major", "text"),
+                        ("Usable", "text"),
+                        ("If not usable, why", "text"),
                     ),
                     rows,
                 )
@@ -7796,12 +7796,12 @@ def _render_live_autopilot(live: Mapping[str, Any], nonce: str) -> str:
             table(
                 "Orders the live path recorded",
                 (
-                    ("request_id", "Request"),
-                    ("at", "At"),
-                    ("status", "Status"),
-                    ("refusal", "Refusal"),
-                    ("detail", "Detail"),
-                    ("unresolved", "Unresolved"),
+                    ("Request", "mono"),
+                    ("At", "text"),
+                    ("Status", "text"),
+                    ("Refusal", "text"),
+                    ("Detail", "text"),
+                    ("Unresolved", "text"),
                 ),
                 (
                     (
@@ -7877,7 +7877,7 @@ def _render_live_autopilot(live: Mapping[str, Any], nonce: str) -> str:
         parts.append(
             table(
                 "Open positions in the terminal",
-                (("symbol", "Symbol"), ("volume", "Volume"), ("ticket", "Ticket")),
+                (("Symbol", "text"), ("Volume", "num"), ("Ticket", "mono")),
                 (
                     (
                         escape(str(item.get("symbol", ""))),
@@ -7921,6 +7921,124 @@ def _render_live_autopilot(live: Mapping[str, Any], nonce: str) -> str:
         "measured timings.",
     )
 
+
+def _autopilot_stored_book_card(
+    ctx: PageContext, stored: Mapping[str, Any], live_positions: Sequence[Mapping[str, Any]]
+) -> str:
+    """What is on disk, even when this process has not loaded it.
+
+    A restart — or a refusal to resume a book that no longer matches the selected
+    rows — leaves positions the Autopilot page could not previously show, while
+    /positions listed them.  This card closes that gap: the same ledger reading, the
+    same wording, and the same confirmed close that page offers, drawn here because
+    this is where the operator meets the block.
+    """
+
+    if not stored:
+        return ""
+    if stored.get("available") is False:
+        return notice(
+            "warn",
+            "The stored paper book could not be read",
+            str(stored.get("message") or "This page cannot say what is open on disk."),
+        )
+    open_count = int(stored.get("open") or 0)
+    blocked = bool(stored.get("blocked"))
+    if not open_count and not blocked:
+        return ""
+    if live_positions and not blocked:
+        # The loop is running and draws this same book from its own snapshot; a
+        # second table would be the same numbers twice.
+        return ""
+
+    if blocked:
+        recovery = dict(stored.get("recovery") or {})
+        failed = [item for item in recovery.get("failed") or () if isinstance(item, Mapping)]
+        names = ", ".join(
+            f"{escape(str(item.get('symbol') or item.get('key') or 'a position'))} "
+            f"({escape(str(item.get('reason') or 'incomplete'))})"
+            for item in failed[:4]
+        )
+        if len(failed) > 4:
+            names += f", and {len(failed) - 4} more"
+        if recovery:
+            said = (
+                f"{open_count} position(s) are on disk and the paper test refused to "
+                "resume them"
+                + (f": {escape(str(recovery.get('detail') or ''))}" if recovery.get("detail") else "")
+                + (f". Affected: {names}." if names else ".")
+                + " It will not attach a stored position to a strategy that did not "
+                "open it, and it will not substitute a missing level."
+            )
+        else:
+            said = (
+                f"{open_count} position(s) are on disk and the state file carries no "
+                "recovery report, so this page cannot claim they would resume."
+            )
+        head = notice("warn", "A stored paper book is stopping the next start", said)
+        close = (
+            "<p class='small' style='margin:6px 0'>Closing is the way out, and it is "
+            "all-or-nothing: each position is priced from a fresh quote and written to "
+            "the paper ledger as a simulated fill, or nothing is closed at all and the "
+            "reason is shown. Simulated paper accounting only — no broker order is sent "
+            "and no MetaTrader 5 position is touched.</p>"
+            f"{_close_all_paper_form(ctx, return_to='/autopilot')}"
+            "<p class='small muted' style='margin:8px 0 0'>Then press Start again. The "
+            "Paper positions page (<a href='/positions'>/positions</a>) lists the same "
+            "book and the same control.</p>"
+        )
+        return (
+            "<section class='card'><h3>Open simulated positions, as stored on disk</h3>"
+            f"{head}{close}{_stored_positions_table(stored)}</section>"
+        )
+
+    return card(
+        "Open simulated positions, as stored on disk",
+        notice(
+            "muted",
+            f"{open_count} position(s) are on disk",
+            "This process has not loaded them (it has not started since they were "
+            "written). Starting the paper loop resumes them exactly; stopping or "
+            "closing them is done from the Paper positions page.",
+        )
+        + _stored_positions_table(stored),
+        hint="Read from the same paper ledger and state file /positions reads.",
+    )
+
+
+def _stored_positions_table(stored: Mapping[str, Any]) -> str:
+    rows = [dict(item) for item in (stored.get("positions") or ())]
+    return table(
+        "Stored paper positions",
+        (
+            ("symbol", "Symbol"),
+            ("side", "Side"),
+            ("lots", "Lots"),
+            ("entry_price", "Entry"),
+            ("mark", "Mark (closing side)"),
+            ("unrealized_gross", "Unrealised"),
+            ("status", "Status"),
+        ),
+        (
+            (
+                escape(str(item.get("symbol") or "")),
+                escape(str(item.get("side") or "")),
+                str(item.get("lots") or ""),
+                escape(price(item.get("entry_price"))),
+                f"{escape(str(item.get('mark_side') or ''))} {escape(price(item.get('mark')))}",
+                escape(
+                    "—"
+                    if item.get("unrealized_gross") is None
+                    else money(item.get("unrealized_gross"), str(item.get("currency") or ""))
+                ),
+                escape(str(item.get("unavailable_reason") or "marked from a fresh quote")),
+            )
+            for item in rows
+        ),
+        empty="No position is on disk.",
+    )
+
+
 def render_autopilot(ctx: PageContext) -> str:
     """One start, one stop, and every reason written down.
 
@@ -7958,6 +8076,7 @@ def render_autopilot(ctx: PageContext) -> str:
     latency = dict(view.get("latency") or {})
     inner = dict(latency.get("decision") or {})
     positions = [dict(item) for item in (view.get("positions") or [])]
+    stored = dict(view.get("stored_book") or {})
     body: list[str] = []
 
     result = dict(view.get("result") or {})
@@ -8061,7 +8180,10 @@ def render_autopilot(ctx: PageContext) -> str:
             "here rather than applied silently.</p>"
             "</form>"
         )
-    if positions:
+    # The close is drawn only when it can work.  While the loop is running the
+    # runner refuses it (the next cycle manages the same positions), so offering
+    # the button would be offering a click that cannot succeed.
+    if positions and not running:
         controls.append(
             action_form(
                 "autopilot-flat",
@@ -8071,7 +8193,15 @@ def render_autopilot(ctx: PageContext) -> str:
                 extra="",
             )
             + "<p class='small muted'>A separate click, and paper only: it closes the "
-            "simulated book at the current quote. Nothing is sent to a broker.</p>"
+            "simulated book at the current quote, or refuses and leaves it alone. "
+            "Nothing is sent to a broker.</p>"
+        )
+    elif positions:
+        controls.append(
+            "<p class='small muted'>The "
+            f"{len(positions)} open simulated position(s) stay open while the loop runs. "
+            "Stop the loop first if you mean to close them: stopping never closes "
+            "anything by itself.</p>"
         )
     body.append(
         card(
@@ -8081,6 +8211,11 @@ def render_autopilot(ctx: PageContext) -> str:
             "place an order, arm live trading, or change the execution mode.",
         )
     )
+
+    # -- what is on disk, which the in-memory snapshot cannot show -----------
+    stored_card = _autopilot_stored_book_card(ctx, stored, positions)
+    if stored_card:
+        body.append(stored_card)
 
     # -- the optional forecast -------------------------------------------
     body.append(
@@ -8160,13 +8295,13 @@ def render_autopilot(ctx: PageContext) -> str:
                 table(
                     "Why every candidate was selected or left out",
                     (
-                        ("candidate_id", "Candidate"),
-                        ("symbol", "Symbol"),
-                        ("timeframe", "TF"),
-                        ("status", "Decision"),
-                        ("rank", "Rank"),
-                        ("reasons", "Reason"),
-                        ("message", "In words"),
+                        ("Candidate", "mono"),
+                        ("Symbol", "text"),
+                        ("TF", "text"),
+                        ("Decision", "text"),
+                        ("Rank", "num"),
+                        ("Reason", "text"),
+                        ("In words", "text"),
                     ),
                     (
                         (
@@ -8220,11 +8355,11 @@ def render_autopilot(ctx: PageContext) -> str:
             table(
                 "What the autopilot did, in order",
                 (
-                    ("name", "Step"),
-                    ("ok", "Ok"),
-                    ("took_ms", "Took (ms)"),
-                    ("detail", "Detail"),
-                    ("at", "At"),
+                    ("Step", "text"),
+                    ("Ok", "text"),
+                    ("Took (ms)", "num"),
+                    ("Detail", "text"),
+                    ("At", "text"),
                 ),
                 (
                     (
@@ -8248,12 +8383,12 @@ def render_autopilot(ctx: PageContext) -> str:
                 table(
                     "One row per symbol and timeframe the loop follows",
                     (
-                        ("symbol", "Symbol"),
-                        ("timeframe", "TF"),
-                        ("family", "Family"),
-                        ("candidate_id", "Candidate"),
-                        ("trades_in_evaluation", "Trades measured"),
-                        ("folds_positive", "Positive folds"),
+                        ("Symbol", "text"),
+                        ("TF", "text"),
+                        ("Family", "text"),
+                        ("Candidate", "mono"),
+                        ("Trades measured", "num"),
+                        ("Positive folds", "num"),
                     ),
                     (
                         (
@@ -8280,12 +8415,12 @@ def render_autopilot(ctx: PageContext) -> str:
                 table(
                     "The last quote the loop saw, per symbol",
                     (
-                        ("symbol", "Symbol"),
-                        ("state", "State"),
-                        ("age_seconds", "Quote age (s)"),
-                        ("bid", "Bid"),
-                        ("ask", "Ask"),
-                        ("checked_at", "Last checked"),
+                        ("Symbol", "text"),
+                        ("State", "text"),
+                        ("Quote age (s)", "num"),
+                        ("Bid", "num"),
+                        ("Ask", "num"),
+                        ("Last checked", "text"),
                     ),
                     (
                         (
@@ -8323,15 +8458,15 @@ def render_autopilot(ctx: PageContext) -> str:
                 table(
                     "Open positions — these stay open when the loop stops",
                     (
-                        ("symbol", "Symbol"),
-                        ("timeframe", "TF"),
-                        ("direction", "Side"),
-                        ("lots", "Lots"),
-                        ("entry_price", "Entry"),
-                        ("stop", "Stop"),
-                        ("target", "Target"),
-                        ("entry_at", "Opened"),
-                        ("restored", "After restart"),
+                        ("Symbol", "text"),
+                        ("TF", "text"),
+                        ("Side", "text"),
+                        ("Lots", "num"),
+                        ("Entry", "num"),
+                        ("Stop", "num"),
+                        ("Target", "num"),
+                        ("Opened", "text"),
+                        ("After restart", "text"),
                     ),
                     (
                         (
@@ -8361,12 +8496,12 @@ def render_autopilot(ctx: PageContext) -> str:
                 table(
                     "The last decision per symbol and timeframe",
                     (
-                        ("key", "Row"),
-                        ("action", "Action"),
-                        ("reason", "Reason"),
-                        ("detail", "Detail"),
-                        ("bar", "Bar"),
-                        ("at", "At"),
+                        ("Row", "mono"),
+                        ("Action", "text"),
+                        ("Reason", "text"),
+                        ("Detail", "text"),
+                        ("Bar", "text"),
+                        ("At", "text"),
                     ),
                     (
                         (
@@ -8390,12 +8525,12 @@ def render_autopilot(ctx: PageContext) -> str:
                 table(
                     "Entry fills",
                     (
-                        ("at", "At"),
-                        ("symbol", "Symbol"),
-                        ("direction", "Side"),
-                        ("lots", "Lots"),
-                        ("price", "Price"),
-                        ("reason", "Reason"),
+                        ("At", "text"),
+                        ("Symbol", "text"),
+                        ("Side", "text"),
+                        ("Lots", "num"),
+                        ("Price", "num"),
+                        ("Reason", "text"),
                     ),
                     (
                         (
@@ -8413,14 +8548,14 @@ def render_autopilot(ctx: PageContext) -> str:
                 + table(
                     "Exit fills (closed trades), with the price P&L in the quote currency",
                     (
-                        ("at", "At"),
-                        ("symbol", "Symbol"),
-                        ("direction", "Side"),
-                        ("entry_price", "Entry"),
-                        ("exit_price", "Exit"),
-                        ("simulated_net_quote", "Price P&L (before costs)"),
-                        ("simulated_mid_move_pips", "Mid move (pips)"),
-                        ("reason", "Reason"),
+                        ("At", "text"),
+                        ("Symbol", "text"),
+                        ("Side", "text"),
+                        ("Entry", "num"),
+                        ("Exit", "num"),
+                        ("Price P&L (before costs)", "num"),
+                        ("Mid move (pips)", "num"),
+                        ("Reason", "text"),
                     ),
                     (
                         (
@@ -8487,9 +8622,9 @@ def render_autopilot(ctx: PageContext) -> str:
                 table(
                     "The selection this page would propose, if an operator chose to",
                     (
-                        ("candidate_id", "Candidate"),
-                        ("pair", "Pair"),
-                        ("timeframe", "TF"),
+                        ("Candidate", "mono"),
+                        ("Pair", "text"),
+                        ("TF", "text"),
                     ),
                     (
                         (

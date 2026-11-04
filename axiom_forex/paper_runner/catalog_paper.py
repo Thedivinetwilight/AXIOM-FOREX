@@ -647,8 +647,9 @@ class CatalogPaperTest:
                 + (f"{self._recovery.get('detail')}. " if self._recovery.get("detail") else "")
                 + (f"Affected: {names}{more}. " if names else "")
                 + "The state file has been left untouched. Review the paper ledger, "
-                "then either flatten with \"Simulate closing open positions\" or "
-                "restore the missing fields before starting again."
+                "then either close the book with \"Simulate closing all paper "
+                "positions\" on the Paper positions page, or restore the missing "
+                "fields before starting again."
             ),
         }
 

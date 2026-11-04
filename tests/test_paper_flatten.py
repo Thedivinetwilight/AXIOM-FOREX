@@ -28,6 +28,7 @@ live-readiness claim.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -685,20 +686,28 @@ def test_nothing_on_the_close_path_can_reach_a_broker_or_change_the_mode(tmp_pat
         for name in (
             "axiom_forex/paper_runner/catalog_paper.py",
             "axiom_forex/strategies/catalog/panel.py",
+            # The autopilot builds and drives the paper test; it must reach none of
+            # these either.  It holds no adapter at all, and the LIVE handoff it
+            # describes is a bridge object, not a broker one.
+            "axiom_forex/strategies/catalog/autopilot.py",
         )
     }
+    # Calls and imports, not prose: ``per_order_checks`` is a key in the handoff
+    # text, while ``order_check(`` would be the broker's own preflight call.
+    forbidden_calls = (
+        r"\border_send\s*\(",
+        r"\border_check\s*\(",
+        r"\bpositions_get\s*\(",
+        r"\bclose_position\s*\(",
+        r"\bposition_close\s*\(",
+        r"\bMetaTrader5\b",
+        r"\bmt5\.",
+    )
+    forbidden_names = ("live_arm", "set_live", "enable_live", "set_paper")
     for name, source in sources.items():
-        for forbidden in (
-            "order_send",
-            "order_check",
-            "positions_get",
-            "MetaTrader5",
-            "mt5.",
-            "live_arm",
-            "set_live",
-            "enable_live",
-            "set_paper",
-        ):
+        for pattern in forbidden_calls:
+            assert not re.search(pattern, source), f"{pattern} appears in {name}"
+        for forbidden in forbidden_names:
             assert forbidden not in source, f"{forbidden} appears in {name}"
 
     # The close reads quotes and specs through this surface and nothing else.

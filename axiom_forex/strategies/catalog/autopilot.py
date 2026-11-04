@@ -763,6 +763,7 @@ class Autopilot:
 
     def status(self) -> dict[str, Any]:
         paper = self._paper_status()
+        stored = self.stored_book()
         with self._lock:
             state = self._state
             if state == RUNNING and paper and not paper.get("running"):
@@ -783,6 +784,8 @@ class Autopilot:
                 "selection_ms": round(self._selection_ms, 1),
                 "positions": positions,
                 "open_positions": len(positions),
+                # What is on disk, which is the only book that survives a restart.
+                "stored_book": stored,
                 "watch_refusals": [dict(item) for item in self._watch_refusals],
                 "paper": paper,
                 "kronos": self.gate.view(),
@@ -796,6 +799,62 @@ class Autopilot:
                     "profit claim."
                 ),
             }
+
+    def stored_book(self) -> dict[str, Any]:
+        """The paper book **on disk**, whether or not this process has loaded it.
+
+        The page used to draw only the in-memory snapshot.  A stored book this
+        process had not resumed — after a restart, or after a resume refused for
+        ``paper_state_incomplete`` — was therefore invisible on the Autopilot page
+        while /positions listed it, and the two pages disagreed about whether
+        anything was open.  This reads the same ledger the positions page reads, so
+        they cannot.
+
+        Read-only and best effort: a folder that cannot be read answers
+        ``available: False`` with the reason, never an empty book pretending to be
+        flat.
+        """
+
+        root = self._panel_data_root() / "paper"
+        ledger = root / "catalog-paper-ledger.jsonl"
+        state = root / "catalog-paper-state.json"
+        if not ledger.exists() and not state.exists():
+            return {}
+        try:
+            from ...paper_runner import accounting
+
+            account = accounting.read_account(root)
+        except Exception as error:  # a read model never raises into a page
+            return {
+                "available": False,
+                "error": type(error).__name__,
+                "open": None,
+                "positions": [],
+                "recovery": {},
+                "message": (
+                    "The stored paper book could not be read, so this page cannot say "
+                    "what is open. /positions shows the same error."
+                ),
+            }
+        counts = dict(account.get("counts") or {})
+        session = dict(account.get("session") or {})
+        recovery = dict(session.get("recovery") or {})
+        positions = [dict(item) for item in (account.get("positions") or ())]
+        return {
+            "available": bool(account.get("available", True)),
+            "open": int(counts.get("open_positions") or 0),
+            "closed": int(counts.get("closed_trades") or 0),
+            "entries": int(counts.get("entry_fills") or 0),
+            "exits": int(counts.get("exit_fills") or 0),
+            "positions": positions,
+            "recovery": recovery,
+            # Only a record that *says* it refused counts as blocked.  A folder with
+            # no recovery report is unknown, and is described as unknown.
+            "blocked": recovery.get("ok") is False,
+            "reported": bool(recovery),
+            "integrity": dict(account.get("integrity") or {}),
+            "folder": str(root),
+        }
 
     def choices(self) -> dict[str, Any]:
         """What the operator may ask for, and the bounds that come with it.
