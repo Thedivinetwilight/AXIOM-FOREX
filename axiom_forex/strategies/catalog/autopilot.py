@@ -800,6 +800,32 @@ class Autopilot:
                 ),
             }
 
+    def state_summary(self) -> dict[str, Any]:
+        """One line of state, for the chrome every page carries.
+
+        ``status()`` is the page's view: it also reads the book on disk.  This
+        answers only "is the loop following a selection, and how many positions
+        is it holding", from memory, so the page chrome can show the same state
+        without a second ledger read and without starting anything.
+
+        The reconciliation is the same rule as ``status()``: if the loop believes
+        it is running but the paper test underneath is not, the loop is reported
+        as stopped or blocked rather than as running.
+        """
+
+        paper = self._paper_status()
+        with self._lock:
+            state = self._state
+            if state == RUNNING and paper and not paper.get("running"):
+                state = BLOCKED if paper.get("status") == "BLOCKED" else STOPPED
+            return {
+                "available": True,
+                "state": state,
+                "reason": self._reason,
+                "running": state == RUNNING,
+                "open_positions": len(paper.get("positions") or ()) if paper else 0,
+            }
+
     def stored_book(self) -> dict[str, Any]:
         """The paper book **on disk**, whether or not this process has loaded it.
 

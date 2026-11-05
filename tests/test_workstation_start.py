@@ -562,15 +562,23 @@ def test_the_guided_page_is_the_home_page_and_its_actions_are_allowlisted():
     from axiom_forex.workstation import views
 
     assert GET_ROUTES["/"] == ("start", "Start paper trading")
-    # The sidebar leads with the guided page; everything else is grouped after it.
-    assert views.NAV[0][0] == "start"
+    # The sidebar leads with the page that *runs* the paper test, and the guided
+    # start page stays the home route and the second entry.  Autopilot used to sit
+    # at the bottom of "Advanced", which put the page the whole revamp is built
+    # around behind a group heading for operators who already know the system.
+    assert views.NAV[0][0] == "autopilot"
+    assert views.NAV[1][:2] == ("start", "/")
     # Essential paper pages first, setup next, everything else behind "Advanced".
     assert [title for title, _keys in views.NAV_GROUPS] == [
         "Paper trading",
         "Set up",
         "Advanced",
     ]
-    assert views.NAV_GROUPS[0][1][:2] == ("start", "performance")
+    assert views.NAV_GROUPS[0][1][:2] == ("autopilot", "start")
+    # Every navigation entry is in exactly one group, and every group names real
+    # entries: a link nobody grouped would never be drawn in the sidebar.
+    grouped = [key for _title, keys in views.NAV_GROUPS for key in keys]
+    assert grouped == [entry[0] for entry in views.NAV]
     # The classic overview is still reachable, and reachable on purpose.
     assert GET_ROUTES["/overview"] == ("overview", "Overview")
     # The page only posts actions the workstation already had.

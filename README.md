@@ -125,12 +125,23 @@ mode switch. Two commonly need real work:
 ### One-time setup on Windows
 
 1. Install **Python 3.11 or newer** (tick *Add python.exe to PATH* in the installer), then in a
-   new terminal:
+   new terminal, **inside this folder**:
 
    ```bat
-   py -m pip install -e .
-   py -m pip install MetaTrader5
+   py -3 -m venv .venv
+   .venv\Scripts\python.exe -m pip install -e .
+   .venv\Scripts\python.exe -m pip install MetaTrader5
    ```
+
+   The project runs in `.venv`, and that is the only interpreter the launcher and
+   `scripts\update-workstation.cmd` use. Do not install AXIOM into a global Python as well: the
+   launcher then has two candidates, and the one it used to pick was the global one — with none
+   of these packages in it. `py -m pip install -e .` still works, but you would be setting up an
+   environment the scripts deliberately do not run.
+
+   `pip install -e .` also installs `tzdata` on Windows. Windows ships no time-zone database,
+   and the paper platform's session calendar needs one; without it the workstation starts with
+   its paper panels unavailable and says so in the prerequisites check.
 
 2. Install MetaTrader 5 **from your broker**, open it once, and sign in to the account you
    want to use — demo or real, your choice. Leave the terminal running and signed in. AXIOM
@@ -159,15 +170,21 @@ mode switch. Two commonly need real work:
 
 ### Launch
 
-Double-click **`scripts\start-workstation.cmd`**, or run one of:
+Double-click **`scripts\start-workstation.cmd`**, or run one of these — the virtual environment's
+own interpreter, from this folder:
 
 ```bat
-py -m axiom_forex.workstation.launch                    :: connect to your local terminal
-py -m axiom_forex.workstation.launch --simulate         :: offline preview, sample data only
-py -m axiom_forex.workstation.launch --print-prerequisites
-py -m axiom_forex.workstation.launch --port 8766        :: if 8765 is taken
-py -m axiom_forex.workstation.launch --no-browser       :: do not open a browser
+.venv\Scripts\python.exe -m axiom_forex.workstation.launch                    :: connect to your local terminal
+.venv\Scripts\python.exe -m axiom_forex.workstation.launch --simulate         :: offline preview, sample data only
+.venv\Scripts\python.exe -m axiom_forex.workstation.launch --print-prerequisites
+.venv\Scripts\python.exe -m axiom_forex.workstation.launch --port 8766        :: if 8765 is taken
+.venv\Scripts\python.exe -m axiom_forex.workstation.launch --no-browser       :: do not open a browser
 ```
+
+The script prints which interpreter it is about to run before it runs it, so a `.venv` launch
+can be told apart from a global one at a glance. If `.venv` is missing it stops and prints the
+three commands that create it; `scripts\start-workstation.cmd --system-python` is the explicit
+opt-in for a system-wide install, and it warns when used.
 
 The launcher opens `http://127.0.0.1:8765/` in your browser once the server is listening
 (`--no-browser` suppresses that). It binds to loopback only. The launcher refuses to

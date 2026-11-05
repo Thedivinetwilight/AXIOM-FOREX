@@ -140,6 +140,14 @@ the runner shows them in the UI next to the state.
 
 The runner lives behind a flag; without it the workstation is exactly as before.
 
+These commands use `python` from an activated environment. On Windows, the supported
+interpreter is the project virtual environment, which is what `scripts\start-workstation.cmd`
+runs and what `scripts\update-workstation.cmd` keeps up to date:
+
+```bat
+.venv\Scripts\python.exe -m axiom_forex.workstation.launch
+```
+
 ```bash
 # Offline: replay the platform's own stored bars (labelled HISTORICAL_REPLAY).
 python -m axiom_forex.workstation.launch --simulate --paper-runner --paper-runner-source replay

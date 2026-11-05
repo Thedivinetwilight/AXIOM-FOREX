@@ -38,7 +38,29 @@ from axiom_forex.risk.entry_limits import (
 from app.universe.specs import CurrencyPairSpec, InstrumentCatalog, InstrumentStatus, QuantityUnit
 
 UTC = timezone.utc
-NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _new_york() -> ZoneInfo:
+    """The fixture calendar's home zone, or a named failure.
+
+    ``zoneinfo`` needs a time-zone database; Windows ships none, so this raises
+    ``ZoneInfoNotFoundError`` there unless the ``tzdata`` package is installed.
+    The message says which command fixes it, because a bare
+    ``ZoneInfoNotFoundError`` at import time is the least useful thing a
+    synthetic fixture can print.
+    """
+
+    try:
+        return ZoneInfo("America/New_York")
+    except Exception as error:  # noqa: BLE001 - re-raised with the fix attached
+        raise RuntimeError(
+            "The synthetic fixture calendar needs time-zone data, and this "
+            "interpreter has none (Windows ships no time-zone database). "
+            "Install it once: .venv\\Scripts\\python.exe -m pip install -e ."
+        ) from error
+
+
+NEW_YORK = _new_york()
 
 PAIR = "AAA/BBB"
 PROVIDER_ID = "SYNTHETIC_FEED"

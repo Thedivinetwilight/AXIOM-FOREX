@@ -139,7 +139,36 @@ def test_gate_audit_events_are_json_safe_for_allow_and_reject():
     json.dumps(rejected_env.audit_log.last())
 
 
-def test_pyproject_keeps_runtime_dependency_free():
+def test_pyproject_declares_one_runtime_dependency_and_only_one():
+    """AXIOM's own code is standard library only; the time-zone *data* is not ours.
+
+    This used to assert ``dependencies = []``.  That invariant was true and it was
+    also why the workstation could not start on Windows: ``zoneinfo`` reads a
+    time-zone database, Windows ships none, and the package that provides one was
+    only in the ``dev`` extra, so ``pip install -e .`` -- the command the launcher
+    instructions run -- left it out.  The import then failed with
+    ``ZoneInfoNotFoundError`` before any of our code could explain it.
+
+    The guard keeps its teeth: exactly one runtime dependency, environment-marked,
+    and it must be the time-zone data.  Anything else still fails this test.
+    """
+
     text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
-    assert "dependencies = []" in text
     assert "requires-python = \">=3.11\"" in text
+
+    declared = text.split("dependencies = [", 1)[1].split("]", 1)[0]
+    requirements = []
+    for line in declared.splitlines():
+        entry = line.strip().rstrip(",").strip()
+        if not entry:
+            continue
+        # Drop exactly the one pair of quotes the TOML string is wrapped in, so a
+        # quote *inside* the requirement (the environment marker) survives.
+        if len(entry) >= 2 and entry[0] == entry[-1] and entry[0] in "\"'":
+            entry = entry[1:-1]
+        requirements.append(entry)
+    assert len(requirements) == 1, requirements
+    assert requirements[0].startswith("tzdata"), requirements
+    # Windows only: a Linux machine has the database in /usr/share/zoneinfo and
+    # must not be made to install a wheel it does not need.
+    assert "platform_system == 'Windows'" in requirements[0]

@@ -3,12 +3,20 @@ name = "axiom-forex"
 version = "0.2.0"
 description = "Provider-neutral forex research and paper-trading architecture adaptation"
 requires-python = ">=3.11"
-dependencies = []
+# AXIOM's own code is standard library only.  tzdata is the one exception, and
+# only on Windows: `zoneinfo` reads the system time-zone database, and Windows
+# ships none, so `ZoneInfo("America/New_York")` -- which the paper platform's
+# session calendar resolves at import -- raises ZoneInfoNotFoundError on a
+# machine that does not have it.  It belongs here rather than in the `dev`
+# extra, because `pip install -e .` is what the launcher instructions run and a
+# runtime need has to arrive with it.
+dependencies = [
+  "tzdata>=2024.1; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8,<10",
-  "tzdata>=2024.1; platform_system == 'Windows'",
 ]
 
 [tool.pytest.ini_options]

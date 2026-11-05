@@ -40,8 +40,23 @@ COMMON_TERMINAL_PATHS: tuple[str, ...] = (
 REQUIRED_PACKAGES: tuple[tuple[str, str, bool], ...] = (
     ("MetaTrader5", "Talks to the installed MT5 terminal.", True),
     ("keyring", "Optional: only needed if you ever store an MT5 password locally.", False),
-    ("tzdata", "Optional on Windows: reliable time-zone data for session times.", False),
+    (
+        "tzdata",
+        "Time-zone data: Windows ships no zone database, and the paper platform's "
+        "session calendar needs one. Not needed where the operating system already "
+        "provides the database (Linux), which is why the *zone probe* below is the "
+        "check that blocks, not this package name.",
+        False,
+    ),
 )
+
+#: The zone the paper platform resolves when it builds its session calendar.
+#:
+#: It is checked by *resolving* it, not by looking for a package name: a Linux
+#: machine has the database in /usr/share/zoneinfo and needs no wheel, while
+#: Windows has neither and needs the wheel.  What matters is whether a zone
+#: resolves at all, because that is what the platform does at import.
+ZONE_KEY = "America/New_York"
 
 MINIMUM_PYTHON = (3, 11)
 
@@ -105,6 +120,10 @@ class EnvironmentReport:
     settings_path: str
     settings_has_secret: bool
     checked_at: datetime
+    #: Whether a time zone actually resolves on this interpreter.  False is the
+    #: Windows-without-tzdata case, where the paper platform cannot be built.
+    zone_database_ok: bool = True
+    zone_key: str = ZONE_KEY
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     # -- derived --------------------------------------------------------
@@ -137,6 +156,8 @@ class EnvironmentReport:
             reasons.append("not_windows")
         if not self.python_ok:
             reasons.append("python_too_old")
+        if not self.zone_database_ok:
+            reasons.append("time_zone_database_missing")
         if not self.sdk_ready:
             reasons.append("metatrader5_package_missing")
         if not self.terminal_found:
@@ -170,6 +191,8 @@ class EnvironmentReport:
             "settings_login_present": self.settings_login_present,
             "settings_has_secret": self.settings_has_secret,
             "settings_path": "<local-settings-file>" if self.settings_present else "",
+            "zone_database_ok": self.zone_database_ok,
+            "zone_key": self.zone_key,
             "blocking": list(self.blocking),
             "ready_to_connect": self.ready_to_connect,
             "checked_at": self.checked_at,
@@ -216,6 +239,23 @@ def _default_version(name: str) -> str:
         return ""
 
 
+def zone_database_available(key: str = ZONE_KEY) -> bool:
+    """Can this interpreter resolve ``key`` to a time zone?
+
+    A *read*: ``zoneinfo`` looks in the system database and, failing that, in the
+    ``tzdata`` package.  Nothing here imports MetaTrader5, starts a process or
+    writes anything.
+    """
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(key)
+    except Exception:
+        return False
+    return True
+
+
 def probe_environment(
     *,
     settings_path: str | Path | None = "mt5_settings.local.json",
@@ -224,6 +264,7 @@ def probe_environment(
     release: str | None = None,
     python: Sequence[int] | None = None,
     finder: Callable[[str], Any] | None = None,
+    zone_probe: Callable[[str], bool] | None = None,
     version_of: Callable[[str], str] | None = None,
     exists: Callable[[str], bool] | None = None,
     which: Callable[[str], str | None] | None = None,
@@ -255,6 +296,11 @@ def probe_environment(
 
     notes: list[str] = []
     python_ok = python_bits[:2] >= MINIMUM_PYTHON
+    ZoneProbe = zone_probe if zone_probe is not None else zone_database_available
+    try:
+        zone_ok = bool(ZoneProbe(ZONE_KEY))
+    except Exception:  # a probe that fails is a missing database, never a pass
+        zone_ok = False
 
     packages = tuple(
         _package_check(name, purpose, required, Finder, VersionOf)
@@ -311,6 +357,13 @@ def probe_environment(
             "AXIOM-FOREX needs Python 3.11 or newer; install it from python.org and "
             "re-run this check."
         )
+    if not zone_ok:
+        notes.append(
+            "No time-zone database is available to this interpreter, so the paper "
+            "platform cannot be built and the workstation will open without its "
+            "paper panels. Install it once into the same environment: "
+            ".venv\\Scripts\\python.exe -m pip install -e ."
+        )
     if resolved_system != "Windows":
         notes.append(
             "The MetaTrader terminal runs on Windows. This check is running on "
@@ -333,6 +386,7 @@ def probe_environment(
         settings_path=str(settings_path or ""),
         settings_has_secret=has_secret,
         checked_at=Clock(),
+        zone_database_ok=zone_ok,
         notes=tuple(notes),
     )
 
@@ -366,6 +420,21 @@ def prerequisite_help(report: EnvironmentReport) -> list[dict[str, str]]:
                 "title": "Install Python 3.11 or newer",
                 "detail": "Download the current Python 3 for Windows from python.org, "
                 "then reopen the launcher.",
+            }
+        )
+    if not report.zone_database_ok:
+        help_items.append(
+            {
+                "code": "time_zone_database_missing",
+                "title": "Install time-zone data (tzdata) into the project environment",
+                "detail": (
+                    "Windows has no time-zone database of its own, so the paper "
+                    "platform cannot resolve session times without the tzdata "
+                    "package. From the project folder, in the environment that runs "
+                    "AXIOM: .venv\\Scripts\\python.exe -m pip install -e . "
+                    "That installs tzdata along with AXIOM itself. Then re-run this "
+                    "check."
+                ),
             }
         )
     if not report.sdk_ready:

@@ -8,6 +8,8 @@ rem      git fetch origin <branch>
 rem      git merge --ff-only origin/<branch>      (fast-forward only)
 rem      .venv\Scripts\python.exe -m pip install -e . --no-deps
 rem      .venv\Scripts\python.exe -c "import ..." (post-update import check)
+rem      .venv\Scripts\python.exe -c "import zoneinfo; ..." (time-zone data
+rem        check, and the one declared runtime dependency if it is missing)
 rem
 rem  What it will never do:
 rem    * delete, move, rename, reset, clean, stash, checkout or reclone
@@ -108,6 +110,25 @@ echo   Checking that the updated code imports ...
 "%VENV_PY%" -c "import axiom_forex, axiom_forex.workstation.app, axiom_forex.workstation.session, axiom_forex.workstation.dataflow, axiom_forex.paper_runner.runner, axiom_forex.paper_runner.host, axiom_forex.paper_runner.provider, axiom_forex.paper_runner.live, axiom_forex.brokers.mt5.catalogue, axiom_forex.ingest.mt5_ticks" >nul 2>nul
 if errorlevel 1 goto :verify_failed
 
+rem -- 7b. time-zone data ----------------------------------------------
+rem    `pip install -e . --no-deps` above deliberately does not resolve
+rem    dependencies, so an .venv created before tzdata was declared would keep
+rem    failing at run time with ZoneInfoNotFoundError -- on Windows, where the
+rem    operating system has no zone database of its own.  This asks the
+rem    interpreter the question the code asks, and installs only what
+rem    pyproject.toml already declares.
+"%VENV_PY%" -c "import zoneinfo;zoneinfo.ZoneInfo('America/New_York')" >nul 2>nul
+if not errorlevel 1 goto :zone_ok
+
+echo.
+echo   This interpreter has no time-zone database, which the paper platform
+echo   needs on Windows. Installing the dependency declared in pyproject.toml...
+"%VENV_PY%" -m pip install -e . --disable-pip-version-check
+if errorlevel 1 goto :zone_failed
+echo   Time-zone data installed.
+
+:zone_ok
+
 rem -- 8. MetaTrader 5 package: report it, never install it ------------
 rem    That package is installed by YOU and only when you want the live
 rem    path. This script never installs anything outside .venv.
@@ -121,6 +142,10 @@ echo     branch  %EXPECTED_BRANCH%
 echo     commit  %AFTER%
 echo     python  %VENV_PY%
 echo     MetaTrader5 package: %MT5_NOTE%
+set "TZ_NOTE=present"
+"%VENV_PY%" -c "import zoneinfo;zoneinfo.ZoneInfo('America/New_York')" >nul 2>nul
+if errorlevel 1 set "TZ_NOTE=MISSING - see the message above"
+echo     time-zone data: %TZ_NOTE%
 echo.
 echo   mt5_settings.local.json, provider_setup.local.json, live_plan.local.json,
 echo   paper_runner.local.sqlite3, imports\,
@@ -263,6 +288,21 @@ echo       py -3 -m venv .venv
 echo       .venv\Scripts\python.exe -m pip install -e .
 echo.
 echo   Nothing was deleted; mt5_settings.local.json is untouched.
+echo.
+pause
+exit /b 1
+:zone_failed
+echo.
+echo   The code update succeeded ^(now at %AFTER%^) and the packages were
+echo   refreshed, but this interpreter still has no time-zone database and it
+echo   could not be installed ^(the usual cause is no network access^).
+echo.
+echo   Your settings and data files are untouched. When you are online, run:
+echo.
+echo       .venv\Scripts\python.exe -m pip install -e .
+echo.
+echo   The workstation will start without it, but its paper panels stay
+echo   unavailable, and the prerequisites check names it.
 echo.
 pause
 exit /b 1

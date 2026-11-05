@@ -254,18 +254,41 @@ def test_it_refreshes_the_existing_venv_without_recreating_it():
     assert venv_calls, "the updater should refresh .venv"
     pip_calls = [line for line in venv_calls if " -m pip " in line]
     check_calls = [line for line in venv_calls if ' -c "import ' in line]
-    # Exactly one install, and everything else that runs Python is a read-only
-    # import check: the updater never runs the application, a terminal, or a test.
-    assert len(pip_calls) == 1, pip_calls
+    # Exactly one unconditional install, and everything else that runs Python is a
+    # read-only import check: the updater never runs the application, a terminal,
+    # or a test.
+    #
+    # There is one conditional install, and only one: after the `--no-deps`
+    # refresh, the updater asks the interpreter whether a time zone resolves. If
+    # it does not -- an .venv created before tzdata was declared -- it installs the
+    # project's own declared dependencies with `pip install -e .`. It names no
+    # package of its own, so it cannot install anything pyproject.toml does not
+    # already require, and it never touches MetaTrader5.
+    pip_calls = [line for line in pip_calls if "--no-deps" in line] + [
+        line for line in venv_calls if " -m pip " in line and "--no-deps" not in line
+    ]
+    unconditional = [line for line in pip_calls if "--no-deps" in line]
+    assert len(unconditional) == 1, pip_calls
+    conditional = [line for line in pip_calls if "--no-deps" not in line]
+    assert len(conditional) <= 1, pip_calls
     for line in pip_calls:
         assert "-m pip install -e ." in line, line
-        assert "--no-deps" in line, line
+        # No package is ever named on the command line: only flags follow "-e .".
+        after = line.split("-m pip install -e .", 1)[1].strip()
+        assert not after or after.startswith("--"), line
+        for forbidden_package in ("metatrader5", "pytest", "keyring"):
+            assert forbidden_package not in line.lower(), line
     assert check_calls, "the updater should verify the updated code imports"
     for line in check_calls:
         assert line.rstrip().endswith(">nul 2>nul"), line
-        # Either the post-update import proof, or a presence check for the
-        # optional MetaTrader5 package. Neither installs it.
-        assert "workstation" in line or "import MetaTrader5" in line, line
+        # The post-update import proof, a presence check for the optional
+        # MetaTrader5 package (which is never installed here), or the time-zone
+        # data check that decides whether the conditional install runs.
+        assert (
+            "workstation" in line
+            or "import MetaTrader5" in line
+            or "zoneinfo" in line
+        ), line
     for line in venv_calls:
         assert " -m pip install -e ." in line or ' -c "import ' in line, line
     # The interpreter is the one already in .venv; it is never created or removed.

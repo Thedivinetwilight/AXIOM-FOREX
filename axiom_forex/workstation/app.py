@@ -426,7 +426,9 @@ class WorkstationApp:
             return HTTPStatus.NOT_FOUND, render_page(ctx)
         page, title = route
         with self.lock:
-            ctx = self._context(page, title, query=query)
+            # The route, not the page key: the Refresh control has to return to
+            # the page the operator is on, and "/" + "start" is not a page.
+            ctx = self._context(page, title, query=query, path=path)
             html = render_page(ctx)
         return HTTPStatus.OK, html
 
@@ -709,6 +711,7 @@ class WorkstationApp:
         title: str,
         notice: str = "",
         query: Mapping[str, Any] | None = None,
+        path: str = "",
     ) -> PageContext:
         # One preflight per page render: it is read-only, and running it twice
         # would let two panels disagree about the same facts.
@@ -730,6 +733,7 @@ class WorkstationApp:
             execution_mode=self.mode_view(blockers=preflight.get("blockers", ())),
             preflight=preflight,
             runner=self.runner_view(data=data),
+            path=path,
             extra={
                 # The paper account, on every page: orders, fills, open positions,
                 # P&L, freshness and integrity all come from this one reading.
@@ -760,6 +764,10 @@ class WorkstationApp:
                 # reason for every candidate, and the LIVE handoff with its
                 # blockers.  Reading it starts nothing.
                 "autopilot": self.autopilot_view() if page == "autopilot" else {},
+                # Just the state, on every page: the topbar shows whether the
+                # paper loop is following a selection, from memory, without
+                # reading the book again and without starting anything.
+                "autopilot_state": self.autopilot_summary(),
                 # The guided page's step 3: the terminal's own bars, read once and
                 # cached by the panel.  Nothing is written and nothing is stored.
                 "data_check": self.data_check_view() if page == "start" else {},
@@ -1031,6 +1039,17 @@ class WorkstationApp:
             view["result"] = dict(self.autopilot_result)
             self.autopilot_result = {}
         return view
+
+    def autopilot_summary(self) -> dict[str, Any]:
+        """The paper loop's state for the page chrome, or ``{}`` without one."""
+
+        if self.autopilot is None:
+            return {}
+        try:
+            return dict(self.autopilot.state_summary())
+        except Exception as exc:  # chrome never raises into the page
+            self._log(f"autopilot summary failed: {type(exc).__name__}")
+            return {"available": False}
 
     def autopilot_live_view(self) -> dict[str, Any]:
         """The bridge's own view: what it would run, and why it may not.

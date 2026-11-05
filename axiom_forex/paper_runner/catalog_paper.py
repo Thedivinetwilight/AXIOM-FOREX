@@ -1916,6 +1916,24 @@ class CatalogPaperTest:
                     }
                 )
                 continue
+            if position.key in self._positions:
+                # Two stored records, one position key.  The runner's book is keyed
+                # by that key, so the second record would silently replace the
+                # first: one simulated entry would be followed by nothing, the
+                # ledger would keep both fills, and the page would claim a resume
+                # the book cannot perform.  Fail closed instead, keep the record
+                # that was read first, and name the disagreement.
+                report["failed"].append(
+                    {
+                        "key": position.key,
+                        "symbol": position.symbol,
+                        "reason": (
+                            "two stored position records share the position key, so "
+                            "nothing says which levels belong to which entry"
+                        ),
+                    }
+                )
+                continue
             self._positions[position.key] = position
             report["restored"] += 1
             if position.migrated:
@@ -1954,9 +1972,20 @@ class CatalogPaperTest:
 
         if report["failed"]:
             report["ok"] = False
+            duplicate = any(
+                "share the position key" in str(item.get("reason") or "")
+                for item in report["failed"]
+            )
             report["detail"] = (
                 f"{len(report['failed'])} stored paper position(s) cannot be resumed "
-                "exactly; the run is blocked and the state file is untouched"
+                "exactly"
+                + (
+                    " (at least two records share one position key, and the paper "
+                    "test can only manage one position per key)"
+                    if duplicate
+                    else ""
+                )
+                + "; the run is blocked and the state file is untouched"
             )
             self._record(
                 EVENT_RECOVERY_FAILED,

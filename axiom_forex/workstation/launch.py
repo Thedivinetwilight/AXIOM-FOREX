@@ -32,7 +32,7 @@ from typing import Any
 
 from ..config.mt5 import MT5Settings, MT5SettingsFileError, load_settings_file
 from .app import WorkstationApp, make_server
-from .probes import probe_environment
+from .probes import probe_environment, zone_database_available
 from .session import ObservationSession, SimulatedObservationSource, session_from_settings
 from .setup import SetupWizard
 
@@ -100,6 +100,23 @@ def _fixture_platform() -> object:
         return build_fixture_platform()
     except Exception as exc:  # the UI must still render without it
         print(f"[axiom-workstation] paper platform unavailable: {type(exc).__name__}", file=sys.stderr)
+        # The one cause worth naming: a Windows machine with no time-zone
+        # database.  The page will draw without the paper panels, and this line
+        # is the only place the operator is told what to run about it.
+        if not zone_database_available():
+            print(
+                "[axiom-workstation] no time-zone database is available to this "
+                "interpreter, so the paper platform cannot be built.",
+                file=sys.stderr,
+            )
+            print(
+                "  Install it once, in the environment that runs AXIOM:",
+                file=sys.stderr,
+            )
+            print(
+                "    .venv\\Scripts\\python.exe -m pip install -e .",
+                file=sys.stderr,
+            )
         return None
 
 

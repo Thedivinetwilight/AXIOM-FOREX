@@ -226,6 +226,33 @@ def read_terminal_view(session: Any) -> TerminalView:
     )
 
 
+#: Page key -> the route that renders it.
+#:
+#: Views need the current URL for the "Refresh" control, and a page key is not a
+#: route: the guided start page is ``/`` but its key is ``start``, so building
+#: ``/`` + key produced ``/start``, a link to nothing.  ``app.GET_ROUTES`` remains
+#: the single source of truth; a test asserts this table is exactly its reverse,
+#: so the two cannot drift apart quietly.
+PAGE_PATHS: dict[str, str] = {
+    "start": "/",
+    "overview": "/overview",
+    "setup": "/setup",
+    "account": "/account",
+    "positions": "/positions",
+    "performance": "/performance",
+    "data": "/data",
+    "quick-setup": "/quick-setup",
+    "provider-setup": "/provider-setup",
+    "live": "/live",
+    "kronos": "/kronos",
+    "autopilot": "/autopilot",
+    "strategies": "/strategies",
+    "activity": "/activity",
+    "health": "/health",
+    "mode": "/mode",
+}
+
+
 @dataclass(frozen=True)
 class PageContext:
     """Everything a page template receives."""
@@ -248,6 +275,10 @@ class PageContext:
     #: The paper strategy runner's own state, read from its owner thread.
     #: Empty when no runner is configured, which is the default.
     runner: Mapping[str, Any] = field(default_factory=dict)
+    #: The route this page was served from (``/`` for the start page).  Empty when
+    #: a context was assembled outside a request, in which case ``PAGE_PATHS``
+    #: answers for it.
+    path: str = ""
 
     @property
     def safety(self) -> dict[str, Any]:
@@ -313,6 +344,7 @@ def build_context(
     execution_mode: Mapping[str, Any] | None = None,
     preflight: Mapping[str, Any] | None = None,
     runner: Mapping[str, Any] | None = None,
+    path: str = "",
 ) -> PageContext:
     """Assemble a page.
 
@@ -341,4 +373,5 @@ def build_context(
         execution_mode=dict(execution_mode or default_mode_view()),
         preflight=dict(preflight or {}),
         runner=dict(runner or {}),
+        path=path or PAGE_PATHS.get(page, ""),
     )

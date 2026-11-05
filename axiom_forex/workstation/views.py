@@ -33,7 +33,7 @@ from axiom_forex.paper_runner.accounting import (
 )
 
 from . import guide
-from .context import PageContext, data_class_label
+from .context import PAGE_PATHS, PageContext, data_class_label
 from .symbols import MAX_EXCLUDED_SHOWN, SymbolRead, build_catalogue, catalogue_message
 
 APP_NAME = "AXIOM"
@@ -49,7 +49,8 @@ MAX_SYMBOL_ROWS_SHOWN = 200
 #: page comes first because it is the only page a new operator needs; everything
 #: else is a detail page that the guide links to when it is the next thing to do.
 NAV: tuple[tuple[str, str, str], ...] = (
-    # The four pages the paper workflow actually uses, in the order it uses them.
+    # The one page the paper workflow is built around, then the pages it opens.
+    ("autopilot", "/autopilot", "Autopilot"),
     ("start", "/", "Start paper trading"),
     ("performance", "/performance", "Paper performance"),
     ("positions", "/positions", "Paper positions"),
@@ -65,7 +66,6 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("mode", "/mode", "Trading mode"),
     ("live", "/live", "Live execution"),
     ("setup", "/setup", "Setup steps"),
-    ("autopilot", "/autopilot", "Autopilot"),
     ("kronos", "/kronos", "Kronos forecast"),
     ("overview", "/overview", "Overview (classic)"),
     ("health", "/health", "System health"),
@@ -74,7 +74,10 @@ NAV: tuple[tuple[str, str, str], ...] = (
 #: How the sidebar groups the same links: the guided path first, then the pages
 #: the guide opens, then everything an experienced operator may still need.
 NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Paper trading", ("start", "performance", "positions", "activity")),
+    # Autopilot leads the paper group: it is the page that runs the paper test,
+    # and it used to sit at the bottom of "Advanced" while the guided start page
+    # was the only entry above it.
+    ("Paper trading", ("autopilot", "start", "performance", "positions", "activity")),
     ("Set up", ("account", "data", "strategies")),
     (
         "Advanced",
@@ -84,7 +87,6 @@ NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mode",
             "live",
             "setup",
-            "autopilot",
             "kronos",
             "overview",
             "health",
@@ -933,6 +935,37 @@ def _nav(ctx: PageContext) -> str:
     return f"<nav class='nav' aria-label='Main'>{''.join(groups)}</nav>"
 
 
+def _paper_loop_chip(ctx: PageContext) -> str:
+    """The paper loop's own state, in the chrome of every page.
+
+    The Autopilot page is where the loop is started and stopped; this is how the
+    rest of the workstation says whether it is running, without the operator
+    having to go back and check.  It is drawn only when an autopilot object is
+    wired in, and its label is the object's own state -- no page infers it.
+    """
+
+    summary = dict((ctx.extra or {}).get("autopilot_state") or {})
+    if not summary or summary.get("available") is False:
+        return ""
+    state = str(summary.get("state") or "IDLE")
+    tone = {
+        "RUNNING": "ok",
+        "PREPARING": "warn",
+        "BLOCKED": "danger",
+        "STOPPED": "muted",
+    }.get(state, "muted")
+    label = f"Paper loop: {state}"
+    open_positions = int(summary.get("open_positions") or 0)
+    if open_positions:
+        label += f" · {open_positions} open"
+    if state in {"RUNNING", "PREPARING", "BLOCKED"}:
+        return (
+            f"<a class='row' href='/autopilot' style='text-decoration:none'>"
+            f"{chip(label, tone, dot=state in {'RUNNING', 'PREPARING'})}</a>"
+        )
+    return f"<div class='row'>{chip(label, tone)}</div>"
+
+
 def _sidebar(ctx: PageContext) -> str:
     state_note = (
         "Observing a terminal session. Read-only."
@@ -956,15 +989,21 @@ def _sidebar(ctx: PageContext) -> str:
 
 
 def _topbar(ctx: PageContext) -> str:
-    actions = [execution_mode_chip(ctx), connection_chip(ctx), mode_chip(ctx)]
+    # The paper loop's state leads: it is the one thing that changes while the
+    # operator is somewhere else in the workstation.  It lives here rather than in
+    # the sidebar footer because the footer is hidden under 860px, which is
+    # exactly where a phone-sized window needs it most.
+    actions = [_paper_loop_chip(ctx), execution_mode_chip(ctx), connection_chip(ctx), mode_chip(ctx)]
     if ctx.terminal.simulated and ctx.terminal.connected:
         actions.append(
             action_form("disconnect", ctx.action_nonce, "Stop simulator preview", tone="danger")
         )
     elif ctx.terminal.connected:
-        actions.append(
-            f"<a class='btn btn-sm' href='/{escape(ctx.page) if ctx.page != 'overview' else ''}'>Refresh</a>"
-        )
+        # The page's own route.  This used to be "/" + the page key, which is not
+        # a route for the start page (/start, a 404) and sent the classic overview
+        # to the start page instead of refreshing it.
+        here = ctx.path or PAGE_PATHS.get(ctx.page, "/")
+        actions.append(f"<a class='btn btn-sm' href='{escape(here)}'>Refresh</a>")
         actions.append(
             action_form("disconnect", ctx.action_nonce, "Disconnect", tone="danger")
         )
@@ -979,7 +1018,19 @@ def _topbar(ctx: PageContext) -> str:
     )
 
 
-def render_shell(ctx: PageContext, body: str) -> str:
+def render_shell(ctx: PageContext, body: str | Sequence[str]) -> str:
+    """The one page frame: landmarks, the skip link, the banner, the footer.
+
+    ``body`` is normally one string.  It is also accepted as a sequence of
+    fragments, because a page that builds itself as a list and hands the list
+    straight to this function used to have ``str(list)`` interpolated into the
+    document: the cards still rendered, but the page carried a literal ``["`` at
+    the top, ``, "`` between every two cards, and ``"]`` at the end.  Joining is
+    the only correct reading of a list here, so the type accepts one.
+    """
+
+    if not isinstance(body, str):
+        body = "".join(str(item) for item in body)
     banner = ""
     if ctx.terminal.simulated:
         if ctx.terminal.connected:
@@ -2352,6 +2403,19 @@ def render_start(ctx: PageContext) -> str:
             hint="Work down the list. The highlighted step is the next one to finish; "
             "every button posts an action this workstation already allows.",
         )
+        # The five steps end at the paper runner's own start.  The Autopilot page
+        # runs the same paper test from one control, so this page has to say where
+        # that page is: it is the entry that leads the sidebar, and a guide that
+        # never mentions it reads as if the steps were the only way in.
+        + card(
+            "Or run all of this from the Autopilot page",
+            "<p class='small' style='margin:0'><a href='/autopilot'>Autopilot</a> "
+            "evaluates the catalog on the terminal's own history, selects on train and "
+            "validation evidence, and follows the selection as the same locally "
+            "simulated paper test &mdash; one Start and one Stop. It sends no order "
+            "either, and it does not change what a step above does.</p>",
+            right=f"<a class='btn btn--primary' href='/autopilot'>Open Autopilot</a>",
+        )
         + advanced
     )
     return render_shell(ctx, body)
@@ -3234,9 +3298,16 @@ def _paper_book_recovery_card(
 
     Three answers, and each of them says only what the evidence supports:
 
-    * **It can be resumed** -- the recovery report is clean, so the page says the
-      positions match the rows the test would manage and points at Start.  Nothing
-      needs closing and no close is offered.
+    * **It can be resumed** -- the recovery report is clean *and* the ledger pairs
+      every open fill with its own key, so the page says the positions match the
+      rows the test would manage and points at Start.  Nothing needs closing and
+      no close is offered.
+    * **The ledger disagrees with itself** -- the recovery report may be clean
+      while the ledger reports an integrity warning (two entry fills sharing one
+      position key, a close with no entry before it).  The page then refuses to
+      call the book resumable, states the ledger's own warning, and offers the
+      close, because "resumed exactly" and "these figures cannot be reconciled"
+      cannot both be true.
     * **It cannot** -- the page names what refused it and offers the one action that
       writes the book flat, with the simulation stated on the button's own form.
       That action is the only place on this page that writes anything.
@@ -3249,6 +3320,34 @@ def _paper_book_recovery_card(
         return ""
     session = dict(account.get("session") or {})
     recovery = dict(session.get("recovery") or {})
+    integrity = dict(account.get("integrity") or {})
+    ledger_warnings = [
+        str(item.get("detail") or "")
+        for item in (integrity.get("warnings") or ())
+        if isinstance(item, Mapping) and str(item.get("detail") or "")
+    ]
+    if ledger_warnings and recovery.get("ok") is True:
+        rows = "".join(f"<li>{escape(item)}</li>" for item in ledger_warnings[:4])
+        return (
+            "<div class='notice notice--warn'><div>"
+            "<strong>The ledger and the stored book do not agree, so these positions "
+            "are not called resumable</strong>"
+            f"<ul class='list'>{rows}</ul>"
+            "<p class='small' style='margin:6px 0'>The paper test keeps one position "
+            "per key, so a second entry fill under the same key can never be managed "
+            "by it, and its cost stays in the ledger. Until that is settled the page "
+            "will not claim the book can carry on, and the figures that depend on it "
+            "are marked unavailable above.</p>"
+            "<p class='small' style='margin:6px 0'>Closing the book is the way out, "
+            "and it is all-or-nothing: every open record is closed once at its own "
+            "closing side from a fresh quote, and the closing fills are what make the "
+            "ledger pair again. Simulated paper accounting only — no broker order is "
+            "sent and no MetaTrader 5 position is touched.</p>"
+            f"{_close_all_paper_form(ctx)}"
+            "<p class='small muted' style='margin:8px 0 0'>Then start the paper "
+            "autopilot again; if it still refuses, the reason is shown here.</p>"
+            "</div></div>"
+        )
     if recovery.get("ok") is True:
         # The paper test proved it can manage every one of these positions, so a
         # close would throw away a trade it can still follow.
@@ -8170,7 +8269,8 @@ def render_autopilot(ctx: PageContext) -> str:
             f"<input type='hidden' name='nonce' value='{nonce}'>"
             "<label for='autopilot-symbols' class='small'>Symbols (comma separated; "
             "blank uses what the terminal recommends)</label>"
-            f"<input id='autopilot-symbols' name='symbols' value='{escape(recommended)}'>"
+            f"<input id='autopilot-symbols' name='symbols' type='text' "
+            f"autocomplete='off' spellcheck='false' value='{escape(recommended)}'>"
             "<label for='autopilot-timeframe' class='small'>Timeframe</label>"
             f"<select id='autopilot-timeframe' name='timeframes'>{options}</select>"
             "<button class='btn btn--primary' type='submit'>Start paper autopilot</button>"
@@ -8681,7 +8781,7 @@ def render_autopilot(ctx: PageContext) -> str:
             + " " + str(latency.get("note") or ""),
         )
     )
-    return render_shell(ctx, body)
+    return render_shell(ctx, "".join(body))
 
 
 PAGES = {
