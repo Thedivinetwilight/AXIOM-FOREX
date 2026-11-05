@@ -1916,9 +1916,46 @@ class WorkstationApp:
         )
 
     def data_view(self) -> dict[str, Any]:
-        """Everything the data page shows: files, the last result, and evidence."""
+        """Everything the data page shows: files, the last result, and evidence.
 
-        from . import dataflow
+        The tooling behind this page is imported *here*, not at module import,
+        because importing it pulls in the provider profiles and the conformance
+        package, which resolve the synthetic calendar and therefore need a
+        time-zone database (Windows ships none unless ``tzdata`` is installed).
+        A missing runtime dependency must not turn the home page into a 500:
+        every page renders, this one says what is missing and how to install it.
+        """
+
+        # Cached for the life of the process.  A failed import leaves some of the
+        # chain in ``sys.modules``, so a retry can succeed while the dependency it
+        # needed is still missing -- and a warning that disappears on reload is
+        # exactly the kind of disagreement this page must not produce.
+        unavailable = getattr(self, "_dataflow_error", "")
+        if unavailable:
+            dataflow = None
+        else:
+            try:
+                from . import dataflow
+            except Exception as exc:  # noqa: BLE001 - reported on the page, not raised
+                self._log(f"data tools unavailable: {type(exc).__name__}")
+                unavailable = str(exc) or type(exc).__name__
+                self._dataflow_error = unavailable
+                dataflow = None
+        if dataflow is None:
+            return {
+                "configured": False,
+                "unavailable_reason": unavailable,
+                "import_dir": "",
+                "scan_error": "",
+                "files": [],
+                "tick_files": [],
+                "dataset_files": [],
+                "data_classes": list(self._data_class_choices()),
+                "promoting_classes": [],
+                "last": dict(self.data_result),
+                "evaluation_available": False,
+                "evidence": {"available": False, "reason": "data_tools_unavailable", "rows": []},
+            }
 
         files: list[dict[str, Any]] = []
         scan_error = ""
@@ -1929,6 +1966,7 @@ class WorkstationApp:
                 scan_error = type(exc).__name__
         return {
             "configured": self.import_dir is not None,
+            "unavailable_reason": "",
             "import_dir": str(self.import_dir) if self.import_dir is not None else "",
             "scan_error": scan_error,
             "files": files,

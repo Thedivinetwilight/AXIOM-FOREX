@@ -496,6 +496,19 @@ select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;
   .dl{grid-template-columns:1fr;gap:2px var(--s3)}
   .dl dt{margin-top:8px}
 }
+/* A phone, or any window near it: one column, tighter padding, and the same
+   leading information.  Below this width a two-column grid does not shrink, it
+   scrolls sideways as a whole page -- which is how a table ends up unreadable
+   even though .table-wrap would have handled the table on its own. */
+@media (max-width:560px){
+  .content{padding:var(--s3);gap:var(--s3)}
+  .topbar{padding:var(--s3);gap:var(--s2);flex-wrap:wrap}
+  .card{padding:var(--s4)}
+  .grid--kpi,.grid--two,.grid--even,.data-grid,.metric-grid,.summary-grid,
+  .tile-grid,.split-callout,.mode-grid{grid-template-columns:minmax(0,1fr)}
+  .chart-row{grid-template-columns:64px minmax(0,1fr) 76px}
+  .dl,.dl--wide{grid-template-columns:1fr;gap:2px var(--s3)}
+}
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.01ms !important;transition-duration:.01ms !important}
 }
@@ -1269,11 +1282,28 @@ def _market_card(ctx: PageContext) -> str:
 
 
 def _paper_card(ctx: PageContext) -> str:
+    """The paper *platform's* account, named for what it actually is.
+
+    This is ``platform.status()``: the synthetic fixture platform that ships with
+    AXIOM, or a wired evaluation platform.  It is not the operator's paper ledger,
+    which is read from the fills this machine recorded and shown on Paper
+    performance.  Before this wording, /overview said "Equity 10000" under the
+    title "Paper account" while /performance said the paper equity was
+    unavailable, because no starting capital had been set -- two pages of one
+    product, two answers, and the fixture's invented balance looked like the
+    operator's own result.
+    """
+
     paper = ctx.paper
     if not paper.available:
         return card("Paper account", empty_state("Paper platform unavailable", paper.error or "No status could be read."))
+    label = ctx.paper_label
+    label_text = str(
+        label.get("label", "") if isinstance(label, Mapping) else getattr(label, "label", "")
+    )
+    synthetic = label_text.upper() == "SAMPLE FIXTURE"
     return card(
-        "Paper account",
+        "Fixture account (synthetic)" if synthetic else "Paper account",
         dl(
             [
                 ("Equity", escape(paper.equity)),
@@ -1285,8 +1315,18 @@ def _paper_card(ctx: PageContext) -> str:
                 ("Data class", f"{data_chip(ctx.paper_label)} <span class='muted small'>source {escape(paper.source or 'unknown')}</span>"),
             ]
         ),
-        hint="Simulated paper ledger. Not broker positions and not a live account.",
-        right=data_chip(ctx.paper_label),
+        hint=(
+            "The example account declared by the synthetic fixture platform AXIOM "
+            "ships with — an illustration, not your paper ledger. Your own paper "
+            "results are the fills this machine recorded, on Paper performance."
+            if synthetic
+            else "Simulated paper ledger. Not broker positions and not a live account."
+        ),
+        right=(
+            f"{data_chip(ctx.paper_label)} <a class='btn btn-sm' href='/performance'>Paper performance</a>"
+            if synthetic
+            else data_chip(ctx.paper_label)
+        ),
     )
 
 
@@ -2009,7 +2049,17 @@ def render_mode(ctx: PageContext) -> str:
 
     body = (
         mode_banner(ctx)
-        + "<div class='mode-grid'>" + paper_option + live_option + "</div>"
+        # The two options are h3s under the page's h1, so they need an h2 to sit
+        # under: without this heading the outline jumped h1 -> h3, which is where a
+        # screen reader's "next heading" lands the reader with no idea of the level
+        # they are on.
+        + card(
+            "Which execution mode is in force",
+            "<div class='mode-grid'>" + paper_option + live_option + "</div>",
+            hint="Exactly one of these is active. Switching sends nothing and places "
+            "no order either way.",
+            flush=True,
+        )
         + "<div class='grid grid--two'>"
         + card(
             "What would stop an order from being sent",
@@ -2373,6 +2423,25 @@ def render_start(ctx: PageContext) -> str:
         )
         + "</ol>"
     )
+    # The five steps are one route to a paper session.  The Autopilot is the other,
+    # and it is the one the navigation leads with: it evaluates, selects and follows
+    # the same catalog on a single page.  Saying so here is what stops this page
+    # from reading as "the only way to start anything".
+    primary = model.get("primary") or ()
+    signpost = (
+        card(
+            "Or run the whole loop from one page",
+            "<p class='small muted' style='margin:0'>"
+            f"{escape(str(primary[2]))} The Autopilot uses the same terminal, the same "
+            "catalog record and the same paper ledger as these five steps.</p>",
+            right=(
+                f"<a class='btn btn--primary btn-sm' href='{escape(str(primary[1]))}'>"
+                f"Open {escape(str(primary[0]))}</a>"
+            ),
+        )
+        if primary
+        else ""
+    )
     advanced = (
         "<details class='advanced'>"
         "<summary>Advanced — every other page</summary>"
@@ -2390,6 +2459,7 @@ def render_start(ctx: PageContext) -> str:
     body = (
         _account_alerts(account)
         + hero
+        + signpost
         + performance
         + card(
             "Where things stand",
@@ -3738,6 +3808,26 @@ def render_data(ctx: PageContext) -> str:
     nonce = escape(ctx.action_nonce)
     last = dict(view.get("last") or {})
     files = list(view.get("files") or [])
+
+    if view.get("unavailable_reason"):
+        # The data tooling itself could not be imported on this machine (a
+        # missing runtime dependency, most often the time-zone data).  Say so
+        # once, in full, and keep the page: the rest of the workstation works.
+        body = (
+            notice(
+                "danger",
+                "The data tools could not be loaded on this machine",
+                "Nothing here is hidden or guessed — the importer, the converter and "
+                "the dataset evaluation are simply not available in this Python. "
+                "What the interpreter reported: "
+                + str(view.get("unavailable_reason", ""))
+                + ". Install the project's dependencies into the environment that "
+                "runs AXIOM (.venv\\Scripts\\python.exe -m pip install -e .), then "
+                "restart the workstation.",
+            )
+            + _runner_card(ctx)
+        )
+        return render_shell(ctx, body)
 
     if not view.get("configured"):
         body = (
@@ -8021,6 +8111,111 @@ def _render_live_autopilot(live: Mapping[str, Any], nonce: str) -> str:
     )
 
 
+#: The runner's own counters, in the operator's words and in a fixed order.
+#:
+#: These used to be printed straight from the stats dict -- "Counts: closes 0,
+#: cycles 1, fills 0, signals 0, stale_quotes_skipped 0, waiting_for_history 0" --
+#: which is the storage format, not a sentence.
+_RUNNER_COUNT_LABELS: tuple[tuple[str, str], ...] = (
+    ("cycles", "cycles run"),
+    ("signals", "signals"),
+    ("fills", "entry fills"),
+    ("closes", "exit fills"),
+    ("stale_quotes_skipped", "cycles skipped on a stale quote"),
+    ("waiting_for_history", "cycles waiting for history"),
+)
+
+
+def _runner_counts_text(stats: Mapping[str, Any]) -> str:
+    """``{"closes": 0}`` said as a sentence, and never a key this build does not know."""
+
+    known = {key for key, _label in _RUNNER_COUNT_LABELS}
+    parts = [
+        f"{label} {escape(str(stats[key]))}"
+        for key, label in _RUNNER_COUNT_LABELS
+        if key in stats
+    ]
+    # A counter a later build added still gets shown, with its underscores read as
+    # spaces, rather than being dropped or printed raw.
+    parts.extend(
+        f"{escape(str(key).replace('_', ' '))} {escape(str(stats[key]))}"
+        for key in sorted(stats)
+        if key not in known
+    )
+    return ", ".join(parts) if parts else "nothing has run yet"
+
+
+#: The paper-ledger figures the Autopilot page carries, and only these: they are
+#: the ones this loop's own test writes.  Anything without a value says so.
+_AUTOPILOT_PNL_KEYS: tuple[str, ...] = (
+    "realized_net",
+    "unrealized_gross",
+    "equity",
+    "net_pnl",
+)
+
+
+def _autopilot_paper_pnl_card(ctx: PageContext) -> str:
+    """P&L, fills and counts on the page that runs the loop -- from one reading.
+
+    The Autopilot page used to show positions and fills but no money at all, so an
+    operator had to open a second page to find out whether the session was up or
+    down.  Every number here comes from the same paper-ledger reading the paper
+    pages use (``ctx.extra["account"]``), so the two cannot disagree, and a figure
+    the ledger cannot support is shown as unavailable with the ledger's own reason
+    rather than as a zero.
+    """
+
+    account = _account(ctx)
+    if not account or not account.get("available", False):
+        return card(
+            "Paper P&L",
+            notice(
+                "warn",
+                "The paper ledger could not be read",
+                str(
+                    account.get("error")
+                    or "No paper account is wired into this process, so no paper figure "
+                    "is shown and none is estimated."
+                ),
+            ),
+        )
+
+    tiles = "".join(
+        kpi(
+            str(_account_metric(account, key).get("label") or key.replace("_", " ")),
+            str(
+                _account_metric(account, key).get("value")
+                if _account_metric(account, key).get("available")
+                else "Unavailable"
+            ),
+            foot=str(_account_metric(account, key).get("note") or ""),
+            tone="accent" if key in {"realized_net", "net_pnl"} else "",
+        )
+        for key in _AUTOPILOT_PNL_KEYS
+    )
+    counts = dict(account.get("counts") or {})
+    return card(
+        "Paper P&L",
+        (
+            f"<div class='data-grid'>{tiles}</div>"
+            + dl(
+                (
+                    ("Open positions", str(counts.get("open_positions", 0))),
+                    ("Closed trades", str(counts.get("closed_trades", 0))),
+                    ("Simulated fills", str(counts.get("fills", 0))),
+                    ("Ledger source", str(account.get("source") or "durable paper ledger")),
+                    ("Last ledger update", _utc(account.get("latest_update")) or "—"),
+                )
+            )
+        ),
+        hint="Local simulated money only. The broker account's balance and equity are "
+        "never read into these figures, and a value the ledger cannot support is shown "
+        "as unavailable rather than as zero.",
+        right=f"<a class='btn btn-sm' href='/performance'>Full paper performance</a>",
+    )
+
+
 def _autopilot_stored_book_card(
     ctx: PageContext, stored: Mapping[str, Any], live_positions: Sequence[Mapping[str, Any]]
 ) -> str:
@@ -8278,6 +8473,11 @@ def render_autopilot(ctx: PageContext) -> str:
             f"{int(choices.get('max_symbols', 0) or 0)} symbol(s) and follows at most "
             f"{int(choices.get('max_rows', 0) or 0)} row(s). Both bounds are stated "
             "here rather than applied silently.</p>"
+            "<p class='small muted'>Every simulated fill is "
+            f"<span class='mono'>{escape(str(choices.get('lot', '')))}</span> lots: the "
+            "paper test's own size. Quick setup's lot size belongs to the research "
+            "sweep and does not resize this loop, so this page states the size that "
+            "will actually run.</p>"
             "</form>"
         )
     # The close is drawn only when it can work.  While the loop is running the
@@ -8543,11 +8743,8 @@ def render_autopilot(ctx: PageContext) -> str:
                     "waits and says so. A closed market reads as missing quotes, so the "
                     "loop idles rather than inventing a price.",
                 ),
-                hint="Counts: "
-                + ", ".join(
-                    f"{key} {value}"
-                    for key, value in sorted((paper.get("stats") or {}).items())
-                ),
+                hint="This session so far: "
+                + _runner_counts_text(paper.get("stats") or {}),
             )
         )
 
@@ -8589,6 +8786,8 @@ def render_autopilot(ctx: PageContext) -> str:
                 "the explicit flatten button does.",
             )
         )
+
+        body.append(_autopilot_paper_pnl_card(ctx))
 
         signals = [dict(item) for item in (paper.get("signals") or [])]
         if signals:

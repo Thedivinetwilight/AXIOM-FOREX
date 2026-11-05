@@ -690,7 +690,16 @@ def build(
                 why=STEP_WHY["evaluate"],
                 state=UNAVAILABLE,
                 status="NOT WIRED IN THIS BUILD",
-                detail="This process has no strategy catalog, so there is nothing to evaluate here.",
+                detail=(
+                    "This process was started without the strategy catalog, so there "
+                    "is nothing to evaluate here. The catalog is the page that scores "
+                    "each declared strategy on the terminal's own bars; Autopilot "
+                    "reads the same record."
+                ),
+                links=(
+                    ("Open Autopilot", "/autopilot"),
+                    ("Quick setup", "/quick-setup"),
+                ),
             )
         )
     elif evaluation.get("running"):
@@ -785,7 +794,13 @@ def build(
                 why=STEP_WHY["paper"],
                 state=UNAVAILABLE,
                 status="NOT WIRED IN THIS BUILD",
-                detail="This process has no paper session to start.",
+                detail=(
+                    "This process was started without a paper session, so there is "
+                    "nothing to start from here. PAPER trading runs the same local "
+                    "ledger on the Autopilot page, which is also where the session "
+                    "is stopped."
+                ),
+                links=(("Open Autopilot", "/autopilot"),),
             )
         )
     elif paper_state == RUNNING:
@@ -828,7 +843,12 @@ def build(
                 action_target="catalog-paper-start",
                 action_label="Start PAPER trading",
                 fields=(("return_to", "/"),),
-                links=(("What was evaluated", "/quick-setup"),),
+                # Both paths are real: start the screened candidates here, or let
+                # the Autopilot repeat the selection and follow it unattended.
+                links=(
+                    ("What was evaluated", "/quick-setup"),
+                    ("Run it unattended on Autopilot", "/autopilot"),
+                ),
                 blockers=paper_blockers,
             )
         )
@@ -1008,6 +1028,14 @@ def build(
             }
             for row in paper_set[:MAX_OFFERED_CANDIDATES]
         ],
+        # The one page that performs the whole loop.  It is the lead entry in the
+        # navigation, so it is named here rather than left out of the list that
+        # claims to hold "every other page".
+        "primary": (
+            "Autopilot",
+            "/autopilot",
+            "Evaluate, choose, follow as paper and watch it — all on one page.",
+        ),
         "advanced": (
             ("Account & symbols", "/account", "Pick symbols one by one, with reasons for each exclusion."),
             ("Broker terms (advanced)", "/provider-setup", "Only needed for LIVE execution; paper does not use it."),

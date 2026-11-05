@@ -910,6 +910,11 @@ class Autopilot:
             "recommended": recommended,
             "max_symbols": int(getattr(module, "MAX_EVAL_SYMBOLS", 3)),
             "max_rows": self.row_limit,
+            # The size every simulated fill will use.  It belongs on the page that
+            # starts the run: Quick setup's lot size feeds the research sweep, and
+            # the two are separate controls, so the page states this one instead of
+            # letting an operator assume the other reached the paper test.
+            "lot": float(getattr(self._panel, "lot", 0.10) or 0.10),
             "note": note,
         }
 

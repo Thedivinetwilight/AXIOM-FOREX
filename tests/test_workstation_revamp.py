@@ -216,6 +216,353 @@ def test_the_prerequisites_probe_names_a_missing_time_zone_database():
     assert "time_zone_database_missing" not in present.blocking
 
 
+def test_every_page_still_renders_without_a_time_zone_database():
+    """The other half of the reported failure: the window opened, then 500s.
+
+    The prerequisites probe already refused to *connect* on such a machine, but
+    the workstation itself still served: every page rendered except the home page,
+    which called into the import tooling and raised from the synthetic calendar.
+    A missing runtime dependency is a named blocker on one page, not a dead
+    product -- and the page that cannot work must say so in its own words.
+    """
+
+    script = (
+        "import os, sys\n"
+        "os.environ['PYTHONTZPATH'] = ''\n"
+        "class Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'tzdata' or name.startswith('tzdata.'):\n"
+        "            raise ImportError('tzdata hidden for this test')\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, Block())\n"
+        "from axiom_forex.workstation import launch\n"
+        "from axiom_forex.workstation.app import GET_ROUTES\n"
+        "from axiom_forex.workstation.setup import SetupWizard\n"
+        "report = launch.probe_environment(settings_path=None)\n"
+        "assert report.zone_database_ok is False, report.zone_database_ok\n"
+        "session = launch._build_session(simulate=True, settings=None, failure=None)\n"
+        "app = launch.WorkstationApp(\n"
+        "    wizard=SetupWizard(environment=report, session=session),\n"
+        "    platform=launch._fixture_platform(),\n"
+        "    version='0.1.0',\n"
+        "    settings=None,\n"
+        "    allow_framing=True,\n"
+        ")\n"
+        "for path in sorted(GET_ROUTES):\n"
+        "    status, html = app.page(path)\n"
+        "    assert status == 200, (path, status)\n"
+        "status, data = app.page('/data')\n"
+        "assert 'data tools could not be loaded' in data.lower(), 'no reason given'\n"
+        "status, home = app.page('/')\n"
+        "assert status == 200, status\n"
+        "print('rendered', len(GET_ROUTES), 'pages')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env={"PYTHONPATH": ".", "PATH": "/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rendered" in result.stdout
+
+
+def _make_dataflow_unimportable(monkeypatch) -> None:
+    """Block the import the data page does lazily, on any test order.
+
+    ``from . import dataflow`` first looks for the attribute on the package, so a
+    module imported by an earlier test would otherwise satisfy it: the block has to
+    cover both the attribute and ``sys.modules``.
+    """
+
+    import axiom_forex.workstation as package
+
+    monkeypatch.setitem(sys.modules, "axiom_forex.workstation.dataflow", None)
+    monkeypatch.delattr(package, "dataflow", raising=False)
+
+
+def test_the_data_page_names_an_unimportable_tool_instead_of_failing(tmp_path, monkeypatch):
+    """In process, and deliberately blunt: the module cannot be imported at all."""
+
+    app = _account_app(tmp_path)
+    _make_dataflow_unimportable(monkeypatch)
+
+    status, html = app.page("/data")
+    text = _text(html)
+
+    assert status == 200
+    assert "could not be loaded on this machine" in text
+    # It says what the interpreter reported, and what to run about it.
+    assert "pip install -e ." in text
+    assert "Nothing here is hidden or guessed" in text
+    # The page still carries the frame, so it is a page and not an error body.
+    assert "Data &amp; evaluation" in html or "Data & evaluation" in html
+
+
+def test_an_unimportable_tool_stays_reported_and_is_never_retried_silently(tmp_path, monkeypatch):
+    """A warning that disappears on reload is the disagreement this page forbids."""
+
+    app = _account_app(tmp_path)
+    _make_dataflow_unimportable(monkeypatch)
+
+    first = _text(app.page("/data")[1])
+    assert "could not be loaded on this machine" in first
+
+    # Even with the import working again, this process keeps its first answer:
+    # a half-imported module chain can succeed on a retry while the dependency
+    # that failed is still missing, which would flip the page between renders.
+    monkeypatch.undo()
+    second = _text(app.page("/data")[1])
+    assert "could not be loaded on this machine" in second
+    assert app.page("/")[0] == 200
+
+
+def _outline(html: str) -> list[int]:
+    body = html[html.index("<main"):] if "<main" in html else html
+    return [int(level) for level in re.findall(r"<h([1-6])[\s>]", body)]
+
+
+@pytest.mark.parametrize("state", ["simulated", "connected", "live"])
+def test_no_page_skips_a_heading_level(state):
+    """A heading outline a screen reader can follow, on every page and state."""
+
+    app = _chrome_apps()[state]
+    for path in sorted(GET_ROUTES):
+        status, html = app.page(path)
+        assert status == 200, path
+        levels = _outline(html)
+        assert levels.count(1) == 1, (path, levels)
+        assert levels[0] == 1, (path, levels)
+        previous = None
+        for level in levels:
+            if previous is not None and level > previous + 1:
+                raise AssertionError(f"{path} jumps h{previous} -> h{level}: {levels}")
+            previous = level
+
+
+def test_the_execution_modes_are_headed_by_an_h2_above_the_two_options():
+    """``/mode`` drew two ``h3`` options directly under the page's ``h1``."""
+
+    cards = views.card("A heading", "<p>body</p>")
+    assert "<h2" in cards
+    app = _chrome_apps()["connected"]
+    status, html = app.page("/mode")
+    text = _text(html)
+
+    assert status == 200
+    assert "Which execution mode is in force" in text
+    # The sentence that stops the page being read as "both are on".
+    assert "Exactly one of these is active" in text
+    # Both options are still there, still named.
+    assert "Paper trading" in text and "Live trading" in text
+
+
+def test_the_overview_does_not_call_the_fixture_account_a_paper_ledger():
+    """Two pages, two paper equities, one of them invented.
+
+    ``/overview`` rendered ``platform.status()`` under the title "Paper account"
+    with the hint "Simulated paper ledger".  That platform is the synthetic
+    conformance fixture, so the card showed ``Equity 10000`` and currency ``CCC``
+    while ``/performance`` -- reading the fills this machine actually recorded --
+    said the paper equity was unavailable because no starting capital was set.
+    The fixture figure is an illustration, and it may not borrow the ledger's name.
+    """
+
+    from tests.test_workstation_ui import connected_simulator_app
+
+    app = connected_simulator_app()
+    status, html = app.page("/overview")
+
+    assert status == 200
+    text = _text(html)
+    assert "Fixture account (synthetic)" in text
+    assert "not your paper ledger" in text
+    # It still shows the fixture's own numbers, labelled for what they are.
+    assert "SAMPLE FIXTURE" in text
+    # And it points at the page that owns the operator's real figures.
+    assert "href='/performance'" in html
+
+    # The performance page is the one place a paper equity is claimed, and it
+    # refuses to claim one here rather than borrowing the fixture's.
+    performance = _text(app.page("/performance")[1])
+    assert "no paper starting capital is configured" in performance
+
+
+def test_the_guided_start_points_at_the_autopilot_where_nothing_is_wired():
+    """The last step used to be a dead end: "no paper session to start"."""
+
+    from tests.test_workstation_ui import connected_simulator_app
+
+    html = connected_simulator_app().page("/")[1]
+    text = _text(html)
+
+    assert "NOT WIRED IN THIS BUILD" in text
+    # The run happens on Autopilot; the step has to say so and go there.
+    assert "Open Autopilot" in text
+    assert "href='/autopilot'" in html
+    # ... and it names the page that scores the strategies, rather than leaving
+    # step 4 as another dead end.
+    assert "href='/quick-setup'" in html
+
+
+def test_the_guided_start_signposts_the_autopilot_as_the_one_page_route():
+    """Five steps are one route; the page the navigation leads with is the other."""
+
+    from tests.test_workstation_ui import connected_simulator_app
+
+    html = connected_simulator_app().page("/")[1]
+    text = _text(html)
+
+    assert "Or run the whole loop from one page" in text
+    assert "Open Autopilot" in text
+    # One hop from the home page to the page that runs everything.
+    assert html.count("href='/autopilot'") >= 2  # the nav entry and the button
+    # The claim it makes is only that the inputs are shared -- no profit, no promise.
+    assert "same terminal, the same catalog record and the same paper ledger" in text
+
+
+def test_the_stylesheet_shrinks_to_one_column_on_a_narrow_window():
+    """No browser here, so the guard is the rule itself."""
+
+    css = views.STYLES
+
+    assert "@media (max-width:560px)" in css
+    narrow = css[css.index("@media (max-width:560px)") :]
+    narrow = narrow[: narrow.index("}") + 1] if "}" in narrow else narrow
+    block = css[css.index("@media (max-width:560px)") : css.index("@media (prefers-reduced-motion")]
+    assert "grid-template-columns:minmax(0,1fr)" in block
+    # A phone-sized window must not have to scroll the whole page sideways.
+    assert ".content{padding:var(--s3)" in block
+    # Tables stay scrollable inside their own box, at every width.
+    assert ".table-wrap{overflow-x:auto}" in css
+
+
+# ---------------------------------------------------------------------------
+# the Autopilot page's own money and its own counters
+# ---------------------------------------------------------------------------
+
+
+def test_the_runner_counters_are_read_as_a_sentence_in_a_fixed_order():
+    text = views._runner_counts_text(
+        {"closes": 0, "cycles": 1, "stale_quotes_skipped": 0, "signals": 2, "fills": 3}
+    )
+
+    # The order is the lifecycle, not the dictionary's: cycles, signals, entries,
+    # exits, then the reasons a cycle did nothing.
+    assert text.index("cycles run 1") < text.index("signals 2")
+    assert text.index("signals 2") < text.index("entry fills 3")
+    assert text.index("entry fills 3") < text.index("exit fills 0")
+    # No raw dict, no braces, no quotes -- the earlier page printed
+    # "Counts: closes 0, cycles 1, ..." as if that were prose.
+    for token in ("{", "}", "'", "[", "]"):
+        assert token not in text
+    assert text.startswith("cycles run 1")
+
+
+def test_a_counter_this_build_does_not_know_is_named_not_dropped():
+    text = views._runner_counts_text({"cycles": 4, "quote_retries": 7})
+
+    assert "cycles run 4" in text
+    # Humanised, in its own place, and never silently missing.
+    assert "quote retries 7" in text
+    assert text.endswith("quote retries 7")
+    # Unknown keys come after the known ones, sorted, so two renders agree.
+    other = views._runner_counts_text({"alpha_beta": 1, "cycles": 4, "zeta": 2})
+    assert other.endswith("alpha beta 1, zeta 2")
+
+
+def test_no_counters_is_said_in_words():
+    assert views._runner_counts_text({}) == "nothing has run yet"
+
+
+def _pnl_context(account):
+    class Ctx:
+        extra = {"account": account}
+
+    return Ctx()
+
+
+def test_the_autopilot_money_card_never_turns_an_unknown_into_zero():
+    account = {
+        "available": True,
+        "source": "durable paper ledger",
+        "latest_update": None,
+        "counts": {"open_positions": 0, "closed_trades": 0, "fills": 0},
+        "metric_by_key": {
+            "realized_net": {
+                "label": "Realised P&L (after costs)",
+                "value": "0.00",
+                "available": True,
+                "note": "price P&L minus commission and swap",
+            },
+            "unrealized_gross": {
+                "label": "Unrealised P&L (price)",
+                "value": "",
+                "available": False,
+                "note": "needs a fresh quote",
+            },
+            "equity": {
+                "label": "Paper equity",
+                "value": "",
+                "available": False,
+                "note": "no paper starting capital is configured",
+            },
+            "net_pnl": {
+                "label": "Net P&L (after costs)",
+                "value": "0.00",
+                "available": True,
+                "note": "after commission and swap",
+            },
+        },
+    }
+
+    html = views._autopilot_paper_pnl_card(_pnl_context(account))
+    text = _text(html)
+
+    assert "Paper P&amp;L" in html or "Paper P&L" in text
+    # The measured zero is a zero ...
+    assert "Realised P&amp;L (after costs)" in html
+    # ... and the two the ledger cannot support say so, with the ledger's reason,
+    # instead of borrowing a zero or the fixture's balance.
+    assert text.count("Unavailable") >= 2
+    assert "no paper starting capital is configured" in text
+    assert "needs a fresh quote" in text
+    # One reading serves the page, and it links to the full figures.
+    assert "href='/performance'" in html
+    # The broker is never blended in.
+    assert "broker account's balance" in text
+
+
+def test_the_autopilot_money_card_says_so_when_there_is_no_ledger():
+    for account in ({}, {"available": False, "error": "no_platform"}):
+        html = views._autopilot_paper_pnl_card(_pnl_context(account))
+        text = _text(html)
+
+        assert "could not be read" in text
+        # No number is invented to fill the space.
+        assert "0.00" not in text or "no_platform" in text
+
+
+def test_the_autopilot_states_the_size_its_fills_will_actually_use(tmp_path):
+    """Quick setup's lot size never reaches this loop, so the page must say which
+    size does.  Otherwise an operator who set 0.50 on the research sweep reads a
+    paper result that was filled at 0.10 and has no way to know."""
+
+    autopilot, app = _autopilot(tmp_path)
+    autopilot._panel.lot = 0.25  # the panel's own size, which the paper test uses
+    choices = autopilot.choices()
+
+    assert choices["lot"] == 0.25
+    text = _text(app.page("/autopilot")[1])
+    assert "Every simulated fill is" in text
+    assert "0.25" in text
+    # It says which control it is *not*, so the two sizes cannot be confused.
+    assert "research sweep" in text
+
+
 # ---------------------------------------------------------------------------
 # the chrome: navigation, the refresh control, the loop's state
 # ---------------------------------------------------------------------------
