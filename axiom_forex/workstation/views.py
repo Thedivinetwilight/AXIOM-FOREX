@@ -2327,7 +2327,12 @@ def _primary_actions(ctx: PageContext, model: Mapping[str, Any], account: Mappin
     paper_step = steps.get("paper")
     session = dict(account.get("session") or {})
     running = bool(paper_step is not None and paper_step.state == guide.RUNNING)
-    notes: list[str] = []
+    # Each note belongs to the control above it.  They used to be one paragraph of
+    # loose sentences, so "Why it is disabled: build the test from a stored
+    # evaluation first" landed directly after the note about Connect and read as
+    # the reason *Connect* was disabled -- about a control that was not disabled at
+    # all.  Naming the control in front of its own note is the whole fix.
+    notes: list[tuple[str, str]] = []
     parts: list[str] = []
 
     # Connect
@@ -2335,24 +2340,34 @@ def _primary_actions(ctx: PageContext, model: Mapping[str, Any], account: Mappin
         parts.append(
             action_form("connect", ctx.action_nonce, connect_label(ctx), tone="primary")
         )
-        notes.append("Connect reads the terminal you are already signed in to; it never logs in.")
+        notes.append(
+            (
+                connect_label(ctx),
+                "reads the terminal you are already signed in to; it never logs in.",
+            )
+        )
     else:
         parts.append(
             "<button class='btn' type='button' disabled aria-disabled='true'>"
             + escape("Simulator preview running" if ctx.terminal.simulated else "Terminal connected")
             + "</button>"
         )
-        notes.append("Already connected: there is nothing to connect to twice.")
+        notes.append(("Connection", "already connected: there is nothing to connect to twice."))
 
     # Start / stop paper
     if running:
         parts.append(action_form("catalog-paper-stop", ctx.action_nonce, "Stop paper trading", tone="warn", extra="<input type='hidden' name='return_to' value='/'>"))
-        notes.append("Stop ends the paper loop. It closes nothing and sends nothing.")
+        notes.append(
+            ("Stop paper trading", "ends the paper loop; it closes nothing and sends nothing.")
+        )
     elif paper_step is not None and paper_step.state in {guide.NEXT, guide.RUNNING}:
         parts.append(
             "<a class='btn' href='#step-paper'>Start paper trading</a>"
         )
-        notes.append("Starting needs the ticked candidates in step 5, so that button is there.")
+        notes.append(
+            ("Start paper trading", "needs the ticked candidates in step 5, which is why "
+             "that button goes there rather than starting anything here.")
+        )
     else:
         reason = (
             paper_step.detail
@@ -2363,19 +2378,24 @@ def _primary_actions(ctx: PageContext, model: Mapping[str, Any], account: Mappin
             "<button class='btn' type='button' disabled aria-disabled='true'>"
             "Start paper trading</button>"
         )
-        notes.append(f"Why it is disabled: {reason}")
+        notes.append(("Start paper trading is disabled", reason))
 
     # View performance — always available; an empty ledger has a helpful state.
     parts.append("<a class='btn' href='/performance'>View performance</a>")
     if not session.get("running"):
-        notes.append("Paper performance shows the ledger even while the session is stopped.")
+        notes.append(
+            ("View performance", "shows the ledger even while the session is stopped.")
+        )
 
     return (
         "<div class='row' style='margin-top:14px'>"
         + "".join(parts)
-        + "</div><p class='small muted' style='margin:8px 0 0'>"
-        + escape(" ".join(notes))
-        + "</p>"
+        + "</div><ul class='list-reset small muted' style='margin:8px 0 0'>"
+        + "".join(
+            f"<li><strong>{escape(label)}</strong> {escape(sentence)}</li>"
+            for label, sentence in notes
+        )
+        + "</ul>"
     )
 
 
@@ -6875,16 +6895,25 @@ def render_quick_setup(ctx: PageContext) -> str:
             "quotes; fills are simulated locally.</span></div>"
         )
     if any(str(item.get("reason")) == "no_strategy_selected" for item in paper_blockers):
-        # The blocker names the library page.  If this process has no library, that
-        # page says so and there is nothing to choose -- so the card says what is
-        # true in either case instead of sending the operator to find out.
-        paper_body += (
-            "<p class='small muted'>This runner follows a variant you chose; it does "
-            "not choose one. If the strategy library page reports that it is not wired "
-            "into this workstation, there is no variant to pick and this runner cannot "
-            "start here — the catalog paper test above is the paper path that needs no "
-            "library.</p>"
-        )
+        # The blocker names the library page, so say whether that page can answer.
+        # This process either owns a library or it does not, and the two cases lead
+        # to different places: a route to a page with a choice on it, or the other
+        # paper path.  Saying both at once ("if it reports that it is not wired…")
+        # made the operator open a page to find out which sentence applied.
+        library = bool((ctx.extra or {}).get("strategies_available"))
+        if library:
+            paper_body += (
+                "<p class='small'>"
+                "<a href='/strategies'>Open the strategy library</a> and select a "
+                "variant there. This runner follows that choice; it never picks one "
+                "for you, and nothing is selected by default.</p>"
+            )
+        else:
+            paper_body += (
+                "<p class='small muted'>This process has no strategy library, so there "
+                "is no variant to select and this runner cannot start here. The catalog "
+                "paper test above is the paper path that needs no library.</p>"
+            )
     body.append(
         card(
             "Paper strategy runner, one click",

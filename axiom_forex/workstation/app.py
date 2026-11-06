@@ -756,6 +756,11 @@ class WorkstationApp:
                 "strategies": (
                     self.strategies_view(query=query) if page == "strategies" else {}
                 ),
+                # Whether this process owns a strategy library at all, on every
+                # page.  Quick setup points the operator at /strategies when the
+                # runner has no selection, and that advice is only good if the
+                # library page can answer; one boolean is enough to know.
+                "strategies_available": self.strategies is not None,
                 "research": self.research_view() if page == "quick-setup" else {},
                 "catalog": (
                     self.catalog_view() if page in {"quick-setup", "start"} else {}

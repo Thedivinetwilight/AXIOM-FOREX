@@ -27,6 +27,7 @@ import pytest
 from axiom_forex.paper_runner import accounting
 from axiom_forex.paper_runner.accounting import (
     QuoteMark,
+    capital_path,
     read_account,
     read_capital,
     write_capital,
@@ -791,7 +792,18 @@ def test_an_unset_starting_capital_leaves_cash_and_equity_unavailable(root):
 
 @pytest.mark.parametrize(
     "amount,currency",
-    [("0", "USD"), ("-5", "USD"), ("", "USD"), ("abc", "USD"), ("10", "US"), ("10", "US$")],
+    [
+        ("0", "USD"),
+        ("-5", "USD"),
+        ("", "USD"),
+        ("abc", "USD"),
+        ("10", "US"),
+        ("10", "US$"),
+        # Three letters, but not a currency: "no currency" and "for testing".  They
+        # would label every paper figure in a code AXIOM does not understand.
+        ("10", "XXX"),
+        ("10", "xts"),
+    ],
 )
 def test_a_bad_starting_capital_is_refused(root, amount, currency):
     with pytest.raises(ValueError):
@@ -1229,8 +1241,10 @@ def test_the_home_page_offers_the_four_key_actions_with_plain_explanations(tmp_p
     assert "Terminal connected" in text
     assert "Start paper trading" in text
     assert "View performance" in text
-    assert "Already connected: there is nothing to connect to twice." in text
-    assert "Why it is disabled:" in text or "Starting needs the ticked candidates" in text
+    assert "already connected: there is nothing to connect to twice." in text
+    # Every note names the control it is about, so a reason cannot be read as
+    # belonging to the control beside it.
+    assert "Start paper trading is disabled" in text or "Start paper trading needs" in text
     assert "/actions/connect" in page or "Terminal connected" in page
 
 
@@ -1258,7 +1272,7 @@ def test_a_running_paper_session_offers_stop_in_the_same_row(tmp_path):
 
     assert "Stop paper trading" in html
     assert "catalog-paper-stop" in html
-    assert "It closes nothing and sends nothing" in html
+    assert "it closes nothing and sends nothing" in html
 
 
 def _ctx():
@@ -1292,3 +1306,27 @@ def test_live_mode_keeps_its_warning_and_paper_pages_never_offer_a_live_action(t
         assert "PAPER" in text or "LIVE" in text
         assert "/actions/live-arm" not in page, path
         assert "/actions/live-start" not in page, path
+
+
+def test_a_stored_capital_in_a_non_currency_is_a_problem_not_a_configured_one(root):
+    """A hand-edited document is not trusted: a reserved code is reported to fix."""
+
+    write_capital(root, "10000", "USD")
+    document = json.loads(capital_path(root).read_text(encoding="utf-8"))
+    document["currency"] = "XXX"
+    capital_path(root).write_text(json.dumps(document), encoding="utf-8")
+
+    capital = read_capital(root)
+
+    assert capital.configured is False
+    assert capital.problem is True
+    assert "not a positive amount with a currency" in capital.reason
+
+
+def test_an_unlisted_but_real_currency_is_accepted(root):
+    """The list is a convenience: an operator's own ISO currency is a real answer."""
+
+    capital = write_capital(root, "5000", "hkd")
+
+    assert capital.configured is True
+    assert capital.currency == "HKD"

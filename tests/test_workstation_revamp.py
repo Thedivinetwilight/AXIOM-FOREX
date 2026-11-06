@@ -1423,12 +1423,24 @@ def test_the_research_runner_points_at_a_page_by_its_real_route(tmp_path):
 
     from tests.test_quick_setup_ui import app_with_panel
 
-    html = _page_for_quick_setup(app_with_panel())
+    app = app_with_panel()
+    html = _page_for_quick_setup(app)
     text = _text(html)
 
-    assert "/strategies" in text
-    # And it says what the runner will not do: choose for you.
-    assert "it never picks one for you" in text or "this runner follows that choice" in text
+    # With no library in this process the card says so, and names the paper path
+    # that does not need one, instead of sending the operator to a dead end.
+    assert "no strategy library" in text
+    assert "The catalog paper test above is the paper path that needs no library" in text
+    # No jump to a page that would answer "not wired into this workstation".
+    assert "Open the strategy library" not in text
+
+    # With a library, it links to it and says it will not choose for you.
+    app.strategies = object()
+    html = _page_for_quick_setup(app)
+    text = _text(html)
+    assert "href='/strategies'" in html
+    assert "Open the strategy library" in text
+    assert "it never picks one for you" in text
 
 
 def test_every_health_check_says_a_reason_and_not_a_python_value():
@@ -1486,3 +1498,86 @@ def test_a_failing_health_check_still_explains_itself():
     assert by_name["live_bridge_disabled"]["detail"] == "a live path is open; it must be closed"
     assert by_name["unresolved_orders"]["detail"] == "3 order(s) left unresolved"
     assert by_name["persistence"]["detail"] == "schema 1 of 2 expected"
+
+
+def test_the_capital_action_refuses_a_code_that_is_not_a_currency(tmp_path):
+    """A crafted POST must not label every paper figure with "XXX"."""
+
+    from tests.test_paper_accounting import _account_app
+
+    app = _account_app(tmp_path / "empty-paper")
+    status, redirect, message = app.act(
+        "paper-capital", {"nonce": [app.nonce], "amount": ["10000"], "currency": ["XXX"]}
+    )
+
+    assert status == 409
+    assert redirect == "/performance"
+    assert "Not saved" in message
+    assert "no currency" in message
+    # Nothing was written: the folder has no capital document at all.
+    assert not (tmp_path / "empty-paper" / "paper-capital.local.json").exists()
+
+    status, redirect, message = app.act(
+        "paper-capital", {"nonce": [app.nonce], "amount": ["10000"], "currency": ["usd"]}
+    )
+    assert status == 303
+    assert "10000.00 USD" in message
+
+
+def test_every_home_page_note_names_the_control_it_is_about(tmp_path):
+    """The dashboard said "Why it is disabled: build the test…" right after Connect.
+
+    It is the Start button that is disabled, not Connect, and nothing in the
+    paragraph said which.  Each note now leads with its control.
+    """
+
+    from tests.test_paper_accounting import _ctx
+    from axiom_forex.workstation import guide, views
+
+    html = views._primary_actions(_ctx(), {"steps": [], "summary": {}}, {
+        "counts": {},
+        "metric_by_key": {},
+        "positions": [],
+        "quotes": [],
+        "trading": {"paused": True, "reasons": []},
+        "session": {"running": False},
+        "available": True,
+        "capital": {"configured": True},
+        "integrity": {"ok": True, "warnings": []},
+    })
+    text = _text(html)
+
+    # One list item per control, each opening with that control's name.
+    items = re.findall(r"<li><strong>(.*?)</strong> (.*?)</li>", html, re.S)
+    assert items, html
+    labels = [re.sub(r"<[^>]+>", "", label) for label, _sentence in items]
+    assert any("Connect" in label for label in labels)
+    assert any(label.startswith("Start paper trading") for label in labels)
+    # The reason is inside the Start item, not loose in a shared paragraph.
+    start = [sentence for label, sentence in items if label.startswith("Start paper trading")]
+    assert start and "cannot start yet" in start[0]
+    assert "View performance" in text
+
+    # A running session says so on the Stop control and closes nothing.
+    running = views._primary_actions(
+        _ctx(),
+        {
+            "steps": [
+                guide.Step(key="paper", number=5, title="", why="", state=guide.RUNNING, status="RUNNING")
+            ],
+            "summary": {},
+        },
+        {
+            "counts": {},
+            "metric_by_key": {},
+            "positions": [],
+            "quotes": [],
+            "trading": {"paused": False, "reasons": []},
+            "session": {"running": True},
+            "available": True,
+            "capital": {"configured": True},
+            "integrity": {"ok": True, "warnings": []},
+        },
+    )
+    assert "Stop paper trading" in running
+    assert "closes nothing" in _text(running)

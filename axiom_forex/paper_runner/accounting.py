@@ -89,6 +89,30 @@ MAX_CAPITAL_AMOUNT = Decimal("1000000000000000")
 
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 
+#: ISO 4217 codes that are not currencies: ``XXX`` means "no currency" and
+#: ``XTS`` is reserved for testing.  They pass a three-letter shape and would then
+#: label every paper figure "10,000.00 XXX", which reads as a currency AXIOM
+#: accepted and understood.  They are refused with a sentence instead.  Other
+#: three-letter codes are *not* restricted: an operator's own currency (HKD, ZAR,
+#: MXN …) is a real answer, and this list is about the two that are not.
+_NOT_A_CURRENCY: dict[str, str] = {
+    "XXX": "XXX is the ISO code for \u201cno currency\u201d",
+    "XTS": "XTS is the ISO code reserved for testing",
+}
+
+
+def currency_problem(code: str) -> str:
+    """Why this string is not usable as a capital currency, or "" when it is."""
+
+    text = str(code or "").strip().upper()
+    if not _CURRENCY.match(text):
+        return "the currency must be a three-letter code, for example USD"
+    reserved = _NOT_A_CURRENCY.get(text)
+    if reserved:
+        return f"{reserved}, so it cannot label a paper capital; enter the currency to count in"
+    return ""
+
+
 #: Where every figure on the paper pages comes from, in the operator's words.
 SOURCE_LABEL = "Durable paper ledger · locally simulated"
 
@@ -300,7 +324,10 @@ def read_capital(root: str | Path) -> PaperCapital:
         )
     amount = _finite(payload.get("amount"))
     currency = str(payload.get("currency") or "").strip().upper()
-    if amount is None or amount <= 0 or currency == "" or not _CURRENCY.match(currency):
+    # The same test the writer applies, so a hand-edited document cannot label a
+    # paper capital with a code that is not a currency: it is reported as a problem
+    # to fix, not read as configured.
+    if amount is None or amount <= 0 or currency_problem(currency):
         return PaperCapital(
             configured=False,
             problem=True,
@@ -329,8 +356,9 @@ def write_capital(
     """
 
     currency_text = str(currency or "").strip().upper()
-    if not _CURRENCY.match(currency_text):
-        raise ValueError("the currency must be a three-letter code, for example USD")
+    problem = currency_problem(currency_text)
+    if problem:
+        raise ValueError(problem)
     raw = str(amount if amount is not None else "").strip().replace(",", "")
     if raw == "":
         raise ValueError("enter the amount you want this paper session to start with")
@@ -1499,6 +1527,7 @@ def read_account(
 __all__ = [
     "CAPITAL_NAME",
     "CURRENCY_CHOICES",
+    "currency_problem",
     "DEFINITIONS",
     "MAX_CAPITAL_AMOUNT",
     "PaperCapital",
