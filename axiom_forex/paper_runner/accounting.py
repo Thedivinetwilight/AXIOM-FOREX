@@ -283,7 +283,10 @@ def read_capital(root: str | Path) -> PaperCapital:
     except FileNotFoundError:
         return PaperCapital(
             configured=False,
-            reason="no paper starting capital has been configured yet",
+            # The metric says "no paper starting capital is configured" in its own
+            # words; this is the *reason* it is unset, so it says something the
+            # reader does not already have: there is no document to read yet.
+            reason="no capital document exists yet",
         )
     except (OSError, ValueError) as exc:
         return PaperCapital(

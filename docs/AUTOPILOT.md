@@ -64,7 +64,14 @@ history selects nothing.
 ## What the page shows
 
 * the state (`IDLE` / `PREPARING` / `RUNNING` / `STOPPED` / `BLOCKED`) and, when it
-  is blocked, the step that stopped it;
+  is blocked, the step that stopped it — with a link to the page that clears it;
+* **the pairs the terminal reports**, as a tick-list on the start form, each with its
+  pair name and whether it is a major, plus the reason any other reported name is
+  not offered (metals, share CFDs, indices, unclassified). The form offers only
+  names the terminal classifies as a pair, so a start cannot be refused for a
+  symbol the operator had no way to know was unavailable;
+* a short **contents list** at the top, with one link per section the page actually
+  drew — the page is long, and the list is built from the headings that exist;
 * the selection: counts, policy fingerprint, and a table of every candidate with
   its decision, rank, reason code and the wording for it;
 * the active strategy per symbol and timeframe, with the trades and positive folds

@@ -108,11 +108,22 @@ Budget and honesty:
 broker bars under the stated cost assumptions. A good-looking window is a reason
 to keep looking.
 
-## 5. Paper trading, one click
+## 5. The strategy runner, one click
+
+Two paper books are reachable from this page and they are kept apart on purpose.
+
+* The **catalog paper test** (see
+  [CATALOG_AND_PAPER_TEST.md](CATALOG_AND_PAPER_TEST.md)) is built from the
+  evaluation on this page and lives under its own ledger.
+* The **strategy runner** below follows a variant you selected in the library. It
+  is a separate ledger, and this page says so on the card, because a number from
+  one book must never be read as a number from the other. If this process has no
+  strategy library, the card says that too: there is no variant to pick, and the
+  catalog paper test is the paper path that needs no library.
 
 Once the setup is research-ready and you have **selected** a strategy on
-`/strategies`, the page's paper card offers **Start paper trading**. That is the
-existing runner action (`runner-start`) and nothing new:
+`/strategies`, the card offers **Start paper trading**. That is the existing
+runner action (`runner-start`) and nothing new:
 
 * prices come from your terminal's **current** quotes;
 * fills are simulated locally, in a durable local paper database;

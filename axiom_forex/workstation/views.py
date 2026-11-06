@@ -374,6 +374,11 @@ details.disclosure[open]>summary{margin-bottom:6px}
 .small{font-size:12.5px}
 .stack{display:flex;flex-direction:column;gap:var(--s2)}
 .row{display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap}
+/* A jump target must clear the sticky header, or the heading it names lands under it. */
+[id]{scroll-margin-top:88px}
+.page-jump{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 0}
+.page-jump a{font-size:12.5px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--text-3);background:rgba(0,0,0,.16)}
+.page-jump a:hover,.page-jump a:focus-visible{color:var(--text);border-color:#33465c}
 .spread{display:flex;justify-content:space-between;gap:var(--s3);align-items:center}
 .divider{height:1px;background:var(--line-soft);margin:var(--s4) 0}
 pre.template{
@@ -535,6 +540,38 @@ def icon(name: str, *, size: int = 17) -> str:
         f"<svg viewBox='0 0 24 24' width='{size}' height='{size}' aria-hidden='true' "
         f"focusable='false'><path d='{path}'/></svg>"
     )
+
+
+def with_page_jump(page: str, targets: Sequence[tuple[str, str, str]], marker: str) -> str:
+    """Turn a long page into one you can scan from the top.
+
+    ``targets`` is ``(anchor, the card's own heading, the shorter word for the
+    list)``.  The id is put on the heading of the card that was actually drawn, so
+    a section that is absent cannot leave a link to nothing, and the list is
+    ordered by where the sections really appear -- not by the order they were
+    written here.  Pages that carry no more than one section get no list.
+    """
+
+    found: list[tuple[int, str, str]] = []
+    for anchor, heading_text, label in targets:
+        heading = f"<h2>{escape(heading_text)}</h2>"
+        at = page.find(heading)
+        if at == -1:
+            continue
+        page = page.replace(heading, f"<h2 id='{escape(anchor)}'>{escape(heading_text)}</h2>", 1)
+        found.append((at, anchor, label))
+    found.sort()
+    nav = (
+        "<nav class='page-jump' aria-label='On this page'>"
+        + "".join(
+            f"<a href='#{escape(anchor)}'>{escape(label)}</a>"
+            for _at, anchor, label in found
+        )
+        + "</nav>"
+        if len(found) > 1
+        else ""
+    )
+    return page.replace(marker, nav, 1)
 
 
 def card(title: str, body: str, *, hint: str = "", right: str = "", flush: bool = False) -> str:
@@ -1346,23 +1383,73 @@ def _runner_state_chip(ctx: PageContext) -> str:
     return chip(state or "UNKNOWN", "muted")
 
 
+#: How a blocker code is said to an operator, when nothing better is supplied.
+#:
+#: Every producer of a blocker also writes a sentence, and this list is the
+#: fallback for the ones that do not: a bare ``paper_test_not_built`` under a
+#: button is a build artefact, not an explanation.
+_BLOCKER_LABELS: dict[str, str] = {
+    "paper_test_not_built": "No paper test is built yet",
+    "no_evaluation_on_record": "No evaluation is on record",
+    "no_record": "No evaluation is on record",
+    "record_version_mismatch": "The stored evaluation is from an older version",
+    "partial_record": "The stored evaluation did not finish",
+    "no_paper_set": "No candidate passed the screen",
+    "stale_record": "The stored evaluation is too old to start from",
+    "terminal_not_connected": "No terminal session is open",
+    "symbols_not_selected": "No symbols have been chosen",
+    "strategy_not_evaluated": "No strategy has been evaluated",
+    "no_strategy_selected": "No strategy has been selected",
+    "not_connected": "No terminal session is open",
+    "paper_start_refused": "The paper test did not start",
+    "recovery_blocked": "The stored paper book could not be resumed exactly",
+}
+
+
+def _blocker_text(item: Mapping[str, Any]) -> str:
+    """The one sentence a blocker carries, from whichever field its author used.
+
+    Two shapes are in use across the workstation: the guided runner's blockers
+    carry ``message`` (and sometimes ``hint``), while the catalog's and the
+    evaluation store's carry ``detail``.  Reading only ``message`` printed a bare
+    code for every catalog blocker -- the sentence was there, we simply dropped it.
+    """
+
+    for key in ("message", "detail"):
+        text = str(item.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _blocker_list(blockers: Sequence[Mapping[str, Any]]) -> str:
-    """Blocker entries as a list: a code, what it means, and what to do."""
+    """Blocker entries as a list: what is wrong, and what to do about it.
+
+    The heading is the operator-facing reason (a supplied title, then a known
+    label, then the code with its underscores read as spaces).  The code itself is
+    kept beside it as a quiet token, so it can be searched and quoted without
+    being the only thing on the page.
+    """
 
     items = list(blockers or ())
     if not items:
         return ""
-    rows = "".join(
-        f"<li><strong>{escape(str(item.get('reason', '')))}</strong> "
-        f"<span class='muted small'>{escape(str(item.get('message', '')))}</span>"
-        + (
-            f"<br><span class='small'>{escape(str(item.get('hint', '')))}</span>"
-            if item.get("hint")
-            else ""
+    rows = ""
+    for item in items:
+        code = str(item.get("reason") or "").strip()
+        text = _blocker_text(item)
+        title = str(item.get("title") or "").strip()
+        if not title:
+            title = _BLOCKER_LABELS.get(code) or code.replace("_", " ").capitalize() or "Blocked"
+        hint = str(item.get("hint") or "").strip()
+        rows += (
+            "<li>"
+            f"<strong>{escape(title)}</strong>"
+            + (f" <span class='mono small muted'>{escape(code)}</span>" if code else "")
+            + (f"<br><span class='small muted'>{escape(text)}</span>" if text else "")
+            + (f"<br><span class='small'>{escape(hint)}</span>" if hint else "")
+            + "</li>"
         )
-        + "</li>"
-        for item in items
-    )
     return f"<ul class='list-reset small' style='margin:12px 0 0'>{rows}</ul>"
 
 
@@ -2183,8 +2270,16 @@ def _start_step(
     ctx: PageContext, step: Mapping[str, Any], *, next_key: str, candidates: Sequence[Mapping[str, Any]]
 ) -> str:
     state = str(step.get("state") or "")
-    blocked = [str(item) for item in (step.get("blockers") or ())][:4]
-    more = len(step.get("blockers") or ()) - len(blocked)
+    detail = str(step.get("detail") or "").strip()
+    # A step whose first blocker *is* its detail would print the same sentence
+    # twice in a row ("Build the test from a stored evaluation first." and then
+    # the identical list item).  The detail is the louder of the two, so the list
+    # carries only what it does not already say.
+    items = [str(item) for item in (step.get("blockers") or ())]
+    if detail and items and items[0].strip() == detail:
+        items = items[1:]
+    blocked = items[:4]
+    more = len(items) - len(blocked)
     blocker_html = ""
     if blocked:
         blocker_html = (
@@ -2206,7 +2301,7 @@ def _start_step(
         f"<p class='guide-why'>{escape(guide.STEP_WHY.get(str(step.get('key')), ''))}</p></div>"
         f"<span class='guide-status'>{chip(str(step.get('status') or ''), _STEP_TONES.get(state, 'muted'))}</span>"
         "</div>"
-        + (f"<p class='guide-detail'>{escape(str(step.get('detail') or ''))}</p>" if step.get("detail") else "")
+        + (f"<p class='guide-detail'>{escape(detail)}</p>" if detail else "")
         + blocker_html
         + (
             "<div class='step-actions'>"
@@ -2473,19 +2568,11 @@ def render_start(ctx: PageContext) -> str:
             hint="Work down the list. The highlighted step is the next one to finish; "
             "every button posts an action this workstation already allows.",
         )
-        # The five steps end at the paper runner's own start.  The Autopilot page
-        # runs the same paper test from one control, so this page has to say where
-        # that page is: it is the entry that leads the sidebar, and a guide that
-        # never mentions it reads as if the steps were the only way in.
-        + card(
-            "Or run all of this from the Autopilot page",
-            "<p class='small' style='margin:0'><a href='/autopilot'>Autopilot</a> "
-            "evaluates the catalog on the terminal's own history, selects on train and "
-            "validation evidence, and follows the selection as the same locally "
-            "simulated paper test &mdash; one Start and one Stop. It sends no order "
-            "either, and it does not change what a step above does.</p>",
-            right=f"<a class='btn btn--primary' href='/autopilot'>Open Autopilot</a>",
-        )
+        # The Autopilot page runs the same paper test from one control, and the
+        # sidebar leads with it.  This page says so once, above the five steps
+        # (``signpost``), because a reader who has to reach the bottom of a list
+        # before learning there is a one-page route has already started reading the
+        # long way round.
         + advanced
     )
     return render_shell(ctx, body)
@@ -2606,7 +2693,11 @@ def render_setup(ctx: PageContext) -> str:
             f"<div class='bar' role='progressbar' aria-valuenow='{progress['percent']}' "
             f"aria-valuemin='0' aria-valuemax='100' aria-label='Setup progress'><span style='width:{progress['percent']}%'></span></div>"
             f"<ol class='steps' style='margin-top:20px'>{steps}</ol>",
-            hint="Seven plain steps. Nothing is assumed about your broker, account, or terminal path.",
+            # The count comes from the steps themselves.  It used to be the word
+            # "Seven" against a list of six, which is the kind of small lie that
+            # makes an operator doubt the rest of the page.
+            hint=f"{progress['total']} plain steps. Nothing is assumed about your broker, "
+            f"account, or terminal path.",
         )
         + "<div class='grid'>"
         + card("Prerequisites", prereq_body, right=chip("Step 1", "muted"))
@@ -3685,8 +3776,28 @@ def render_activity(ctx: PageContext) -> str:
 
 def render_health(ctx: PageContext) -> str:
     checks = ctx.paper.health_checks
+    # The check's own code is a stable name to quote; the sentence beside it is what
+    # the operator reads.  Showing only the code left "live_bridge_disabled | OK"
+    # to be interpreted from a token.
+    labels = {
+        "research_only_boundary": "Research-only boundary holds",
+        "live_bridge_disabled": "Live bridge is off",
+        "data_quality": "Market data passes the quality gate",
+        "market_open": "The market session is open",
+        "quote_freshness": "The last quote is fresh",
+        "last_gate_decision": "The last pre-trade gate decision",
+        "unresolved_orders": "No order is left unresolved",
+        "persistence": "The database schema matches this build",
+        "provider_broker_conformance": "The broker contract conforms",
+        "provider_profile_onboarding": "Profile onboarding allows activation",
+    }
     rows = [
-        (escape(name), chip("OK", "ok") if ok else chip("Attention", "warn"), escape(detail))
+        (
+            f"{escape(labels.get(str(name), str(name).replace('_', ' ').capitalize()))}"
+            f"<br><span class='mono small muted'>{escape(str(name))}</span>",
+            chip("OK", "ok") if ok else chip("Attention", "warn"),
+            escape(detail),
+        )
         for name, ok, detail in checks
     ]
     body = (
@@ -4413,15 +4524,21 @@ def live_status_banner(ctx: PageContext) -> str:
     armed = bool(view.get("armed"))
     if sending:
         tone, title, klass = "danger", "The next strategy signal WILL send a real order", "live-on"
+        label = "Sending"
     elif armed:
         tone, title, klass = "warn", "Armed, but no session is running", "live-armed"
+        label = "Armed"
     else:
         tone, title, klass = "ok", "No real order can be sent right now", "live-off"
+        label = "Not sending"
     return (
         f"<div class='live-banner live-banner--{klass}' role='status'>"
         f"<div><strong>{escape(title)}</strong>"
         f"<p class='small muted' style='margin:4px 0 0'>{escape(sentence)}</p></div>"
-        f"<div class='spacer'></div>{chip(tone, tone, dot=True)}</div>"
+        # The chip used to read "ok" / "warn": those are the *tone* names, shown to
+        # the operator as if they were the state of the live path.  The dot already
+        # carries the tone; the word has to carry the answer.
+        f"<div class='spacer'></div>{chip(label, tone, dot=True)}</div>"
     )
 
 
@@ -6221,7 +6338,10 @@ def render_quick_setup(ctx: PageContext) -> str:
     progress = dict(view.get("progress") or {})
     paper = dict(view.get("paper") or {})
     result = dict(view.get("result") or {})
-    body: list[str] = []
+    # This page is fourteen sections long and is the one an operator works down
+    # from the top, so it carries its own contents list.  The marker is replaced at
+    # the end, once it is known which sections were drawn.
+    body: list[str] = ["<!--jump-->"]
 
     if result.get("message"):
         body.append(
@@ -6754,11 +6874,24 @@ def render_quick_setup(ctx: PageContext) -> str:
             + "<span class='small muted'>Prices come from your terminal's current "
             "quotes; fills are simulated locally.</span></div>"
         )
+    if any(str(item.get("reason")) == "no_strategy_selected" for item in paper_blockers):
+        # The blocker names the library page.  If this process has no library, that
+        # page says so and there is nothing to choose -- so the card says what is
+        # true in either case instead of sending the operator to find out.
+        paper_body += (
+            "<p class='small muted'>This runner follows a variant you chose; it does "
+            "not choose one. If the strategy library page reports that it is not wired "
+            "into this workstation, there is no variant to pick and this runner cannot "
+            "start here — the catalog paper test above is the paper path that needs no "
+            "library.</p>"
+        )
     body.append(
         card(
-            "Paper trading, one click",
+            "Paper strategy runner, one click",
             paper_body,
-            hint=str(paper.get("note", "")),
+            hint=str(paper.get("note", ""))
+            + " A separate book from the catalog paper test above: the two never share "
+            "a ledger, and neither sends an order.",
         )
     )
 
@@ -6771,7 +6904,25 @@ def render_quick_setup(ctx: PageContext) -> str:
             "reason to trade. Live execution is a separate mode with its own gates.",
         )
     )
-    return render_shell(ctx, body)
+    return render_shell(
+        ctx,
+        with_page_jump(
+            "".join(body),
+            (
+                ("evaluate", "1 · Evaluate the catalog", "Evaluate the catalog"),
+                ("paper-test", "Paper test", "Paper test"),
+                ("catalog-audit", "Full catalog audit", "Full catalog audit"),
+                ("terminal-answered", "What the terminal answered", "What the terminal answered"),
+                ("five-answers", "The five things only you can answer", "The five answers"),
+                ("history", "One year of history, from your terminal", "One year of history"),
+                ("sweep", "Run every candidate over that history", "Run every candidate"),
+                ("what-measured", "What the run measured", "What the run measured"),
+                ("what-did-not-run", "What did not run, and why", "What did not run"),
+                ("research-paper", "Paper strategy runner, one click", "Strategy runner"),
+            ),
+            "<!--jump-->",
+        ),
+    )
 
 
 def _catalog_view(ctx: PageContext) -> Mapping[str, Any]:
@@ -7038,8 +7189,27 @@ def render_catalog_section(ctx: PageContext) -> str:
         body.append(notice("warn", "The last evaluation", str(evaluation.get("message"))))
 
     blockers = [dict(item) for item in evaluation.get("blockers") or []]
-    if blockers:
-        body.append(_blocker_list(blockers))
+    # What a *rebuild* from the stored record would run into.  These are the same
+    # record conditions, but once a test exists they no longer block anything: it
+    # is already built, and the Autopilot may be following a selection of its own.
+    # Printed beside the running test they read as "no candidate passed the
+    # screen" -- a contradiction, not a warning.  They are said once, in the paper
+    # section, as what a *fresh* build would need.
+    rebuild = [dict(item) for item in paper.get("rebuild_blockers") or []]
+    moved = {str(item.get("reason") or "") for item in rebuild}
+    remaining = [item for item in blockers if str(item.get("reason") or "") not in moved]
+    if remaining:
+        body.append(_blocker_list(remaining))
+    if rebuild:
+        body.append(
+            card(
+                "What a rebuild from the stored record would need",
+                _blocker_list(rebuild),
+                hint="The paper test below is already built and is unaffected. These are "
+                "the conditions a fresh build from the stored evaluation would hit, "
+                "which is why nothing is offered to rebuild it.",
+            )
+        )
 
     timeframes = [str(item) for item in symbols.get("timeframes") or ["1h"]]
     options = "".join(
@@ -7079,20 +7249,32 @@ def render_catalog_section(ctx: PageContext) -> str:
     snapshot = dict(paper.get("snapshot") or {})
     paper_blockers = [dict(item) for item in paper.get("blockers") or []]
     status = str(snapshot.get("status") or "IDLE")
+    # The three counters used to float between two cards with no heading of their
+    # own, so a screen reader met a bare grid and the contents list had nothing to
+    # point at.  They are the paper test's summary, so they are its card.
     body.append(
-        "<div class='data-grid'>"
-        + kpi("Paper test", status, foot="locally simulated fills")
-        + kpi(
-            "Open paper positions",
-            str(len(snapshot.get("positions") or ())),
-            foot="priced from broker ticks",
+        card(
+            "Paper test",
+            "<div class='data-grid'>"
+            + kpi("Paper test", status, foot="locally simulated fills")
+            + kpi(
+                "Open paper positions",
+                str(len(snapshot.get("positions") or ())),
+                foot="priced from broker ticks",
+            )
+            + kpi(
+                "Simulated closes",
+                str(len(snapshot.get("fills") or ())),
+                foot="ledger on disk",
+            )
+            + "</div>"
+            + (
+                f"<p class='small muted' style='margin:8px 0 0'>Active symbols: "
+                f"{escape(', '.join(snapshot.get('active_symbols') or ()) or 'none')}</p>"
+            ),
+            hint="The catalog test this page builds and follows. Its fills are "
+            "simulated locally from the terminal's own quotes; no order is sent.",
         )
-        + kpi(
-            "Simulated closes",
-            str(len(snapshot.get("fills") or ())),
-            foot="ledger on disk",
-        )
-        + "</div>"
     )
     quotes = [dict(item) for item in snapshot.get("quotes") or []]
     if quotes:
@@ -7110,8 +7292,7 @@ def render_catalog_section(ctx: PageContext) -> str:
             )
             + f" · allowed age {escape(str(snapshot.get('max_quote_age_seconds', '')))}s</p>"
         )
-    active = ", ".join(snapshot.get("active_symbols") or ()) or "none"
-    body.append(f"<p class='small muted'>Active symbols: {escape(active)}</p>")
+    # "Active symbols" is stated once, on the paper test card above.
     watch_rows = [
         (
             item.get("symbol", ""),
@@ -7211,13 +7392,33 @@ def render_catalog_section(ctx: PageContext) -> str:
         )
     if paper_blockers:
         body.append(_blocker_list(paper_blockers))
-    body.append(
-        "<div class='step-actions'>"
-        + action_form("catalog-paper-start", ctx.action_nonce, "Start live-market paper test", tone="primary")
-        + action_form("catalog-paper-stop", ctx.action_nonce, "Stop the paper test")
-        + action_form("catalog-paper-flat", ctx.action_nonce, "Simulate closing open positions")
-        + "</div>"
+    # Only the controls that can do something are drawn.  Start builds the test
+    # from the stored evaluation and then starts it, so it is always offered;
+    # Stop and the flatten act on a built test, and with none they could only
+    # answer "no paper test is built" -- a click that cannot succeed is not a
+    # control, it is a dead end with a button on it.  The reason a start is not
+    # possible is already listed above, in words.
+    built = bool(paper.get("built"))
+    open_positions = len(snapshot.get("positions") or ())
+    actions = action_form(
+        "catalog-paper-start",
+        ctx.action_nonce,
+        "Start live-market paper test",
+        tone="primary",
     )
+    if built:
+        actions += action_form("catalog-paper-stop", ctx.action_nonce, "Stop the paper test")
+    if open_positions:
+        actions += action_form(
+            "catalog-paper-flat", ctx.action_nonce, "Simulate closing open positions"
+        )
+    body.append("<div class='step-actions'>" + actions + "</div>")
+    if not built:
+        body.append(
+            f"<p class='small muted'>Start builds the test from the stored evaluation "
+            f"and then follows it. There is nothing to stop or close yet, so those two "
+            f"controls appear once the test exists.</p>"
+        )
     body.append(
         f"<p class='small muted'>{escape(str(snapshot.get('claim') or paper.get('headline') or ''))}</p>"
     )
@@ -8428,6 +8629,10 @@ def render_autopilot(ctx: PageContext) -> str:
             if view.get("note")
             else ""
         )
+        # Filled in once the cards are known: this page is long, and a list of its
+        # own anchors is the whole navigation it needs.  Only sections that were
+        # actually drawn are listed, so no entry is a jump to nothing.
+        + "<!--jump-->"
         + "</div></section>"
     )
 
@@ -8442,7 +8647,6 @@ def render_autopilot(ctx: PageContext) -> str:
         + f">{escape(name)}</option>"
         for name in frames
     )
-    recommended = ", ".join(str(name) for name in (choices.get("recommended") or ()))
     if running:
         controls.append(
             action_form(
@@ -8458,15 +8662,65 @@ def render_autopilot(ctx: PageContext) -> str:
             "and does not touch LIVE.</p>"
         )
     else:
+        # The pairs are the terminal's own verified forex pairs, offered by name.
+        # A free-text box let an operator type a broker symbol the terminal does not
+        # report, which the run then refused -- correct, but a refusal is a poor way
+        # to learn the spelling.  When the terminal reports nothing, the form says so
+        # and falls back to typing, because there is no list to offer.
+        pairs = [item for item in (choices.get("pairs") or []) if item.get("broker_symbol")]
+        ticked = {str(name) for name in (choices.get("recommended") or ())}
+        if pairs:
+            symbol_field = (
+                "<fieldset class='field' style='border:0;padding:0;margin:0'>"
+                "<legend class='small' style='padding:0 0 6px'>Forex pairs the terminal "
+                "reports (verified: both currency legs named)</legend>"
+                "<div class='symbol-grid'>"
+                + "".join(
+                    "<label class='small' style='display:flex;gap:8px;align-items:center'>"
+                    f"<input type='checkbox' name='symbols' "
+                    f"value='{escape(str(item.get('broker_symbol', '')))}'"
+                    + (" checked" if str(item.get("broker_symbol")) in ticked else "")
+                    + ">"
+                    f"<span class='mono'>{escape(str(item.get('broker_symbol', '')))}</span>"
+                    f" <span class='muted'>{escape(str(item.get('pair', '')))}</span>"
+                    + (
+                        " <span class='muted'>· major</span>"
+                        if item.get("major")
+                        else ""
+                    )
+                    + "</label>"
+                    for item in pairs
+                )
+                + "</div>"
+                + "<p class='small muted' style='margin:6px 0 0'>Tick none and the run "
+                "uses the pairs the terminal recommends. A name the terminal reports "
+                "without both currency legs is not offered here.</p>"
+                + (
+                    "<p class='small muted' style='margin:4px 0 0'>Not offered as forex: "
+                    + " ".join(
+                        f"{escape(str(item.get('broker_symbol', '')))}"
+                        f" ({escape(str(item.get('kind', '')))})"
+                        for item in (choices.get("excluded") or [])[:8]
+                    )
+                    + "</p>"
+                    if choices.get("excluded")
+                    else ""
+                )
+                + "</fieldset>"
+            )
+        else:
+            symbol_field = (
+                "<label for='autopilot-symbols' class='small'>Broker symbol "
+                "(the terminal reported no verified forex pair, so type one)</label>"
+                f"<input id='autopilot-symbols' name='symbols' type='text' "
+                f"autocomplete='off' spellcheck='false' value=''>"
+            )
         controls.append(
             f"<form method='post' action='/actions/autopilot-start' class='stack' "
             "style='gap:10px'>"
             f"<input type='hidden' name='nonce' value='{nonce}'>"
-            "<label for='autopilot-symbols' class='small'>Symbols (comma separated; "
-            "blank uses what the terminal recommends)</label>"
-            f"<input id='autopilot-symbols' name='symbols' type='text' "
-            f"autocomplete='off' spellcheck='false' value='{escape(recommended)}'>"
-            "<label for='autopilot-timeframe' class='small'>Timeframe</label>"
+            + symbol_field
+            + "<label for='autopilot-timeframe' class='small'>Timeframe</label>"
             f"<select id='autopilot-timeframe' name='timeframes'>{options}</select>"
             "<button class='btn btn--primary' type='submit'>Start paper autopilot</button>"
             "<p class='small muted'>One run measures at most "
@@ -8632,6 +8886,26 @@ def render_autopilot(ctx: PageContext) -> str:
 
     blockers = [dict(item) for item in (view.get("blockers") or [])]
     if blockers:
+        # A refusal that names the page where it is fixed is a next step; one that
+        # only explains itself leaves the operator to hunt for the control.  Each
+        # route below exists, and each one carries the thing that clears it.
+        routes = {
+            "no_terminal": ("Connect the terminal", "/setup"),
+            "no_symbols_selected": ("Choose symbols", "/account"),
+            "unsupported_timeframe": ("Choose a timeframe", "/quick-setup"),
+            "no_usable_history": ("Check the market data", "/quick-setup"),
+            "evaluation_failed": ("Re-run the evaluation", "/quick-setup"),
+            "evaluation_record_not_written": ("Re-run the evaluation", "/quick-setup"),
+            "no_candidate_met_the_selection_rules": ("See what was evaluated", "/quick-setup"),
+            "no_usable_watch": ("See the symbol offer", "/account"),
+            "paper_test_refused": ("See the paper test", "/quick-setup"),
+            "catalog_panel_missing": ("Open Quick setup", "/quick-setup"),
+        }
+        next_steps = []
+        for item in blockers:
+            route = routes.get(str(item.get("reason") or ""))
+            if route and route not in next_steps:
+                next_steps.append(route)
         body.append(
             card(
                 "What stopped it",
@@ -8643,6 +8917,16 @@ def render_autopilot(ctx: PageContext) -> str:
                         }
                         for item in blockers
                     ]
+                )
+                + (
+                    "<div class='step-actions'>"
+                    + "".join(
+                        f"<a class='btn btn-sm' href='{escape(href)}'>{escape(label)}</a>"
+                        for label, href in next_steps
+                    )
+                    + "</div>"
+                    if next_steps
+                    else ""
                 ),
                 hint="A blocker is a refusal with a reason, never a silent fallback to "
                 "something else.",
@@ -8842,7 +9126,8 @@ def render_autopilot(ctx: PageContext) -> str:
                         )
                         for item in orders
                     ),
-                    empty="No simulated entry yet.",
+                    empty="<p class='small muted' style='margin:0 0 8px'>No simulated "
+                    "entry yet.</p>",
                 )
                 + table(
                     "Exit fills (closed trades), with the price P&L in the quote currency",
@@ -8869,7 +9154,8 @@ def render_autopilot(ctx: PageContext) -> str:
                         )
                         for item in fills
                     ),
-                    empty="No simulated close yet.",
+                    empty="<p class='small muted' style='margin:0'>No simulated close "
+                    "yet.</p>",
                 ),
                 hint="These are numbers in a local ledger. No order was sent for any of "
                 "them, and the totals are not a claim about what a broker would have "
@@ -8972,15 +9258,36 @@ def render_autopilot(ctx: PageContext) -> str:
             )
         )
 
+    # The latency sentence lives on the latency card, where the numbers it
+    # qualifies are.  Repeating it here as well said the same thing twice on one
+    # page; this notice is about the claim, so it carries only the claim.
     body.append(
         notice(
             "muted",
             "What this page cannot say",
-            str(view.get("claim") or "")
-            + " " + str(latency.get("note") or ""),
+            str(view.get("claim") or ""),
         )
     )
-    return render_shell(ctx, "".join(body))
+
+    # (anchor, the card's own heading, the shorter word for the contents list)
+    return render_shell(
+        ctx,
+        with_page_jump(
+            "".join(body),
+            (
+                ("start-stop", "Start and stop", "Start and stop"),
+                ("positions", "Open simulated positions", "Open positions"),
+                ("fills", "Simulated fills from this session", "Simulated fills"),
+                ("active", "Active strategies", "Active strategies"),
+                ("feed", "Feed health", "Feed health"),
+                ("stopped", "What stopped it", "What stopped it"),
+                ("kronos", "Kronos, if you turn it on", "Kronos"),
+                ("latency", "Observed latency", "Observed latency"),
+                ("live", "Taking this to LIVE: what is missing", "Taking this to LIVE"),
+            ),
+            "<!--jump-->",
+        ),
+    )
 
 
 PAGES = {

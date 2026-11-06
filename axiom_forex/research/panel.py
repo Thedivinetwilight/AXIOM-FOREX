@@ -634,7 +634,8 @@ class ResearchPanel:
                     "reason": "no_strategy_selected",
                     "message": "No strategy has been selected by the operator, so paper "
                     "trading has nothing to run.",
-                    "hint": "Evaluate and select a variant on the strategy library page.",
+                    "hint": "Pick a variant on the strategy library page (/strategies). "
+                    "This runner follows that choice; it never picks one for you.",
                 }
             )
         runner = self._runner_state()

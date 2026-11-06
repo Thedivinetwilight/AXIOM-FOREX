@@ -10,6 +10,7 @@ Forex research and paper-trading adaptation based on AXIOM's modular architectur
 - [Provider profile onboarding](docs/PROVIDER_PROFILE_ONBOARDING.md)
 - [Historical data import](docs/HISTORICAL_DATA_IMPORT.md)
 - [Multi-pair research evaluation](docs/RESEARCH_EVALUATION.md)
+- [The autopilot: evaluate, select, then follow](docs/AUTOPILOT.md)
 - [Running-system boundary](docs/RUNNING_SYSTEM_BOUNDARY.md)
 
 ## What is implemented
@@ -105,6 +106,33 @@ records contain mode names, reason codes, and timestamps — never a credential,
 number, a balance, or an equity figure.
 
 Both files are `*.local.json`, so they are git-ignored and travel only with your machine.
+
+### Starting a paper test: the Autopilot page
+
+**Autopilot** (`/autopilot`, first entry in the navigation) is the one page that runs the whole
+paper workflow end to end. It needs nothing from Quick setup, and it sends no order.
+
+1. Start the workstation against your terminal (`.venv\Scripts\python.exe -m
+   axiom_forex.workstation.launch`) and open **Autopilot**.
+2. The start form lists the **forex pairs your terminal reports**, each with its pair name and
+   whether it is a major; the pairs it recommends are already ticked. Names the terminal does
+   not classify as a pair — metals, share CFDs, indices — are listed underneath with the reason,
+   and ticking none uses the recommended pairs.
+3. Choose a timeframe, then press **Start paper autopilot**. It reads the terminal's own history,
+   evaluates the catalog, selects on train and validation evidence only, and then follows the
+   selection as a locally simulated paper test. Every simulated fill uses the lot size printed
+   under the button.
+4. Watch it on the same page: state, the rows it follows, quote freshness, decisions and their
+   reasons, simulated entries and closes, open positions and the stored book. The short contents
+   list at the top jumps to any of those sections.
+5. **Stop the paper loop** ends the loop and closes nothing: open positions stay open and stay
+   listed. Closing them is a separate, explicit click, offered only when it can work.
+
+Blocks and refusals are named on the page with the reason code, a sentence, and a link to the
+page that clears them. The research sweep, the short setup and the strategy-library runner live
+on **Quick setup**; they are a different path to the same paper platform, not a prerequisite for
+Autopilot. See [the autopilot document](docs/AUTOPILOT.md) for the rules, the recovery behaviour
+and what each blocker means.
 
 ### Why an order may still be refused
 

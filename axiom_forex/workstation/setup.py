@@ -97,6 +97,55 @@ class SetupStep:
         }
 
 
+#: What each outstanding condition is called, and which step clears it.
+#:
+#: The last step used to print its own blocker codes as a comma-separated list --
+#: "not_windows, metatrader5_package_missing, mt5_terminal_not_found, ..." -- which
+#: named the internal tokens and never said which step to go back to.  These are
+#: the same conditions the earlier steps already explain; this is how the last one
+#: refers to them.
+BLOCKER_WORDS: dict[str, tuple[str, int]] = {
+    "not_windows": ("MetaTrader 5 runs on Windows only", 1),
+    "python_too_old": ("This Python is too old for AXIOM", 1),
+    "time_zone_database_missing": ("No time-zone database is installed", 1),
+    "metatrader5_package_missing": ("The MetaTrader5 package is not installed", 1),
+    "mt5_terminal_not_found": ("No MetaTrader 5 terminal was found", 1),
+    "settings_file_contains_secret": ("The settings file contains a secret", 1),
+    "settings_missing": ("mt5_settings.local.json has not been created", 1),
+    "simulated_session_only": ("This is the offline simulator, not a terminal", 2),
+    "not_connected": ("The terminal is not connected", 3),
+    "configuration_not_confirmed": ("The account and symbols are not confirmed", 5),
+}
+
+
+def outstanding_words(codes: Sequence[str]) -> str:
+    """Outstanding conditions as a sentence, grouped by the step that clears them.
+
+    An unknown code still appears, with its underscores read as spaces, rather
+    than being dropped: a condition we cannot name is still a condition.  The
+    conditions that belong to no step are named last, without a step prefix,
+    because inventing one would send the operator to a step that does not fix it.
+    """
+
+    grouped: dict[int, list[str]] = {}
+    unplaced: list[str] = []
+    for code in codes:
+        text, step = BLOCKER_WORDS.get(code, (code.replace("_", " "), 0))
+        if step:
+            grouped.setdefault(step, []).append(text)
+        else:
+            unplaced.append(text)
+    parts = [
+        f"step {step}: " + ", ".join(items)
+        for step, items in sorted(grouped.items())
+    ]
+    if unplaced:
+        parts.append(", ".join(unplaced))
+    if not parts:
+        return ""
+    return "Not finished yet — " + "; ".join(parts) + "."
+
+
 @dataclass
 class SetupWizard:
     """Six steps over the environment, the session, and the operator's choices."""
@@ -520,7 +569,7 @@ class SetupWizard:
                 title="Ready for observation",
                 summary="Finish the steps above to reach observation mode.",
                 status=PENDING,
-                detail=", ".join(self.blockers) or "",
+                detail=outstanding_words(self.blockers),
             )
         steps.append(ready)
         return tuple(steps)

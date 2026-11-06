@@ -554,10 +554,25 @@ class CatalogPanel:
                 }
             ]
         )
-        if record is not None:
-            blockers = blockers + [
-                dict(item) for item in record.blockers(max_age_seconds=self.max_record_age_seconds)
+        record_blockers = (
+            [
+                dict(item)
+                for item in record.blockers(max_age_seconds=self.max_record_age_seconds)
             ]
+            if record is not None
+            else []
+        )
+        # A record blocker says why a test cannot be *built* from the record.
+        # Once a test exists -- including one the Autopilot built from its own
+        # selection on the same ledger -- it is not a reason anything is blocked
+        # now, and printing it beside a running test read as "no candidate passed
+        # the screen" directly above the row that test was following.  It is kept,
+        # and said in its own place, as what a rebuild would run into.
+        rebuild_blockers: list[dict[str, Any]] = []
+        if paper is not None:
+            rebuild_blockers = record_blockers
+        else:
+            blockers = blockers + record_blockers
         # While it is running, "already running" is not a blocker; the status says so.
         blockers = [
             item for item in blockers if item.get("reason") != "paper_test_already_running"
@@ -570,6 +585,7 @@ class CatalogPanel:
             "snapshot": snapshot,
             "watches": [watch.audit_view() for watch in watches],
             "blockers": blockers,
+            "rebuild_blockers": rebuild_blockers,
             "record_status": record.status if record is not None else "",
             "record_origin": record.data_origin if record is not None else "",
         }
@@ -580,6 +596,32 @@ class CatalogPanel:
         """Where the paper test's ledger and state file live."""
 
         return self.data_root / "paper"
+
+    def adopt_paper(self, paper: Any, watches: Sequence[Any] = ()) -> bool:
+        """Publish a paper test built elsewhere as this panel's current test.
+
+        The Autopilot builds its own ``CatalogPaperTest`` -- it owns the start,
+        the stop and the recovery -- on the *same* folder and the same ledger.
+        Without this registration the panel, and every page that reads it, knew
+        nothing about that session: the start page said "Not trading yet" and
+        "Build the test from a stored evaluation first" while the Autopilot page
+        said RUNNING, from the same ``data/catalog/paper`` directory.
+
+        Read-only in one direction and guarded in the other: a test that is
+        already running here is never replaced, so two callers cannot swap the
+        book under a live loop.  Returns whether it was adopted.
+        """
+
+        with self._lock:
+            current = self._paper
+            try:
+                if current is not None and current.running:
+                    return False
+            except Exception:  # a test that cannot answer is not a running one
+                pass
+            self._paper = paper
+            self._paper_watches = tuple(watches)
+        return True
 
     def paper_snapshot(self) -> dict[str, Any]:
         """The running test's own snapshot, or an empty one when nothing is built.

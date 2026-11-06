@@ -226,7 +226,8 @@ class FakePanel:
                     {
                         "reason": "no_strategy_selected",
                         "message": "No strategy has been selected by the operator.",
-                        "hint": "Select one on the strategy library page.",
+                        "hint": "Pick a variant on the strategy library page "
+                        "(/strategies); this runner follows that choice.",
                     }
                 ],
                 "selection": None,
@@ -368,7 +369,10 @@ def test_the_page_never_claims_profit_and_says_so_once_plainly():
 
 def test_paper_trading_is_offered_through_the_existing_runner_action_only():
     html = page_html(app_with_panel())
-    assert "Paper trading, one click" in html
+    # Two paper books live on this page -- the catalog test and the research
+    # runner -- so the card names which one it is and which one it is not.
+    assert "Paper strategy runner, one click" in html
+    assert "A separate book from the catalog paper test above" in html
     assert "/actions/runner-start" in html
     assert "no_strategy_selected" in html
     assert "/actions/paper-start" not in html

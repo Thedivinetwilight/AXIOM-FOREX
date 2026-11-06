@@ -1793,7 +1793,18 @@ class CatalogPaperTest:
             "version": STATE_VERSION,
             "updated_at": _iso(self._clock()),
             "status": self._status,
-            "running": self.running,
+            # What the *file* says the session is, not whether a thread happens to
+            # be alive in this process.  ``running`` used to be
+            # ``thread.is_alive()``, and ``start()`` writes the state file before
+            # it creates the thread -- so the very first write of a live session
+            # recorded ``status: RUNNING`` beside ``running: false``.  Every page
+            # that reads the durable book (the paper account, the positions page,
+            # the performance page) then said "the paper session is not running"
+            # while the Autopilot page said RUNNING, from the same folder.
+            #
+            # A thread cannot survive a restart anyway, so it is not the thing a
+            # resumed book should be judged by: this is.
+            "running": self._status == RUNNING,
             "started_at": self._started_at,
             "stopped_at": self._stopped_at,
             "reason": self._reason,

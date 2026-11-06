@@ -94,9 +94,11 @@ AUTOPILOT_NOTE = (
 )
 
 LATENCY_NOTE = (
-    "Decision and submission timings below were measured in this process on this "
-    "machine. They are observations, not a service level: the same code on another "
-    "machine, or against a real broker, will produce different numbers."
+    # "below" was wrong: the timings sit above this sentence on the card that
+    # carries it, so it pointed at the wrong half of its own card.
+    "Decision and submission timings on this card were measured in this process on "
+    "this machine. They are observations, not a service level: the same code on "
+    "another machine, or against a real broker, will produce different numbers."
 )
 
 
@@ -556,6 +558,17 @@ class Autopilot:
         )
         with self._lock:
             self._paper = paper
+        # Publish the session to the panel, so the pages that read the panel --
+        # the start page, the catalog page, the paper account every paper figure
+        # comes from -- report the same session this loop is driving, with the
+        # same watches and the same live quotes.  Before this, those pages said
+        # "not built" while this one said RUNNING, about one ledger.
+        adopt = getattr(panel, "adopt_paper", None)
+        if callable(adopt):
+            try:
+                adopt(paper, watches)
+            except Exception:  # the loop runs even if the panel cannot take it
+                pass
         restored = len(self._paper_positions(paper))
         self._positions_at_start = restored
         start_began = time.monotonic()
@@ -892,10 +905,27 @@ class Autopilot:
         supported = tuple(getattr(module, "EVAL_TIMEFRAMES", ("15m", "1h")))
         default = str(getattr(module, "DEFAULT_EVAL_TIMEFRAME", supported[0]))
         recommended: list[str] = []
+        # The verified pairs the terminal reports, with the reason each one is or
+        # is not usable.  The start form offers these by name, so an operator picks
+        # a pair the terminal can actually price instead of typing one and being
+        # refused later; the exclusion reasons travel with them for the same
+        # reason they do on the catalog page.
+        pairs: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        symbols_available = False
+        symbols_reason = ""
         note = ""
         try:
             offer = self._panel.fx_choices()
             recommended = [str(name) for name in (offer.get("recommended") or ())]
+            symbols_available = bool(offer.get("available"))
+            symbols_reason = str(offer.get("message") or "") if not symbols_available else ""
+            pairs = [
+                dict(item)
+                for item in (offer.get("choices") or ())
+                if isinstance(item, Mapping) and item.get("usable")
+            ]
+            excluded = [dict(item) for item in (offer.get("excluded") or ()) if isinstance(item, Mapping)]
             counted = dict(offer.get("counts") or {})
             if counted:
                 note = (
@@ -908,6 +938,10 @@ class Autopilot:
             "timeframes": list(supported),
             "default_timeframe": default,
             "recommended": recommended,
+            "pairs": pairs,
+            "excluded": excluded,
+            "symbols_available": symbols_available,
+            "symbols_reason": symbols_reason,
             "max_symbols": int(getattr(module, "MAX_EVAL_SYMBOLS", 3)),
             "max_rows": self.row_limit,
             # The size every simulated fill will use.  It belongs on the page that

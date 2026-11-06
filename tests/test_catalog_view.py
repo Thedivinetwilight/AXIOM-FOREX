@@ -37,11 +37,30 @@ def test_the_catalog_card_offers_only_forex_and_one_start_button(tmp_path):
     html = _page(_app(panel))
     assert "Catalog and the Monday paper test" in html
     assert "Start live-market paper test" in html
-    assert "Stop the paper test" in html
+    # Stop and the flatten act on a built test.  With none built they could only
+    # answer "no paper test is built", so they are not drawn at all -- and the page
+    # says why, and that they appear once the test exists.
+    assert "Stop the paper test" not in html
+    assert "Simulate closing open positions" not in html
+    assert "There is nothing to stop or close yet" in html
     assert "EUR/USD" in html
     assert "XAU/USD" not in html
     assert "catalog-evaluate" in html
     assert "no claim" in html.lower() or "makes no claim" in html
+
+
+def test_the_stop_and_close_controls_appear_once_the_test_is_built(tmp_path):
+    """The other half of the rule: a control is drawn when it can work."""
+
+    from axiom_forex.strategies.catalog.panel import CatalogPaperTest
+
+    panel = _panel(tmp_path)
+    app = _app(panel)
+    paper = CatalogPaperTest(quotes=panel._terminal(), watches=(), root=panel.paper_root())
+    assert panel.adopt_paper(paper, ()) is True
+    html = _page(app)
+    assert "Stop the paper test" in html
+    assert "There is nothing to stop or close yet" not in html
 
 
 def test_the_card_shows_the_evaluation_and_the_paper_set(tmp_path):

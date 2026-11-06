@@ -53,6 +53,8 @@ from axiom_forex.workstation.context import PAGE_PATHS
 from axiom_forex.workstation.probes import probe_environment, prerequisite_help
 
 from tests.test_autopilot_ui import _autopilot
+from tests.test_catalog_autopilot import TIMEFRAME, _candidate_id, _passing_row
+from tests.test_catalog_panel import _panel
 from tests.test_paper_accounting import _account_app, _text
 from tests.test_paper_flatten import (
     NOW,
@@ -1002,7 +1004,11 @@ def test_the_guided_start_page_points_at_the_autopilot_page():
 
     html = connected_simulator_app().page("/")[1]
 
-    assert "Or run all of this from the Autopilot page" in html
+    # One signpost, above the five steps.  It used to be drawn twice: once here
+    # and once after the list, which is how a page ends up saying the same thing
+    # on two screens of scroll.
+    assert html.count("Or run the whole loop from one page") == 1
+    assert "Or run all of this from the Autopilot page" not in html
     assert "href='/autopilot'" in html
     # The signpost is a card body, so the link is markup rather than escaped text.
     assert "&lt;a href=" not in html
@@ -1048,3 +1054,435 @@ def test_both_scripts_name_the_same_interpreter():
     # that the updater performs inside .venv.
     assert "py -3 -m venv .venv" in launcher
     assert "py -3 -m venv .venv" in updater
+
+
+# ---------------------------------------------------------------------------
+# one session, one story: the durable book, the panel, and the loop
+# ---------------------------------------------------------------------------
+
+
+def test_the_stored_session_never_contradicts_itself(tmp_path):
+    """``status: RUNNING`` beside ``running: false``, written by ``start()``.
+
+    ``running`` was ``thread.is_alive()``, and ``start()`` writes the state file
+    *before* it creates the thread.  The first write of a live session therefore
+    recorded a session that was running and not running at once -- and every page
+    that reads the durable book (paper account, positions, performance) said "the
+    paper session is not running" while the Autopilot page said RUNNING, from the
+    same folder.
+    """
+
+    paper = CatalogPaperTest(
+        quotes=FakeTerminal(),
+        watches=(_watch(),),
+        root=tmp_path,
+        lot=0.10,
+        clock=lambda: NOW,
+    )
+    started = paper.start()
+    try:
+        assert started["started"] is True, started
+        payload = json.loads((tmp_path / "catalog-paper-state.json").read_text(encoding="utf-8"))
+        assert payload["status"] == "RUNNING"
+        # The file has to agree with itself, at every instant it exists.
+        assert payload["running"] is True
+    finally:
+        paper.stop(reason="test")
+
+
+def test_a_stopped_book_says_stopped_in_the_file_too(tmp_path):
+    paper = CatalogPaperTest(
+        quotes=FakeTerminal(), watches=(_watch(),), root=tmp_path, lot=0.10, clock=lambda: NOW
+    )
+    paper.start()
+    paper.stop(reason="operator_stopped")
+    payload = json.loads((tmp_path / "catalog-paper-state.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "STOPPED"
+    assert payload["running"] is False
+
+
+def test_the_paper_account_reads_a_running_book_as_running(tmp_path):
+    """The pause banner is derived from that same file, so it follows it."""
+
+    paper = CatalogPaperTest(
+        quotes=FakeTerminal(), watches=(_watch(),), root=tmp_path, lot=0.10, clock=lambda: NOW
+    )
+    paper.start()
+    try:
+        # The reader the pages use, pointed at the folder the test just wrote.
+        account = accounting.read_account(tmp_path, now=NOW, max_quote_age_seconds=120.0)
+        assert account["session"]["running"] is True
+        assert account["trading"]["paused"] is False, account["trading"]
+    finally:
+        paper.stop(reason="test")
+
+
+def test_the_autopilot_publishes_its_session_to_the_panel(tmp_path):
+    """The pages that read the panel must see the session the loop is driving.
+
+    The Autopilot builds its own test on the panel's folder.  Until it registered
+    that test, the start page said "Not trading yet" and "Build the test from a
+    stored evaluation first" while the Autopilot page said RUNNING.
+    """
+
+    from tests.test_catalog_autopilot import _start_with_report
+
+    candidate_id = _candidate_id()
+    autopilot = _start_with_report(
+        tmp_path,
+        lambda boundaries: [
+            _passing_row(boundaries[("EURUSD.pro", TIMEFRAME)] - timedelta(hours=1), candidate_id)
+        ],
+    )
+    try:
+        panel = autopilot._panel
+        view = panel.paper_view()
+        assert view["built"] is True
+        assert view["running"] is True
+        # The watches are the panel's too, so its table lists the followed row.
+        assert [watch.symbol for watch in panel._paper_watches] == ["EURUSD.pro"]
+        snapshot = panel.paper_snapshot()
+        assert snapshot.get("running") is True
+        assert snapshot.get("watches")
+    finally:
+        autopilot.stop()
+
+
+def test_adopting_never_swaps_the_book_under_a_running_test(tmp_path):
+    """A guard, not a courtesy: two owners of one ledger would be worse than none."""
+
+    panel = _panel(tmp_path)
+    running = CatalogPaperTest(quotes=FakeTerminal(), watches=(_watch(),), root=tmp_path, lot=0.10)
+    running.start()
+    try:
+        assert panel.adopt_paper(running, ()) is True
+        second = CatalogPaperTest(quotes=FakeTerminal(), watches=(), root=tmp_path, lot=0.10)
+        assert panel.adopt_paper(second, ()) is False
+        assert panel.paper_snapshot().get("running") is True
+    finally:
+        running.stop(reason="test")
+        # The refusal left the panel's own test stopping normally.
+        assert panel.paper_snapshot().get("running") in (False, None)
+
+
+def test_a_running_test_is_not_told_no_candidate_passed_the_screen(tmp_path):
+    """The record's conditions are about a rebuild, not about the test running now."""
+
+    from tests.test_catalog_autopilot import _start_with_report
+
+    candidate_id = _candidate_id()
+    autopilot = _start_with_report(
+        tmp_path,
+        lambda boundaries: [
+            _passing_row(boundaries[("EURUSD.pro", TIMEFRAME)] - timedelta(hours=1), candidate_id)
+        ],
+    )
+    try:
+        view = autopilot._panel.paper_view()
+        reasons = {item["reason"] for item in view["blockers"]}
+        # The stored record in this fixture has no paper set; that must not be a
+        # *current* blocker while the test is following a selected row.
+        assert "no_screened_candidate_in_the_record" not in reasons
+        assert "no_screened_candidate_in_the_record" in {
+            item["reason"] for item in view["rebuild_blockers"]
+        }
+    finally:
+        autopilot.stop()
+
+
+def test_a_stopped_autopilot_says_where_the_blocker_is_cleared(tmp_path):
+    """A refusal with a route is a next step; one without is a scavenger hunt."""
+
+    from axiom_forex.strategies.catalog.autopilot import Autopilot
+    from tests.test_autopilot_ui import _app as _ui_app, _panel as _ui_panel
+
+    panel = _ui_panel(tmp_path)
+    panel.terminal_provider = lambda: None  # no terminal at all
+    app = _ui_app(panel)
+    autopilot = Autopilot(panel)
+    app.autopilot = autopilot
+    autopilot.start(symbols=["EURUSD.pro"], timeframes=[TIMEFRAME])
+    autopilot.wait(timeout=60.0)
+
+    status, html = app.page("/autopilot")
+    text = _text(html)
+
+    assert status == 200
+    assert autopilot.status()["state"] == "BLOCKED"
+    assert "What stopped it" in text
+    assert "No terminal" in text
+    # The route to the control that clears it, and it is a real route.
+    assert "Connect the terminal" in text
+    assert "href='/setup'" in html
+    for href in re.findall(r"href='(/[^']*)'", html):
+        assert href.split("?")[0] in GET_ROUTES, href
+
+
+def test_the_autopilot_offers_the_pairs_the_terminal_verified(tmp_path):
+    """Ticking a pair the terminal reports beats typing one and being refused."""
+
+    autopilot, app = _autopilot(tmp_path)
+    choices = autopilot.choices()
+
+    assert choices["symbols_available"] is True
+    offered = {item["broker_symbol"]: item for item in choices["pairs"]}
+    assert offered["EURUSD.pro"]["pair"] == "EUR/USD"
+    # Both majors the fixture terminal reports, each with its pair name.
+    assert set(offered) == {"EURUSD.pro", "GBPUSD.pro"}
+
+    status, html = app.page("/autopilot")
+    text = _text(html)
+
+    assert status == 200
+    assert "Forex pairs the terminal reports" in text
+    # They are checkboxes named 'symbols', which the start action already accepts.
+    assert html.count("name='symbols'") == 2
+    assert "value='EURUSD.pro'" in html and "value='GBPUSD.pro'" in html
+    # The recommended ones are pre-ticked, so Start does something sensible.
+    assert html.count(" checked") >= 2
+    # A symbol the terminal does not class as a pair is named, not silently absent.
+    assert "Not offered as forex" in text
+    assert "XAUUSD" in text
+    # And the "tick none" case is stated rather than left to be discovered.
+    assert "Tick none and the run uses the pairs the terminal recommends" in text
+
+
+def test_the_autopilot_falls_back_to_typing_when_no_pair_is_verified(tmp_path):
+    from tests.test_autopilot_ui import _app as _ui_app, _panel as _ui_panel
+
+    panel = _ui_panel(tmp_path)
+    panel.terminal_provider = lambda: None
+    app = _ui_app(panel)
+    from axiom_forex.strategies.catalog.autopilot import Autopilot
+
+    app.autopilot = Autopilot(panel)
+
+    status, html = app.page("/autopilot")
+    text = _text(html)
+
+    assert status == 200
+    # No offer to show, so the form says why it is asking for a name instead.
+    assert "the terminal reported no verified forex pair, so type one" in text
+    assert "name='symbols'" in html
+
+
+def test_the_live_banner_says_a_state_and_not_a_colour(tmp_path):
+    """The chip read ``ok`` -- the *tone* name, printed as if it were the state."""
+
+    from tests.test_workstation_ui import connected_simulator_app
+
+    html = connected_simulator_app().page("/live")[1]
+    text = _text(html)
+
+    assert "No real order can be sent right now" in text
+    assert "Not sending" in text
+    # The bare tone word is gone; the dot carries the tone, the word carries the answer.
+    assert ">ok</span>" not in html
+    assert ">warn</span>" not in html
+
+
+def test_the_setup_page_counts_its_own_steps(tmp_path):
+    """It said "Seven plain steps" above a list of six."""
+
+    from tests.test_workstation_ui import app_for, simulated_wizard
+
+    html = app_for(simulated_wizard()).page("/setup")[1]
+    text = _text(html)
+
+    assert "6 plain steps" in text
+    assert "Seven plain steps" not in text
+    # The count it prints is the count it renders.
+    assert "0 of 6 steps complete" in text
+
+
+def test_an_outstanding_condition_is_named_with_the_step_that_clears_it():
+    from axiom_forex.workstation.setup import outstanding_words
+
+    said = outstanding_words(
+        ["not_windows", "metatrader5_package_missing", "not_connected", "brand_new_code"]
+    )
+
+    # No raw codes in the sentence ...
+    for code in ("not_windows", "metatrader5_package_missing", "not_connected"):
+        assert code not in said
+    # ... each condition names the step that fixes it ...
+    assert "step 1:" in said and "step 3:" in said
+    # ... and a condition with no known step is still named, with its underscores
+    # read as spaces rather than dropped -- and with no step invented for it.
+    assert "brand new code" in said
+    assert "step" not in said.split(";")[-1]
+    assert outstanding_words([]) == ""
+
+
+def test_a_blocker_keeps_the_sentence_its_author_wrote():
+    """The catalog's blockers carry ``detail``; only ``message`` was read."""
+
+    html = views._blocker_list(
+        [
+            {"reason": "no_evaluation_on_record", "detail": "Run the evaluation first."},
+            {"reason": "paper_test_not_built", "message": "Build it from a record."},
+            {"reason": "a_code_with_no_sentence"},
+        ]
+    )
+    text = _text(html)
+
+    # Both shapes of sentence are shown, not just the one with ``message``.
+    assert "Run the evaluation first." in text
+    assert "Build it from a record." in text
+    # And a blocker with no sentence gets a human heading, not a bare token.
+    assert "A code with no sentence" in text
+    # The code stays available, quietly, so it can be quoted and searched.
+    assert "no_evaluation_on_record" in text
+
+
+# -- long pages, and the navigation that keeps them usable ------------------
+
+
+def _jump_targets(html: str) -> list[str]:
+    match = re.search(r"<nav class='page-jump' aria-label='On this page'>(.*?)</nav>", html, re.S)
+    if match is None:
+        return []
+    return re.findall(r"href='#([^']*)'", match.group(1))
+
+
+def test_the_autopilot_page_lists_only_the_sections_it_drew(tmp_path):
+    """A contents list whose entries land nowhere is worse than none."""
+
+    _autopilot_instance, app = _autopilot(tmp_path, report=True)
+    status, html = app.page("/autopilot")
+
+    assert status == 200
+    targets = _jump_targets(html)
+    assert targets, "the page is long enough to need one"
+    # Every entry is a real heading on the page, and the marker is gone.
+    for anchor in targets:
+        assert f"<h2 id='{anchor}'>" in html, anchor
+    assert "<!--jump-->" not in html
+    # The first thing it offers to jump to is the control block, not a card
+    # that may not exist in another state.
+    assert targets[0] == "start-stop"
+    # No entry is a heading the page did not draw.
+    headings = set(re.findall(r"<h2 id='([^']+)'>", html))
+    assert set(targets) == headings
+
+
+def test_a_short_page_carries_no_contents_list(tmp_path):
+    """One section does not need a table of contents."""
+
+    from tests.test_workstation_ui import app_for, simulated_wizard
+
+    html = app_for(simulated_wizard()).page("/live")[1]
+    assert "class='page-jump'" not in html
+
+
+def test_the_quick_setup_page_can_be_scanned_from_the_top(tmp_path):
+    from tests.test_catalog_view import _app as _catalog_app
+    from tests.test_catalog_panel import _panel as _catalog_panel
+
+    html = _page_for_quick_setup(_catalog_app(_catalog_panel(tmp_path)))
+    targets = _jump_targets(html)
+
+    # The paper test is a section, not an unheaded strip of counters wedged
+    # between two cards.
+    assert "paper-test" in targets
+    assert "<h2 id='paper-test'>Paper test</h2>" in html
+    for anchor in targets:
+        assert f"<h2 id='{anchor}'>" in html, anchor
+
+
+def _page_for_quick_setup(app) -> str:
+    return views.render_page(app._context("quick-setup", "Quick setup"))
+
+
+def test_the_paper_test_counters_sit_inside_their_own_card(tmp_path):
+    from tests.test_catalog_view import _app as _catalog_app
+    from tests.test_catalog_panel import _panel as _catalog_panel
+
+    html = _page_for_quick_setup(_catalog_app(_catalog_panel(tmp_path)))
+
+    # The card names the source of its numbers, and "Active symbols" is stated
+    # once rather than twice under two different headings.
+    assert _text(html).count("Active symbols:") == 1
+    assert "simulated locally from the terminal's own quotes" in _text(html)
+
+
+def test_an_unset_capital_says_why_it_is_unset_and_not_the_same_thing_twice(tmp_path):
+    """The metric said "not configured"; the reason repeated it word for word."""
+
+    from axiom_forex.paper_runner import accounting
+
+    capital = accounting.read_capital(tmp_path)
+
+    assert capital.configured is False
+    assert "no paper starting capital is configured" not in capital.reason
+    assert capital.reason == "no capital document exists yet"
+
+
+def test_the_research_runner_points_at_a_page_by_its_real_route(tmp_path):
+    """It said "select one on the strategy library page" and gave no route."""
+
+    from tests.test_quick_setup_ui import app_with_panel
+
+    html = _page_for_quick_setup(app_with_panel())
+    text = _text(html)
+
+    assert "/strategies" in text
+    # And it says what the runner will not do: choose for you.
+    assert "it never picks one for you" in text or "this runner follows that choice" in text
+
+
+def test_every_health_check_says_a_reason_and_not_a_python_value():
+    """The page read "live_bridge_disabled | OK | False", which is a contradiction."""
+
+    from axiom_forex.config.runtime import ForexRuntimeSettings
+    from axiom_forex.monitoring.health import build_health
+
+    health = build_health(
+        settings=ForexRuntimeSettings(),
+        quality_usable=True,
+        calendar_open=True,
+        quote_fresh=True,
+        gate_allowed=None,
+        unresolved_orders=0,
+        anomalies=(),
+        repository_health={"schema_version": "2", "expected_schema_version": "2"},
+        conformance_passed=True,
+        profile_activation_allowed=True,
+    )
+
+    assert health.status == "HEALTHY"
+    for check in health.checks:
+        detail = str(check["detail"])
+        # No bare literals: every line explains the status printed beside it.
+        assert detail not in {"True", "False", "None", ""}, check["name"]
+        assert detail[0].isalpha(), (check["name"], detail)
+    by_name = {check["name"]: check for check in health.checks}
+    # The one that read "OK / False" now says which way round it is.
+    assert by_name["live_bridge_disabled"]["ok"] is True
+    assert by_name["live_bridge_disabled"]["detail"] == "no live path can send an order"
+    # A check with no decision yet says so instead of printing "None".
+    assert by_name["last_gate_decision"]["detail"] == "no decision has been taken yet"
+
+
+def test_a_failing_health_check_still_explains_itself():
+    from axiom_forex.config.runtime import ForexRuntimeSettings
+    from axiom_forex.monitoring.health import build_health
+    from dataclasses import replace
+
+    health = build_health(
+        settings=replace(ForexRuntimeSettings(), live_bridge_enabled=True),
+        quality_usable=False,
+        calendar_open=False,
+        quote_fresh=False,
+        gate_allowed=False,
+        unresolved_orders=3,
+        anomalies=(),
+        repository_health={"schema_version": "1", "expected_schema_version": "2"},
+    )
+
+    by_name = {check["name"]: check for check in health.checks}
+    assert health.status == "UNSAFE"
+    assert by_name["live_bridge_disabled"]["ok"] is False
+    assert by_name["live_bridge_disabled"]["detail"] == "a live path is open; it must be closed"
+    assert by_name["unresolved_orders"]["detail"] == "3 order(s) left unresolved"
+    assert by_name["persistence"]["detail"] == "schema 1 of 2 expected"

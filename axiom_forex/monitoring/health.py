@@ -63,30 +63,78 @@ def build_health(
     )
     if settings.live_bridge_enabled or not settings.research_only:
         unsafe = True
+    # ``detail`` is read on the health page as the reason a check is what it is, so
+    # it says a sentence rather than a Python literal.  "OK / False" reads as a
+    # contradiction: the check named *disabled* is healthy exactly when the flag is
+    # off, and nothing on the page said so.
     checks.append(
         {
             "name": "live_bridge_disabled",
             "ok": not settings.live_bridge_enabled,
-            "detail": str(settings.live_bridge_enabled),
+            "detail": (
+                "no live path can send an order"
+                if not settings.live_bridge_enabled
+                else "a live path is open; it must be closed"
+            ),
         }
     )
     checks.append(
-        {"name": "data_quality", "ok": quality_usable, "detail": str(quality_usable)}
+        {
+            "name": "data_quality",
+            "ok": quality_usable,
+            "detail": (
+                "bars and quotes pass the gate" if quality_usable else "the gate refuses this data"
+            ),
+        }
     )
     if not quality_usable:
         unsafe = True
-    checks.append({"name": "market_open", "ok": calendar_open, "detail": str(calendar_open)})
+    checks.append(
+        {
+            "name": "market_open",
+            "ok": calendar_open,
+            "detail": "inside the session calendar" if calendar_open else "outside the session calendar",
+        }
+    )
     if not calendar_open:
         degraded = True
-    checks.append({"name": "quote_freshness", "ok": quote_fresh, "detail": str(quote_fresh)})
+    checks.append(
+        {
+            "name": "quote_freshness",
+            "ok": quote_fresh,
+            "detail": "inside the allowed age" if quote_fresh else "older than the allowed age",
+        }
+    )
     if not quote_fresh:
         unsafe = True
     gate_ok = gate_allowed if gate_allowed is not None else True
-    checks.append({"name": "last_gate_decision", "ok": gate_ok, "detail": str(gate_allowed)})
+    checks.append(
+        {
+            "name": "last_gate_decision",
+            "ok": gate_ok,
+            "detail": (
+                "no decision has been taken yet"
+                if gate_allowed is None
+                else (
+                    "the last decision allowed an order"
+                    if gate_allowed
+                    else "the last decision refused an order"
+                )
+            ),
+        }
+    )
     if gate_allowed is False:
         degraded = True
     checks.append(
-        {"name": "unresolved_orders", "ok": unresolved_orders == 0, "detail": str(unresolved_orders)}
+        {
+            "name": "unresolved_orders",
+            "ok": unresolved_orders == 0,
+            "detail": (
+                "every order reached a final state"
+                if unresolved_orders == 0
+                else f"{unresolved_orders} order(s) left unresolved"
+            ),
+        }
     )
     if unresolved_orders:
         unsafe = True
@@ -95,7 +143,10 @@ def build_health(
             "name": "persistence",
             "ok": repository_health.get("schema_version")
             == repository_health.get("expected_schema_version"),
-            "detail": str(repository_health.get("schema_version")),
+            "detail": (
+                f"schema {repository_health.get('schema_version')} of "
+                f"{repository_health.get('expected_schema_version')} expected"
+            ),
         }
     )
     if conformance_passed is not None:
@@ -103,7 +154,11 @@ def build_health(
             {
                 "name": "provider_broker_conformance",
                 "ok": conformance_passed,
-                "detail": str(conformance_passed),
+                "detail": (
+                    "every required method is present"
+                    if conformance_passed
+                    else "a required method is missing or fails"
+                ),
             }
         )
         if not conformance_passed:
@@ -113,7 +168,11 @@ def build_health(
             {
                 "name": "provider_profile_onboarding",
                 "ok": profile_activation_allowed,
-                "detail": str(profile_activation_allowed),
+                "detail": (
+                    "the profile may be activated"
+                    if profile_activation_allowed
+                    else "profile activation is refused"
+                ),
             }
         )
         if not profile_activation_allowed:
