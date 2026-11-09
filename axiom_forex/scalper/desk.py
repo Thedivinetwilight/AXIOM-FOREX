@@ -723,6 +723,12 @@ class ScalperDesk:
                 stop_price=str(signal.stop_price),
                 target_price=str(signal.target_price),
                 decision_latency_ms=decision_latency,
+                tick_id=tick.tick_id,
+                quote_source=tick.source,
+                quote_source_time=tick.source_time.isoformat(),
+                quote_received_at=tick.received_at.isoformat(),
+                quote_bid=str(tick.bid),
+                quote_ask=str(tick.ask),
             )
             self.stats["orders"] += 1
             report = self._trader.execute(
@@ -736,7 +742,7 @@ class ScalperDesk:
                 currencies=self._currencies(spec),
             )
             reports.append(report)
-            self._record_execution(report, now_ms)
+            self._record_execution(report, now_ms, tick)
             if report.fill is not None and report.fill.filled_lots > 0 and report.fill.ticket:
                 self._open(
                     trade_report=report,
@@ -813,7 +819,7 @@ class ScalperDesk:
         parts = [part for part in pair.replace("-", "/").split("/") if part]
         return tuple(parts)
 
-    def _record_execution(self, report: ExecutionReport, now_ms: int) -> None:
+    def _record_execution(self, report: ExecutionReport, now_ms: int, quote: Tick) -> None:
         self._scribe.record(
             scribe_module.EXECUTION_RESULT,
             at_ms=now_ms,
@@ -829,6 +835,12 @@ class ScalperDesk:
             if report.fill is None
             else str(report.fill.slippage_points),
             simulated=None if report.fill is None else report.fill.simulated,
+            tick_id=quote.tick_id,
+            quote_source=quote.source,
+            quote_source_time=quote.source_time.isoformat(),
+            quote_received_at=quote.received_at.isoformat(),
+            quote_bid=str(quote.bid),
+            quote_ask=str(quote.ask),
         )
         if report.fill is not None:
             self._guardian.observe_execution(
