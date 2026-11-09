@@ -1,5 +1,36 @@
 # AX-SCALPER PAPER Autopilot setup
 
+## Safe Windows fast-forward update
+
+Close the workstation before updating. In PowerShell, change to your existing AXIOM
+checkout and inspect it first:
+
+```powershell
+Set-Location C:\path\to\AXIOM-FOREX
+git status --short --branch
+git fetch origin
+git switch arena/f67c2859-axiom-forex
+git merge-base --is-ancestor HEAD origin/arena/f67c2859-axiom-forex
+if ($LASTEXITCODE -ne 0) { throw "Local branch is not behind the published feature branch; stop and review before updating." }
+git merge --ff-only origin/arena/f67c2859-axiom-forex
+```
+
+If `git status` lists any modified, staged, untracked, ignored, or local paper-state
+files that matter to you, stop before updating and preserve/review them separately;
+do not run `reset`, `clean`, overwrite local settings, or use a forced update. If the
+branch does not exist locally, inspect the checkout and remotes first rather than
+creating a similarly named branch automatically. The merge command above refuses
+anything except a fast-forward.
+
+From the repository root, launch with the existing virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m axiom_forex.workstation.launch
+```
+
+This exact Windows launch has not been verified in this change; see the Windows
+checks below.
+
 AX-SCALPER appears on `/autopilot` as a distinct **PAPER** panel. It reads live
 quotes only from the workstation's observation session after the operator presses
 **Connect** on Setup. Starting or stopping AX-SCALPER does not connect or disconnect
