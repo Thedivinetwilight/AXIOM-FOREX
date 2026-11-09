@@ -1,0 +1,297 @@
+"""Workstation host for a configured, read-only MT5 quote PAPER pump."""
+from __future__ import annotations
+
+import hashlib
+import json
+from os import O_RDONLY, close as os_close, fdopen, fsync, open as os_open, replace
+import tempfile
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .config import PAPER
+from .desk import ScalperDesk
+from .execution import PaperVenue
+from .live_config import RISK_KEYS, LiveScalperConfigError, load_live_paper_config
+from .live_quotes import LivePaperPump, MT5LiveQuoteSource
+from .scribe import EXECUTION_RESULT, POSITION_EXIT, POSITION_OPENED, STATE, read_jsonl, verify_jsonl
+
+
+class ScalperPaperHost:
+    """PAPER controller owned by the workstation; no LIVE execution capability."""
+
+    def __init__(self, *, session: Any, config_path: str | Path,
+                 paper_root: str | Path, ledger_dir: str | Path):
+        self.session = session
+        self.config_path = Path(config_path)
+        self.paper_root = Path(paper_root)
+        self.ledger_dir = Path(ledger_dir)
+        self.pump: LivePaperPump | None = None
+        self.desk: ScalperDesk | None = None
+        self.ledger_path: Path | None = None
+        self._lock = threading.RLock()
+        self._ledger_lock = threading.RLock()
+        self._last_result: dict[str, Any] = {}
+
+    @staticmethod
+    def _checkpoint_path(ledger: Path) -> Path:
+        return ledger.with_suffix(ledger.suffix + ".head.json")
+
+    @classmethod
+    def _write_checkpoint(cls, ledger: Path, desk: ScalperDesk) -> None:
+        entries = desk.scribe.entries()
+        head = entries[-1].hash if entries else "0" * 64
+        payload = {"schema": "axiom-scalper-head-v1", "run_id": desk.scribe.run_id,
+                   "entries": len(entries), "head": head}
+        target = cls._checkpoint_path(ledger)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, raw_tmp = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
+        tmp = Path(raw_tmp)
+        try:
+            with fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                fsync(handle.fileno())
+            replace(tmp, target)
+            try:
+                directory_fd = os_open(target.parent, O_RDONLY)
+                try:
+                    fsync(directory_fd)
+                finally:
+                    os_close(directory_fd)
+            except OSError:
+                pass
+        except Exception:
+            # A failed checkpoint blocks the run; do not repair or truncate logs.
+            raise
+
+    @classmethod
+    def _verify_ledger(cls, path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        try:
+            checkpoint = json.loads(cls._checkpoint_path(path).read_text(encoding="utf-8"))
+        except Exception:
+            return {"ok": False, "reason": "ledger_checkpoint_missing_or_invalid"}, []
+        if not isinstance(checkpoint, dict) or checkpoint.get("schema") != "axiom-scalper-head-v1":
+            return {"ok": False, "reason": "ledger_checkpoint_schema_invalid"}, []
+        try:
+            rows = read_jsonl(path)
+            run_ids = {str(row.get("run_id") or "") for row in rows}
+            if run_ids != {str(checkpoint.get("run_id") or "")}:
+                return {"ok": False, "reason": "ledger_checkpoint_run_id_mismatch"}, rows
+            result = verify_jsonl(path, expected_head=str(checkpoint.get("head") or ""))
+            if result.get("ok") and int(checkpoint.get("entries", -1)) != result.get("entries"):
+                return {"ok": False, "reason": "ledger_checkpoint_count_mismatch"}, rows
+            return result, rows
+        except Exception as exc:
+            return {"ok": False, "reason": f"ledger_read_failed:{type(exc).__name__}"}, []
+
+    def _unresolved_ledgers(self, *, exclude_current: bool = False) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        if not self.ledger_dir.exists():
+            return found
+        for path in sorted(self.ledger_dir.glob("*.jsonl")):
+            if path.name == "recovery-decisions.jsonl":
+                continue
+            if exclude_current and self.ledger_path is not None and path == self.ledger_path:
+                continue
+            try:
+                with self._ledger_lock:
+                    integrity, rows = self._verify_ledger(path)
+                if not integrity.get("ok"):
+                    found.append({"path": str(path), "reason": str(integrity.get("reason") or "ledger_integrity_failed")})
+                    continue
+                opened: dict[str, dict[str, Any]] = {}
+                opened_entry_ids: set[str] = set()
+                closed: set[str] = set()
+                uncertain: list[dict[str, Any]] = []
+                filled_entry_ids: set[str] = set()
+                for row in rows:
+                    kind, payload = row.get("kind"), row.get("payload", {})
+                    if kind == EXECUTION_RESULT:
+                        request_id = str(payload.get("request_id") or "")
+                        if payload.get("status") == "unknown_outcome":
+                            uncertain.append({"request_id": request_id, "reason": "unknown_order_outcome"})
+                        if payload.get("filled_lots") not in (None, "0", "0.0"):
+                            if request_id:
+                                filled_entry_ids.add(request_id)
+                            else:
+                                uncertain.append({"reason": "filled_execution_missing_request_id"})
+                    elif kind == POSITION_OPENED:
+                        pid = str(payload.get("position_id") or "")
+                        request_id = str(payload.get("entry_request_id") or "")
+                        if pid:
+                            opened[pid] = payload
+                        if request_id:
+                            opened_entry_ids.add(request_id)
+                        else:
+                            uncertain.append({"position_id": pid, "reason": "position_missing_entry_request_id"})
+                    elif kind == POSITION_EXIT:
+                        pid = str(payload.get("position_id") or "")
+                        if pid:
+                            closed.add(pid)
+                remaining = [dict(position_id=pid, **item) for pid, item in opened.items() if pid not in closed]
+                uncertain.extend({"request_id": request_id, "reason": "filled_execution_without_position_record"}
+                                  for request_id in filled_entry_ids - opened_entry_ids)
+                if remaining or uncertain:
+                    found.append({"path": str(path),
+                                  "reason": "open_or_unresolved_paper_state_requires_exact_recovery",
+                                  "positions": remaining, "uncertain": uncertain})
+            except Exception as exc:
+                found.append({"path": str(path), "reason": f"ledger_read_failed:{type(exc).__name__}"})
+        return found
+
+    def _persist_run(self, desk: ScalperDesk, ledger_path: Path) -> None:
+        with self._ledger_lock:
+            desk.scribe.to_jsonl(ledger_path)
+            self._write_checkpoint(ledger_path, desk)
+
+    def status(self) -> dict[str, Any]:
+        connected = bool(getattr(self.session, "connected", False))
+        running = bool(self.pump and self.pump.status().get("state") == "RUNNING")
+        recovery = self._unresolved_ledgers(exclude_current=running)
+        state = "DISCONNECTED" if not connected else "BLOCKED" if recovery else "STOPPED"
+        reason = "terminal_not_connected" if not connected else "recovery_required" if recovery else ""
+        quote_status = self.pump.status() if self.pump else {}
+        if not connected:
+            state, reason = "DISCONNECTED", "terminal_not_connected"
+        elif recovery:
+            state, reason = "BLOCKED", "recovery_required"
+        elif quote_status.get("state"):
+            state, reason = str(quote_status.get("state")), str(quote_status.get("reason") or "")
+        if self.desk is not None:
+            quote_status["strategy_versions"] = [
+                {"strategy": item.name, "version": item.rule_version, "fingerprint": item.fingerprint}
+                for item in self.desk.strategies
+            ]
+            if self.ledger_path is not None:
+                with self._ledger_lock:
+                    quote_status["ledger_integrity"] = self._verify_ledger(self.ledger_path)[0]
+        account = self.session.account() if connected else {}
+        try:
+            from axiom_forex.workstation.symbols import build_catalogue
+            catalogue = build_catalogue(tuple(self.session.symbols()), specs_reported=True)
+            symbols = [item.audit_view() for item in catalogue.pairs]
+            exclusions = [dict(item) for item in catalogue.excluded]
+        except Exception:
+            symbols, exclusions = [], [{"reason": "terminal_symbol_catalogue_unavailable"}]
+        config_view: dict[str, Any] = {}
+        try:
+            if connected:
+                config, capital, currency = load_live_paper_config(
+                    session=self.session, settings_path=self.config_path, paper_root=self.paper_root)
+                config_view = {
+                    "symbol": config.instruments[0].symbol,
+                    "point": str(config.instruments[0].point),
+                    "contract_size": str(config.instruments[0].contract_size),
+                    "capital": str(capital), "currency": currency,
+                    "commission_per_lot": str(config.cost.commission_per_lot),
+                    "commission_state": config.cost.commission_state,
+                    "strategy_admission": "NOT_APPROVED: probability source is absent; desk refuses entries",
+                    "slippage_points_per_side": str(config.cost.slippage_points),
+                    "slippage_state": config.cost.slippage_state,
+                    "risk": {key: str(getattr(config, key)) for key in RISK_KEYS},
+                }
+            else:
+                load_live_paper_config(session=self.session,
+                    settings_path=self.config_path, paper_root=self.paper_root)
+        except LiveScalperConfigError as exc:
+            config_view = {"reason": exc.reason, "remediation": exc.remediation}
+            if state not in {"DISCONNECTED", "BLOCKED"}:
+                state, reason = "BLOCKED", exc.reason
+        return {
+            "available": True, "mode": PAPER, "source": "MT5_LIVE_PAPER",
+            "state": state, "connected": connected, "reason": reason,
+            "config": {"path": str(self.config_path), **config_view},
+            "account_type": str(account.get("mode") or "UNKNOWN"),
+            "symbols": symbols, "symbol_exclusions": exclusions,
+            "recovery": recovery, "quote": quote_status, "paper_only": True,
+            "last_result": dict(self._last_result),
+            "ledger": str(self.ledger_path or ""),
+        }
+
+    def start(self) -> dict[str, Any]:
+        with self._lock:
+            if self.pump and self.pump.status().get("state") == "RUNNING":
+                return {"ok": False, "reason": "already_running", "message": "AX-SCALPER PAPER is already running."}
+            if self.pump and self.pump.status().get("state") == "BLOCKED":
+                return {"ok": False, "reason": "runner_blocked", "message": "The previous AX-SCALPER run is blocked. Review its ledger; no replacement runner was created."}
+            if not self.session.connected:
+                return self._refuse("terminal_not_connected", "Press Connect on Setup; AX-SCALPER never connects in the background.")
+            recovery = self._unresolved_ledgers()
+            if recovery:
+                return self._refuse("recovery_required", "A prior ledger has open paper positions, an unresolved fill, or failed integrity validation. Exact manager/risk restoration is unavailable; positions remain untouched and new entries are blocked.", recovery=recovery)
+            try:
+                config, capital, _currency = load_live_paper_config(
+                    session=self.session, settings_path=self.config_path, paper_root=self.paper_root)
+            except LiveScalperConfigError as exc:
+                return self._refuse(exc.reason, exc.remediation)
+            run_id = "scalper-paper-" + uuid.uuid4().hex
+            self.ledger_dir.mkdir(parents=True, exist_ok=True)
+            ledger_path = self.ledger_dir / f"{run_id}.jsonl"
+            desk = ScalperDesk(config=config, venue=PaperVenue(cost=config.cost),
+                               starting_equity=capital, run_id=run_id)
+            fingerprint = hashlib.sha256(json.dumps({
+                "symbol": config.instruments[0].symbol,
+                "risk": {key: str(getattr(config, key)) for key in RISK_KEYS},
+                "cost": config.cost.audit_view(),
+            }, sort_keys=True).encode()).hexdigest()
+            desk.scribe.record(STATE, at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+                               actor="workstation", state="live_quote_paper_started",
+                               config_fingerprint=fingerprint, strategy_versions=[
+                                   {"strategy": item.name, "version": item.rule_version, "fingerprint": item.fingerprint}
+                                   for item in desk.strategies])
+            self._persist_run(desk, ledger_path)
+            source = MT5LiveQuoteSource(self.session, max_quote_age_ms=config.max_quote_age_ms)
+            pump = LivePaperPump(source=source, desk=desk,
+                                 symbol=config.instruments[0].symbol,
+                                 persist=lambda: self._persist_run(desk, ledger_path))
+            outcome = pump.start()
+            if not outcome.get("ok"):
+                return self._refuse(str(outcome.get("reason") or "runner_start_refused"),
+                                    "No PAPER decisions were started; check the connected session and local settings.")
+            self.desk, self.pump, self.ledger_path = desk, pump, ledger_path
+            self._last_result = {"ok": True, "reason": "", "message": "AX-SCALPER live-quote PAPER started. Fills are local simulations only."}
+            return {**self._last_result, **self.status()}
+
+    def acknowledge_recovery(self, *, confirmation: str) -> dict[str, Any]:
+        """Record the operator's choice to keep an unresumable book blocked."""
+        if confirmation != "KEEP_PAPER_BOOK_BLOCKED":
+            return self._refuse("recovery_confirmation_mismatch", "Type KEEP_PAPER_BOOK_BLOCKED exactly. This records review only; it does not resume, flatten or clear the blocker.")
+        recovery = self._unresolved_ledgers()
+        if not recovery:
+            return self._refuse("no_recovery_required", "There is no unresolved scalper paper ledger to acknowledge.")
+        self.ledger_dir.mkdir(parents=True, exist_ok=True)
+        path = self.ledger_dir / "recovery-decisions.jsonl"
+        record = {"schema": "axiom-scalper-recovery-decision-v1",
+                  "decision": "KEEP_PAPER_BOOK_BLOCKED",
+                  "at": datetime.now(timezone.utc).isoformat(),
+                  "ledgers": [item.get("path") for item in recovery],
+                  "warning": "acknowledgement does not resume or close positions"}
+        with self._ledger_lock, path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.flush()
+            fsync(handle.fileno())
+        self._last_result = {"ok": True, "reason": "recovery_remains_blocked",
+                             "message": "Review recorded. Stored paper positions remain untouched and AX-SCALPER Start remains blocked until exact manual recovery is available."}
+        return dict(self._last_result)
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            if self.pump is None:
+                self._last_result = {"ok": True, "reason": "already_stopped", "message": "AX-SCALPER PAPER is stopped; no positions were changed."}
+                return dict(self._last_result)
+            status = self.pump.stop("operator_stop")
+            if self.desk is not None and self.ledger_path is not None:
+                self.desk.scribe.record(STATE, at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+                                        actor="workstation", state="paper_stopped_positions_left_open",
+                                        open_positions=[item.audit_view() for item in self.desk.book.open_positions])
+                self._persist_run(self.desk, self.ledger_path)
+            self._last_result = {"ok": True, "reason": "", "message": "AX-SCALPER PAPER stopped. Local paper positions remain open and were not flattened."}
+            return {**self._last_result, **status, "ledger": str(self.ledger_path or "")}
+
+    def _refuse(self, reason: str, message: str, **extra: Any) -> dict[str, Any]:
+        self._last_result = {"ok": False, "reason": reason, "message": message, **extra}
+        return dict(self._last_result)

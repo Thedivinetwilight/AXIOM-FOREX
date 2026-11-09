@@ -5719,6 +5719,7 @@ def render_kronos(ctx: PageContext) -> str:
     last = dict(view.get("last") or {})
     benchmark = dict(view.get("benchmark") or {})
     body: list[str] = []
+    body.append(_render_scalper_paper_card(dict(view.get("scalper_paper") or {}), nonce))
 
     result = dict(view.get("result") or {})
     if result.get("message"):
@@ -8563,6 +8564,107 @@ def _stored_positions_table(stored: Mapping[str, Any]) -> str:
     )
 
 
+def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
+    """AX-SCALPER's distinct PAPER-only live-quote controller on Autopilot."""
+    if not view.get("available"):
+        return ""
+    state = str(view.get("state") or "BLOCKED")
+    config = dict(view.get("config") or {})
+    quote = dict(view.get("quote") or {})
+    result = dict(view.get("result") or {})
+    status_class = "ok" if state == "RUNNING" else "warn" if state in {"BLOCKED", "PAUSED", "RECOVERY_REQUIRED"} else "muted"
+    body = [notice(status_class, f"AX-SCALPER PAPER · {state}",
+                   "This is a local simulated paper book using live terminal quotes. "
+                   "It is separate from the connected account's "
+                   f"{escape(str(view.get('account_type') or 'UNKNOWN'))} account and cannot send or close broker orders.")]
+    if result.get("message"):
+        body.append(notice("ok" if result.get("ok") else "warn", "Last AX-SCALPER action", str(result["message"])))
+    risk_names = {
+        "risk_fraction": "Per-trade equity risk fraction",
+        "max_loss_per_trade_account": "Max loss per trade (account currency)",
+        "max_aggregate_risk_fraction": "Aggregate open-risk fraction",
+        "max_leverage": "Max leverage (x)",
+        "max_currency_exposure_fraction": "Per-currency exposure fraction",
+        "max_correlated_positions": "Max correlated positions (count)",
+        "max_daily_loss_fraction": "Daily loss stop (fraction)",
+        "max_drawdown_fraction": "Drawdown stop (fraction)",
+        "max_loss_streak": "Loss-streak stop (count)",
+        "max_spread_points_hard": "Hard spread cap (broker points)",
+        "max_slippage_points": "Slippage cap (broker points)",
+        "max_fill_latency_ms": "Fill-latency cap (ms)",
+        "max_open_positions": "Open-position cap (count)",
+        "max_quote_age_ms": "Max quote age (ms)",
+        "max_spread_points": "Soft spread cap (broker points)",
+        "max_hold_ms": "Max holding time (ms)",
+        "break_even_trigger_points": "Break-even trigger (broker points)",
+        "trail_after_points": "Trail activation (broker points)",
+        "trail_distance_points": "Trail distance (broker points)",
+    }
+    risk_rows = tuple((risk_names.get(str(k), str(k).replace("_", " ")), escape(str(v)))
+                      for k, v in dict(config.get("risk") or {}).items())
+    body.append(dl((
+        ("Quote source", "MT5 live quote → local PAPER simulation"),
+        ("Connected account type", escape(str(view.get("account_type") or "UNKNOWN"))),
+        ("Configuration file", escape(str(config.get("path") or "settings directory / scalper_paper.local.json"))),
+        ("Verified selected symbol", escape(str(config.get("symbol") or "not configured"))),
+        ("Point / contract", escape(str(config.get("point") or "—")) + " / " + escape(str(config.get("contract_size") or "—"))),
+        ("Paper capital", escape(str(config.get("capital") or "—")) + " " + escape(str(config.get("currency") or ""))),
+        ("Commission / lot", escape(str(config.get("commission_per_lot") or "—")) + " (" + escape(str(config.get("commission_state") or "unknown")) + ")"),
+        ("Slippage / side", escape(str(config.get("slippage_points_per_side") or "—")) + " points (" + escape(str(config.get("slippage_state") or "unknown")) + ")"),
+        ("Strategy admission", escape(str(config.get("strategy_admission") or "not configured"))),
+        ("Risk limits", dl(risk_rows) if risk_rows else "not validated"),
+    )))
+    if config.get("reason"):
+        body.append(notice("warn", str(config.get("reason")), str(config.get("remediation") or "Correct the local settings and retry.")))
+    symbols = [dict(item) for item in view.get("symbols", ())]
+    exclusions = [dict(item) for item in view.get("symbol_exclusions", ())]
+    body.append(table("Terminal-verified Forex symbols (exact broker names)",
+                      (("Broker symbol", "mono"), ("Pair", "text"), ("Tradable", "text"), ("Reason", "text")),
+                      ((escape(str(x.get("broker_symbol", ""))), escape(str(x.get("pair", ""))),
+                        "yes" if x.get("tradable") else "no", escape(str(x.get("reason", "")))) for x in symbols),
+                      empty="No verified Forex symbol is available. Connect and review exclusions."))
+    if exclusions:
+        body.append(table("Excluded terminal symbols", (("Name", "mono"), ("Kind", "text"), ("Reason", "text")),
+                          ((escape(str(x.get("broker_symbol", ""))), escape(str(x.get("kind", ""))), escape(str(x.get("reason", "")))) for x in exclusions),
+                          empty="No exclusions reported."))
+    body.append(dl((
+        ("Last broker tick", escape(str(quote.get("quote_time") or "—"))),
+        ("Quote age", "unavailable" if quote.get("quote_age_seconds") is None else f"{float(quote['quote_age_seconds']):.3f} s"),
+        ("Last decision / refusal", escape(str(quote.get("last_decision") or view.get("reason") or "none"))),
+        ("Paper orders / fills", f"{quote.get('paper_orders', 0)} / {quote.get('paper_fills', 0)}"),
+        ("Open paper positions", str(quote.get("open_positions", 0))),
+        ("Paper equity", escape(str(quote.get("paper_equity") or "unavailable"))),
+        ("Realized P&L", escape(str(quote.get("realized_pnl") or "unavailable"))),
+        ("Ledger integrity", escape(str((quote.get("ledger_integrity") or {}).get("ok", "not started")))),
+        ("Paper ledger", escape(str(view.get("ledger") or "created on Start"))),
+    )))
+    positions = [dict(item) for item in quote.get("positions", ())]
+    if positions:
+        body.append(table("Open AX-SCALPER local paper positions (not broker positions)",
+                          (("ID", "mono"), ("Symbol", "text"), ("Side", "text"), ("Lots", "num"), ("Entry", "num"), ("Stop", "num"), ("Target", "num")),
+                          ((escape(str(x.get("position_id", ""))), escape(str(x.get("symbol", ""))), escape(str(x.get("side", ""))), str(x.get("lots", "")), str(x.get("entry_price", "")), str(x.get("stop_price", "")), str(x.get("target_price") or "—")) for x in positions)))
+    recovery = [dict(x) for x in view.get("recovery", ())]
+    if recovery:
+        body.append(notice("warn", "Recovery required — entries blocked",
+                           "An earlier ledger contains an open paper position or failed integrity check. No position was flattened or attached to a new strategy. Exact desk/guardian restoration is not available; review the named ledger and recover manually before starting another run."))
+        body.append(table("Stored recovery blockers", (("Ledger", "text"), ("Reason", "text"), ("Positions", "num")),
+                          ((escape(str(x.get("path", ""))), escape(str(x.get("reason", ""))), str(len(x.get("positions", ())))) for x in recovery)))
+        body.append(
+            f"<form method='post' action='/actions/scalper-paper-acknowledge-recovery' class='stack' style='gap:8px'>"
+            f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+            "<label for='scalper-recovery-confirm' class='small'>To record that you reviewed this warning while keeping the book blocked, type KEEP_PAPER_BOOK_BLOCKED</label>"
+            "<input id='scalper-recovery-confirm' name='confirmation' autocomplete='off' required>"
+            "<button class='btn' type='submit'>Record review; keep blocked</button></form>"
+        )
+    if state in {"RUNNING", "PAUSED"}:
+        body.append(action_form("scalper-paper-stop", nonce, "Stop AX-SCALPER PAPER", tone="primary") +
+                    "<p class='small muted'>Stop halts new decisions, appends the ledger, and leaves local paper positions open. It does not flatten or touch the connected account.</p>")
+    else:
+        body.append(action_form("scalper-paper-start", nonce, "Start AX-SCALPER PAPER", tone="primary") +
+                    "<p class='small muted'>Start is refused until Connect, verified symbol facts, declared cost/risk terms, configured local paper capital and safe recovery checks all pass. No sample/historical fallback is used.</p>")
+    return card("AX-SCALPER PAPER · live MT5 quotes", "".join(body), hint="No LIVE controls are provided here. The existing /live workflow remains separate and unchanged.")
+
+
 def render_autopilot(ctx: PageContext) -> str:
     """One start, one stop, and every reason written down.
 
@@ -8577,13 +8679,14 @@ def render_autopilot(ctx: PageContext) -> str:
 
     view = _autopilot_view(ctx)
     if not view.get("available"):
+        scalper = dict(view.get("scalper_paper") or {})
         return render_shell(
             ctx,
-            notice(
+            _render_scalper_paper_card(scalper, escape(ctx.action_nonce))
+            + notice(
                 "warn",
-                "The autopilot is not wired into this workstation",
-                str(view.get("message") or "This process has no autopilot, so there is "
-                "nothing to start here. Nothing else is affected."),
+                "The catalog autopilot is not wired into this workstation",
+                str(view.get("message") or "The conventional catalog autopilot is unavailable. AX-SCALPER PAPER status is shown separately above."),
             ),
         )
 
@@ -9304,6 +9407,7 @@ def render_autopilot(ctx: PageContext) -> str:
         with_page_jump(
             "".join(body),
             (
+                ("scalper-paper", "AX-SCALPER PAPER · live MT5 quotes", "AX-SCALPER PAPER"),
                 ("start-stop", "Start and stop", "Start and stop"),
                 ("positions", "Open simulated positions", "Open positions"),
                 ("fills", "Simulated fills from this session", "Simulated fills"),

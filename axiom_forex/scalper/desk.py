@@ -243,6 +243,11 @@ class ScalperDesk:
         return self._config
 
     @property
+    def strategies(self) -> tuple[Strategy, ...]:
+        """The immutable strategy set bound to this desk run."""
+        return self._strategies
+
+    @property
     def core(self) -> TickCore:
         return self._core
 
@@ -913,7 +918,9 @@ class ScalperDesk:
             at_ms=now_ms,
             actor="position_manager",
             position_id=position.position_id,
+            entry_request_id=position.entry_request_id,
             strategy=signal.strategy,
+            strategy_version=next((item.rule_version for item in self._strategies if item.name == signal.strategy), "unknown"),
             fingerprint=signal.parameter_fingerprint,
             side=signal.side,
             lots=str(position.lots),
@@ -924,6 +931,12 @@ class ScalperDesk:
             regime=state.regime,
             cost_points=str(trade_cost.total_points),
             cost_complete=trade_cost.complete,
+            quote_tick_id=tick.tick_id,
+            quote_source=tick.source,
+            quote_source_time=tick.source_time.isoformat(),
+            quote_received_at=tick.received_at.isoformat(),
+            quote_bid=str(tick.bid),
+            quote_ask=str(tick.ask),
         )
 
     # -- regime bookkeeping ----------------------------------------------

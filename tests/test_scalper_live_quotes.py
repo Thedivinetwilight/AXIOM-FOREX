@@ -189,7 +189,7 @@ def test_duplicate_and_out_of_order_quotes_are_refused_by_tick_core():
 def test_pump_refuses_live_start_while_disconnected_and_pauses_on_disconnect():
     cfg = fixture_config()
     desk = ScalperDesk(config=cfg, venue=PaperVenue(cost=cfg.cost))
-    terminal = FakeTerminal(tick())
+    terminal = FakeTerminal(tick(symbol=cfg.instruments[0].symbol))
     session = FakeSession(terminal)
     pump = LivePaperPump(source=MT5LiveQuoteSource(session, clock=lambda: NOW),
                          desk=desk, symbol=cfg.instruments[0].symbol, interval_seconds=.005)

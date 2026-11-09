@@ -32,6 +32,7 @@ from typing import Any
 
 from ..config.mt5 import MT5Settings, MT5SettingsFileError, load_settings_file
 from .app import WorkstationApp, make_server
+from .paper_account import paper_root
 from .probes import probe_environment, zone_database_available
 from .session import ObservationSession, SimulatedObservationSource, session_from_settings
 from .setup import SetupWizard
@@ -1046,6 +1047,16 @@ def main(argv: list[str] | None = None) -> int:
     # The catalog and the live-market paper test. Built here, runs nothing until
     # the operator presses a button on /quick-setup.
     app.catalog = _wire_catalog(app, args, settings_path)
+    # AX-SCALPER reads the same local paper-capital root as the pages after the
+    # catalog has selected its durable store. Its own quote path/ledger remain
+    # separate and it holds no broker execution interface.
+    from axiom_forex.scalper.live_host import ScalperPaperHost
+    app.scalper_paper = ScalperPaperHost(
+        session=app.wizard.session,
+        config_path=settings_path.parent / "scalper_paper.local.json",
+        paper_root=paper_root(app),
+        ledger_dir=settings_path.parent / "scalper_paper_ledgers",
+    )
     # The short setup and the research path.  Building this connects nothing and
     # reads nothing: the terminal is asked only when a page needs it.
     app.research = _wire_research(app, args, settings_path)
@@ -1140,6 +1151,11 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.shutdown()
         server.server_close()
+        if getattr(app, "scalper_paper", None) is not None:
+            try:
+                app.scalper_paper.stop()
+            except Exception:
+                pass
         if getattr(app, "live", None) is not None:
             try:
                 app.live.stop_session(reason="workstation_shutdown", close=True)

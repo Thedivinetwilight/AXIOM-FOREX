@@ -96,7 +96,8 @@ class LivePaperPump:
 
     def __init__(self, *, source: MT5LiveQuoteSource, desk: Any, symbol: str,
                  interval_seconds: float = 0.1,
-                 monotonic: Callable[[], float] = time.monotonic):
+                 monotonic: Callable[[], float] = time.monotonic,
+                 persist: Callable[[], Any] | None = None):
         if getattr(getattr(desk, "config", None), "mode", None) != "PAPER":
             raise LiveQuoteRefused("scalper_is_paper_only")
         if not symbol or interval_seconds <= 0:
@@ -109,6 +110,7 @@ class LivePaperPump:
             raise LiveQuoteRefused("freshness_limit_unavailable")
         source._max_quote_age_ms = min(source._max_quote_age_ms, desk_age)
         self.interval_seconds = interval_seconds
+        self._persist = persist
         self._monotonic = monotonic
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -137,7 +139,7 @@ class LivePaperPump:
         if thread and thread is not threading.current_thread():
             thread.join(timeout=max(1.0, self.interval_seconds * 4))
         with self._lock:
-            if self._state == "RUNNING":
+            if self._state in {"RUNNING", "PAUSED"}:
                 self._state, self._reason = "STOPPED", reason
         return {"ok": True, **self.status()}
 
@@ -149,41 +151,66 @@ class LivePaperPump:
                 return
             try:
                 quote = self.source.read(self.symbol)
-                self._last_quote = quote
-                outcome = self.desk.on_tick(symbol=quote.symbol, bid=quote.bid, ask=quote.ask,
-                                            source_time=quote.source_time, received_at=quote.received_at,
-                                            source=quote.source, volume=None)
-                self._last_decision = (outcome.rejection or outcome.blocked or "quote_processed")
+                with self._lock:
+                    self._last_quote = quote
+                    outcome = self.desk.on_tick(symbol=quote.symbol, bid=quote.bid, ask=quote.ask,
+                                                source_time=quote.source_time, received_at=quote.received_at,
+                                                source=quote.source, volume=None)
+                    self._last_decision = (outcome.rejection or outcome.blocked or "quote_processed")
+                    if self._persist is not None:
+                        try:
+                            self._persist()
+                        except Exception as exc:
+                            self._state, self._reason = "BLOCKED", "paper_ledger_write_failed"
+                            self._last_decision = f"paper_ledger_write_failed:{type(exc).__name__}"
+                            return
             except LiveQuoteRefused as exc:
                 self._last_decision = exc.reason
-                if exc.reason.startswith("terminal_disconnected") or exc.reason == "terminal_not_connected":
+                try:
+                    self.desk.scribe.reject(
+                        at_ms=int(time.time() * 1000), stage="live_quote_source",
+                        reason=exc.reason, actor="workstation", symbol=self.symbol,
+                        source="MT5_LIVE_PAPER",
+                    )
+                    if self._persist is not None:
+                        self._persist()
+                except Exception as write_exc:
                     with self._lock:
-                        self._state, self._reason = "PAUSED", exc.reason
+                        self._state, self._reason = "BLOCKED", "paper_ledger_write_failed"
+                        self._last_decision = f"paper_ledger_write_failed:{type(write_exc).__name__}"
                     return
+                with self._lock:
+                    self._state, self._reason = "PAUSED", exc.reason
+                return
             except Exception as exc:
                 self._last_decision = f"decision_refused:{type(exc).__name__}"
+                with self._lock:
+                    self._state, self._reason = "BLOCKED", "decision_processing_failed"
+                return
             self._stop.wait(self.interval_seconds)
 
     def status(self) -> dict[str, Any]:
-        now = self._monotonic()
-        quote = self._last_quote
-        try:
-            desk_status = self.desk.status()
-        except Exception:
-            desk_status = {}
-        stats = desk_status.get("stats", {}) if isinstance(desk_status, dict) else {}
-        book = getattr(self.desk, "book", None)
-        positions = getattr(book, "open_positions", ())
-        return {
-            "mode": "PAPER", "source": "MT5_LIVE_PAPER", "state": self._state,
-            "reason": self._reason, "symbol": self.symbol,
-            "quote_age_seconds": None if quote is None else max(0.0, now - quote.received_monotonic_ns / 1e9),
-            "quote_time": None if quote is None else quote.source_time.isoformat(),
-            "last_decision": self._last_decision,
-            "paper_orders": int(stats.get("orders", 0)),
-            "paper_fills": int(stats.get("fills", 0)),
-            "open_positions": len(positions),
-            "paper_equity": desk_status.get("equity") if isinstance(desk_status, dict) else None,
-            "realized_pnl": desk_status.get("realized_pnl") if isinstance(desk_status, dict) else None,
-            "paper_only": True,
-        }
+        with self._lock:
+            now = self._monotonic()
+            quote = self._last_quote
+            try:
+                desk_status = self.desk.status()
+            except Exception:
+                desk_status = {}
+            stats = desk_status.get("stats", {}) if isinstance(desk_status, dict) else {}
+            book = getattr(self.desk, "book", None)
+            positions = getattr(book, "open_positions", ())
+            return {
+                "mode": "PAPER", "source": "MT5_LIVE_PAPER", "state": self._state,
+                "reason": self._reason, "symbol": self.symbol,
+                "quote_age_seconds": None if quote is None else max(0.0, now - quote.received_monotonic_ns / 1e9),
+                "quote_time": None if quote is None else quote.source_time.isoformat(),
+                "last_decision": self._last_decision,
+                "paper_orders": int(stats.get("orders", 0)),
+                "paper_fills": int(stats.get("fills", 0)),
+                "open_positions": len(positions),
+                "positions": [item.audit_view() for item in positions],
+                "paper_equity": desk_status.get("equity") if isinstance(desk_status, dict) else None,
+                "realized_pnl": desk_status.get("realized_pnl") if isinstance(desk_status, dict) else None,
+                "paper_only": True,
+            }

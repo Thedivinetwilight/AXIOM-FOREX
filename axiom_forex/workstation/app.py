@@ -201,6 +201,9 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "autopilot-stop",
         "autopilot-flat",
         "autopilot-kronos",
+        "scalper-paper-start",
+        "scalper-paper-stop",
+        "scalper-paper-acknowledge-recovery",
         # The bridge from the selection to the live workflow: a start and a stop for
         # the session /live already wired.  Starting it runs the same path /live
         # starts -- same arming, same gate, same risk limits, same account check,
@@ -363,6 +366,11 @@ class WorkstationApp:
     #: the catalog panel and no adapter: it cannot arm, size, or send anything, and
     #: its only execution object is the paper test's local ledger.
     autopilot: Any = None
+    #: Separate AX-SCALPER PAPER controller. It receives only the workstation's
+    #: observation session and owns no LIVE execution object.
+    scalper_paper: Any = None
+    #: Last AX-SCALPER action result for the Autopilot notice.
+    scalper_paper_result: dict[str, Any] = field(default_factory=dict)
     #: The last autopilot action's result, shown once on the next render.
     autopilot_result: dict[str, Any] = field(default_factory=dict)
 
@@ -1024,7 +1032,10 @@ class WorkstationApp:
         """
 
         if self.autopilot is None:
-            return {"available": False}
+            return {
+                "available": False,
+                "scalper_paper": dict(self.scalper_paper.status()) if self.scalper_paper is not None else {"available": False},
+            }
         try:
             view = dict(self.autopilot.status())
             view["decisions"] = self.autopilot.decisions(limit=60)
@@ -1040,6 +1051,12 @@ class WorkstationApp:
             }
         view.setdefault("available", True)
         view["live"] = self.autopilot_live_view()
+        view["scalper_paper"] = (
+            dict(self.scalper_paper.status()) if self.scalper_paper is not None else {"available": False}
+        )
+        if self.scalper_paper_result:
+            view["scalper_paper"]["result"] = dict(self.scalper_paper_result)
+            self.scalper_paper_result = {}
         if self.autopilot_result:
             view["result"] = dict(self.autopilot_result)
             self.autopilot_result = {}
@@ -1116,12 +1133,11 @@ class WorkstationApp:
     def _autopilot_action(
         self, action: str, form: Mapping[str, list[str]]
     ) -> tuple[int, str, str]:
-        if self.autopilot is None:
+        if self.autopilot is None and action not in {"scalper-paper-start", "scalper-paper-stop", "scalper-paper-acknowledge-recovery"}:
             return (
                 HTTPStatus.CONFLICT,
                 "/autopilot",
-                "This workstation has no autopilot, so there is nothing to start. "
-                "Nothing was run and no mode changed.",
+                "There is no autopilot on this workstation, so there is nothing to start. Nothing was run and no mode changed.",
             )
         payload: dict[str, Any] = {}
         for name, values in form.items():
@@ -1129,6 +1145,28 @@ class WorkstationApp:
                 continue
             payload[name] = values if len(values) > 1 else (values[0] if values else "")
         try:
+            if action in {"scalper-paper-start", "scalper-paper-stop", "scalper-paper-acknowledge-recovery"}:
+                if self.scalper_paper is None:
+                    outcome = {
+                        "ok": False,
+                        "reason": "scalper_paper_unavailable",
+                        "message": "AX-SCALPER PAPER is not configured in this workstation. Nothing started or changed.",
+                    }
+                else:
+                    outcome = dict(
+                        self.scalper_paper.start()
+                        if action == "scalper-paper-start"
+                        else self.scalper_paper.stop()
+                        if action == "scalper-paper-stop"
+                        else self.scalper_paper.acknowledge_recovery(
+                            confirmation=str((form.get("confirmation") or [""])[0])
+                        )
+                    )
+                self.scalper_paper_result = dict(outcome)
+                self._log(f"AX-SCALPER PAPER {action}: " + ("ok" if outcome.get("ok") else str(outcome.get("reason") or "refused")))
+                if outcome.get("ok"):
+                    return HTTPStatus.SEE_OTHER, "/autopilot", ""
+                return HTTPStatus.CONFLICT, "/autopilot", str(outcome.get("message") or outcome.get("reason") or "The action was refused.")
             if action == "autopilot-start":
                 symbols = payload.get("symbols")
                 frames = payload.get("timeframes")
@@ -1320,7 +1358,7 @@ class WorkstationApp:
             return self._paper_capital_action(form)
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
-        if action.startswith("autopilot-"):
+        if action.startswith("autopilot-") or action.startswith("scalper-paper-"):
             return self._autopilot_action(action, form)
         if action.startswith("catalog-"):
             # The audit reads the panel's stored record and writes a report; it is
@@ -1377,6 +1415,11 @@ class WorkstationApp:
             return HTTPStatus.SEE_OTHER, "/setup", f"Could not connect: {reason}"
         if action == "disconnect":
             self._log("disconnect requested")
+            if self.scalper_paper is not None:
+                try:
+                    self.scalper_paper.stop()
+                except Exception as exc:
+                    self._log(f"AX-SCALPER PAPER stop on disconnect failed: {type(exc).__name__}")
             simulate = wizard.simulated
             # Closing the adapter first disarms it and closes the shared terminal
             # session; the session's own disconnect then finds nothing to shut down.
