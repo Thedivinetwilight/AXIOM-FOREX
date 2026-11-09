@@ -739,6 +739,7 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "autopilot-kronos",
         "scalper-paper-start",
         "scalper-paper-stop",
+        "scalper-paper-select-symbol",
         "scalper-paper-acknowledge-recovery",
         # The bridge from that selection to the live workflow /live already
         # wired. Starting calls that workflow's own start, which refuses unless

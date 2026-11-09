@@ -8602,6 +8602,32 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     }
     risk_rows = tuple((risk_names.get(str(k), str(k).replace("_", " ")), escape(str(v)))
                       for k, v in dict(config.get("risk") or {}).items())
+    strategy_review = dict(view.get("strategy_review") or {})
+    policy = dict(strategy_review.get("policy") or {})
+    body.append(dl((
+        ("Strategy admission", escape(str(strategy_review.get("decision") or "No strategy evidence available; no trade."))),
+        ("Admission policy", escape(str(policy.get("version") or "unavailable"))),
+        ("Minimum total / OOS trades", f"{policy.get('min_trades', '—')} / {policy.get('min_out_of_sample_trades', '—')}"),
+        ("Walk-forward folds", escape(str(policy.get("min_walk_forward_folds", "—")))),
+        ("Cost stress / max PBO", f"{policy.get('cost_multiple_survival', '—')}× / {policy.get('max_pbo', '—')}"),
+        ("Minimum DSR / profit factor", f"{policy.get('min_deflated_sharpe', '—')} / {policy.get('min_profit_factor', '—')}"),
+    )))
+    candidates = [dict(item) for item in strategy_review.get("candidates", ())]
+    if candidates:
+        body.append(table("Strategy review — no candidate currently admitted",
+                          (("Strategy", "text"), ("Family / version", "text"), ("Fingerprint", "mono"), ("Admission", "text"), ("Reason", "text")),
+                          ((escape(str(x.get("name", ""))),
+                            escape(f"{x.get('family', '')} / {x.get('rule_version', '')}"),
+                            escape(str(x.get("fingerprint", ""))),
+                            "eligible" if x.get("eligible") else "NO TRADE",
+                            escape(str(x.get("reason", "")))) for x in candidates)))
+        body.append(notice("warn", "Evidence needed before strategy selection",
+                           "A high win rate is not an admission criterion. Require chronological held-out data, walk-forward stability, net positive OOS expectancy after verified costs, uncertainty, drawdown/tail loss, regime and cost/parameter sensitivity, and portfolio correlation review. Paper outcomes from this live quote run do not self-train or approve strategies."))
+    policy_questions = [str(item) for item in strategy_review.get("open_policy_questions", ())]
+    if policy_questions:
+        body.append(notice("warn", "Admission policy still has undecided limits", " ".join(escape(item) for item in policy_questions)))
+    live_route = str(strategy_review.get("live_route") or "No AX-SCALPER LIVE route is configured.")
+    body.append(notice("muted", "LIVE remains a separate workflow", escape(live_route) + " Select, confirm, arm and run LIVE only through the existing /live workflow; this PAPER controller has no live adapter."))
     body.append(dl((
         ("Quote source", "MT5 live quote → local PAPER simulation"),
         ("Connected account type", escape(str(view.get("account_type") or "UNKNOWN"))),
@@ -8623,6 +8649,21 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
                       ((escape(str(x.get("broker_symbol", ""))), escape(str(x.get("pair", ""))),
                         "yes" if x.get("tradable") else "no", escape(str(x.get("reason", "")))) for x in symbols),
                       empty="No verified Forex symbol is available. Connect and review exclusions."))
+    selectable_symbols = [x for x in symbols if x.get("tradable") and x.get("broker_symbol")]
+    if view.get("connected") and selectable_symbols:
+        options = "".join(
+            f"<option value='{escape(str(item['broker_symbol']))}'"
+            f"{' selected' if str(item['broker_symbol']) == str(config.get('symbol') or '') else ''}>"
+            f"{escape(str(item['broker_symbol']))} · {escape(str(item.get('pair') or ''))}</option>"
+            for item in selectable_symbols
+        )
+        body.append(
+            "<form method='post' action='/actions/scalper-paper-select-symbol' class='stack' style='gap:8px'>"
+            f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+            "<label for='scalper-symbol'>Select exact broker symbol (saving changes only this field)</label>"
+            f"<select id='scalper-symbol' name='symbol' required>{options}</select>"
+            "<button class='btn' type='submit'>Save PAPER symbol selection</button></form>"
+        )
     if exclusions:
         body.append(table("Excluded terminal symbols", (("Name", "mono"), ("Kind", "text"), ("Reason", "text")),
                           ((escape(str(x.get("broker_symbol", ""))), escape(str(x.get("kind", ""))), escape(str(x.get("reason", "")))) for x in exclusions),
@@ -8631,10 +8672,14 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
         ("Last broker tick", escape(str(quote.get("quote_time") or "—"))),
         ("Quote age", "unavailable" if quote.get("quote_age_seconds") is None else f"{float(quote['quote_age_seconds']):.3f} s"),
         ("Last decision / refusal", escape(str(quote.get("last_decision") or view.get("reason") or "none"))),
+        ("Accepted ticks / symbol", escape(str(quote.get("accepted_ticks_by_symbol") or "not started"))),
+        ("Quality / freshness by symbol", escape(str(quote.get("quality_by_symbol") or "not started"))),
         ("Paper orders / fills", f"{quote.get('paper_orders', 0)} / {quote.get('paper_fills', 0)}"),
         ("Open paper positions", str(quote.get("open_positions", 0))),
         ("Paper equity", escape(str(quote.get("paper_equity") or "unavailable"))),
         ("Realized P&L", escape(str(quote.get("realized_pnl") or "unavailable"))),
+        ("Unrealized P&L", escape(str(quote.get("unrealized_pnl") or "unavailable"))),
+        ("P&L basis", escape(str(quote.get("pnl_availability") or "not started"))),
         ("Ledger integrity", escape(str((quote.get("ledger_integrity") or {}).get("ok", "not started")))),
         ("Paper ledger", escape(str(view.get("ledger") or "created on Start"))),
     )))
@@ -8646,9 +8691,23 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     recovery = [dict(x) for x in view.get("recovery", ())]
     if recovery:
         body.append(notice("warn", "Recovery required — entries blocked",
-                           "An earlier ledger contains an open paper position or failed integrity check. No position was flattened or attached to a new strategy. Exact desk/guardian restoration is not available; review the named ledger and recover manually before starting another run."))
+                           "An earlier ledger contains an open PAPER position, unresolved outcome, missing checkpoint, or integrity failure. This build cannot exactly restore its strategy, guardian, sizing and position-manager state. Preserve the named JSONL ledger and .head.json sidecar unchanged; review them read-only and retain the book as unresolved. Do not edit/delete either file or start another run: the review acknowledgement does not unlock Start. Exact recovery tooling remains an open implementation item."))
         body.append(table("Stored recovery blockers", (("Ledger", "text"), ("Reason", "text"), ("Positions", "num")),
                           ((escape(str(x.get("path", ""))), escape(str(x.get("reason", ""))), str(len(x.get("positions", ())))) for x in recovery)))
+        recovery_positions = [{**dict(position), "ledger": x.get("path", "")}
+                              for x in recovery for position in x.get("positions", ())]
+        if recovery_positions:
+            body.append(table("Position facts for read-only reconciliation",
+                              (("Ledger", "text"), ("Position ID", "mono"), ("Entry event seq / hash", "mono"),
+                               ("Strategy / version", "text"), ("Symbol / side", "text"),
+                               ("Lots", "num"), ("Entry / stop", "num"), ("Fingerprint", "mono")),
+                              ((escape(str(x.get("ledger", ""))), escape(str(x.get("position_id", ""))),
+                                escape(f"{x.get('position_event_seq') or 'missing'} / {str(x.get('position_event_hash') or 'missing')[:16]}"),
+                                escape(f"{x.get('strategy_id') or x.get('strategy') or 'missing'} / {x.get('strategy_version') or 'missing'}"),
+                                escape(f"{x.get('symbol') or 'missing'} / {x.get('side') or 'missing'}"),
+                                escape(str(x.get("lots") or "missing")),
+                                escape(f"{x.get('entry_price') or 'missing'} / {x.get('stop_price') or 'missing'}"),
+                                escape(str(x.get("fingerprint") or "missing"))) for x in recovery_positions)))
         body.append(
             f"<form method='post' action='/actions/scalper-paper-acknowledge-recovery' class='stack' style='gap:8px'>"
             f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"

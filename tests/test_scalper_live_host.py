@@ -87,6 +87,35 @@ def setup(tmp_path, session=None):
     return session, config_path, capital_root, ledger_dir
 
 
+def test_operator_symbol_selection_preserves_all_other_local_terms(tmp_path):
+    session, config_path, capital_root, ledger_dir = setup(tmp_path)
+    original = json.loads(config_path.read_text(encoding="utf-8"))
+    host = ScalperPaperHost(session=session, config_path=config_path,
+                            paper_root=capital_root, ledger_dir=ledger_dir)
+    result = host.select_symbol(symbol=SYMBOL)
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert result["ok"] and saved["symbol"] == SYMBOL
+    assert {key: value for key, value in saved.items() if key != "symbol"} == {
+        key: value for key, value in original.items() if key != "symbol"
+    }
+    before = config_path.read_bytes()
+    rejected = host.select_symbol(symbol="EURUSD")
+    assert rejected["reason"] == "scalper_symbol_not_verified"
+    assert config_path.read_bytes() == before
+
+
+def test_host_strategy_review_fails_closed_until_independent_oos_evidence(tmp_path):
+    session, config_path, capital_root, ledger_dir = setup(tmp_path)
+    host = ScalperPaperHost(session=session, config_path=config_path,
+                            paper_root=capital_root, ledger_dir=ledger_dir)
+    review = host.status()["strategy_review"]
+    assert review["eligible_count"] == 0
+    assert "NO TRADE" in review["decision"]
+    assert review["policy"]["min_trades"] == 200
+    assert review["policy"]["min_out_of_sample_trades"] == 60
+    assert all(not item["eligible"] for item in review["candidates"])
+
+
 def test_live_config_uses_verified_broker_spec_and_local_paper_capital(tmp_path):
     session, config_path, capital_root, _ = setup(tmp_path)
     config, capital, currency = load_live_paper_config(session=session,
@@ -133,7 +162,13 @@ def test_host_start_stop_persists_fills_as_separate_verified_paper_ledger(tmp_pa
     while session.terminal.reads == 0 and time.monotonic() < deadline:
         time.sleep(.005)
     assert session.terminal.reads > 0
+    live_status = host.status()
+    assert live_status["strategy_review"]["eligible_count"] == 0
+    assert live_status["quote"]["accepted_ticks_by_symbol"][SYMBOL] > 0
+    assert live_status["quote"]["realized_pnl"] == "0.00"
+    assert live_status["quote"]["unrealized_pnl"] == "0"
     stopped = host.stop()
+    assert host.desk.status()["stats"]["orders"] == 0
     assert stopped["ok"] and stopped["state"] == "STOPPED"
     ledger = Path(stopped["ledger"])
     assert verify_jsonl(ledger)["ok"]
@@ -149,11 +184,18 @@ def test_restart_with_open_position_is_blocked_without_flatten_or_reassignment(t
     scribe.record(POSITION_OPENED, at_ms=100, actor="test", position_id="paper-1",
                   symbol=SYMBOL, strategy="trend", fingerprint="abc", side="BUY",
                   lots="0.01", entry_price="1.1", stop_price="1.09")
-    scribe.to_jsonl(ledger_dir / "prior.jsonl")
+    prior_path = ledger_dir / "prior.jsonl"
+    scribe.to_jsonl(prior_path)
+    ScalperPaperHost._write_checkpoint(prior_path, SimpleNamespace(scribe=scribe))
     host = ScalperPaperHost(session=session, config_path=config_path,
                             paper_root=capital_root, ledger_dir=ledger_dir)
     status = host.status()
     assert status["state"] == "BLOCKED" and status["reason"] == "recovery_required"
+    blocker = status["recovery"][0]
+    assert blocker["reason"] == "open_or_unresolved_paper_state_requires_exact_recovery"
+    assert blocker["positions"][0]["position_id"] == "paper-1"
+    assert any(item["reason"] == "position_state_incomplete_for_exact_recovery"
+               for item in blocker["uncertain"])
     result = host.start()
     assert not result["ok"] and result["reason"] == "recovery_required"
     bad = host.acknowledge_recovery(confirmation="wrong")

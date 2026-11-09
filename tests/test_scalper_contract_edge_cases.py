@@ -194,6 +194,20 @@ def test_the_sized_counter_matches_the_orders_that_were_actually_submitted():
     assert desk.stats["orders"] == desk.stats["fills"] + desk.stats["rejects"]
 
 
+def test_thin_external_probability_source_is_a_hard_no_trade_and_audited():
+    thin = ProbabilityEstimate(
+        p=0.99, sd=0.001, low=0.98, high=1.0, samples=1,
+        basis="deliberately_thin_test_source", label="unqualified",
+    )
+    desk = make_desk(probability_source=lambda _signal, _regime: thin)
+    feed(desk, synthetic_ticks(count=140, drift_points=1.6, noise_points=1.2, step_ms=200))
+    assert desk.stats["probability_refused"] > 0
+    assert desk.stats["orders"] == desk.stats["fills"] == 0
+    refusals = [entry for entry in desk.scribe.entries("rejection")
+                if entry.payload.get("reason") == "insufficient_probability_samples"]
+    assert refusals and refusals[0].payload["basis"] == "deliberately_thin_test_source"
+
+
 def test_without_probability_evidence_nothing_is_submitted_and_the_reason_is_recorded():
     desk = make_desk(probability_source=None)
     feed(desk, synthetic_ticks(count=140, drift_points=1.6, noise_points=1.2, step_ms=200))

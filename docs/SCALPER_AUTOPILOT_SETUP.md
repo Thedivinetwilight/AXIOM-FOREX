@@ -2,8 +2,13 @@
 
 ## Safe Windows fast-forward update
 
-Close the workstation before updating. In PowerShell, change to your existing AXIOM
-checkout and inspect it first:
+Do not update files or the Python environment while the previous patch is actively
+trading. This task did not stop, restart, connect to, or alter that running system.
+Use the steps below only in a maintenance window after the operator has independently
+made the existing system safe to update. Preserve local settings and paper-state
+folders; these steps never reset or clean them.
+
+In PowerShell, change to your existing AXIOM checkout and inspect it first:
 
 ```powershell
 Set-Location C:\path\to\AXIOM-FOREX
@@ -22,20 +27,38 @@ branch does not exist locally, inspect the checkout and remotes first rather tha
 creating a similarly named branch automatically. The merge command above refuses
 anything except a fast-forward.
 
-From the repository root, launch with the existing virtual environment:
+From the repository root, use the existing virtual environment. If it does not
+exist, create it; do not recreate or replace an existing environment:
 
 ```powershell
+if (-not (Test-Path .\.venv\Scripts\python.exe)) { py -3.11 -m venv .venv }
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install MetaTrader5
 .\.venv\Scripts\python.exe -m axiom_forex.workstation.launch
 ```
 
-This exact Windows launch has not been verified in this change; see the Windows
-checks below.
+The project declares `tzdata` as a Windows-only runtime dependency, so the editable
+install includes it. If Windows `zoneinfo` still reports a missing database, install
+it explicitly with `.\.venv\Scripts\python.exe -m pip install tzdata` in that same
+environment. The `MetaTrader5` package is needed only for MT5 integration; install
+it without connecting or logging in. Do not execute the update or these install
+commands while the previous patch is actively trading. The exact Windows install,
+package compatibility, Connect and launch sequence have not been verified in this
+change; see the Windows checks below.
 
 AX-SCALPER appears on `/autopilot` as a distinct **PAPER** panel. It reads live
 quotes only from the workstation's observation session after the operator presses
 **Connect** on Setup. Starting or stopping AX-SCALPER does not connect or disconnect
 the terminal. Stop leaves local paper positions open; it does not flatten them or
-touch broker positions.
+touch broker positions. The symbol picker only offers exact terminal-verified,
+tradable Forex names and its explicit Save action changes only the `symbol` field
+in the local scalper settings; every other existing term is preserved. The host
+currently has **zero admitted strategies**: Start can monitor/record quotes, but
+returns a no-trade admission for every candidate until an independent broker-symbol
+out-of-sample evidence artifact passes the displayed, predeclared SKEPTIC policy.
+Paper outcomes from that same live run are not training evidence and cannot promote
+a strategy.
 
 ## Local declaration file
 
@@ -98,6 +121,32 @@ satisfy its numeric validation ranges. Fraction fields are decimal fractions
 broker points, and time fields are milliseconds. Invalid, missing, unknown or
 extra keys block Start with a reason and remediation.
 
+## Operator flow (current no-trade release)
+
+1. After a separately planned safe maintenance update, launch the workstation and
+   press **Connect** on Setup yourself. AXIOM does not connect/reconnect or switch
+   the terminal account in the background.
+2. On `/autopilot`, review the verified symbol list and exclusions. Choose one
+   exact broker name in the picker and press **Save PAPER symbol selection**. This
+   modifies only `symbol` in the local scalper settings.
+3. Declare each missing cost, margin and risk term only from an operator-verified
+   source. Set local simulated capital on the existing Performance page. Never use
+   MT5 balance as paper capital; do not invent costs, margin, limits or risk values.
+4. Review the strategy policy/evidence card. As shipped, no candidate is admitted
+   because independent broker-symbol OOS evidence is absent and drawdown/tail-loss
+   and portfolio-correlation cutoffs remain undecided. **No PAPER orders/fills or
+   LIVE intents are produced.** Start currently means quote monitoring and refusal
+   auditing only. Stop ends that monitoring and leaves any local positions open.
+5. Check status, accepted ticks and freshness. If a recovery blocker appears, keep
+   the ledger and sidecar unchanged; the acknowledgement records review only and
+   does not unlock Start.
+
+LIVE is separate and is not started from the AX-SCALPER PAPER controls. The existing
+`/live` workflow is the sole broker-order path; its exact operator steps and guards
+are documented in `docs/LIVE_EXECUTION.md`. AX-SCALPER has no eligible LIVE intent
+or direct adapter. Do not treat its quote monitor or a synthetic/replay result as
+LIVE authorization.
+
 ## Recovery boundary
 
 Each run has its own append-only, hash-verified JSONL ledger under
@@ -105,9 +154,13 @@ Each run has its own append-only, hash-verified JSONL ledger under
 unclosed local paper position from an earlier run blocks a new run. The current
 AX-SCALPER desk does not yet reconstruct the full strategy/guardian/position
 manager state exactly; therefore this host does not auto-resume or auto-flatten an
-open position. Review the named ledger and retain the recovery block until exact
-manual recovery is available. This is a fail-closed limitation, not a license to
-ignore a position.
+open position. It shows stored identity, fill, quote and risk fields when present,
+and missing fields; the run remains blocked after the review acknowledgement.
+Preserve the JSONL ledger and `.head.json` checkpoint unchanged, reconcile read-only,
+and do not edit/delete them or attempt another run. There is no safe in-app
+operation to clear this blocker yet. Exact recovery tooling is an open
+implementation item; acknowledgement is not recovery or resume. This is a
+fail-closed limitation, not a license to ignore a position.
 
 ## Important admission limitation
 

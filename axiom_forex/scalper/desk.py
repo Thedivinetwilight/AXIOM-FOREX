@@ -766,10 +766,22 @@ class ScalperDesk:
         if self._probability_source is not None:
             estimate = self._probability_source(signal, state.regime)
             if estimate.samples < self._thresholds.min_probability_samples:
-                # A source that returns a thin posterior is reported as thin, not used
-                # as if it were evidence.
+                # Thin evidence must be a hard refusal, not a weak prior that leaks
+                # through the EV gate. Keep the source and required sample count in
+                # the append-only ledger for review.
                 self.stats["probability_refused"] += 1
-                return estimate
+                self._scribe.reject(
+                    at_ms=_ms(self._current_time()),
+                    stage="bayes",
+                    reason="insufficient_probability_samples",
+                    strategy=strategy.name,
+                    fingerprint=strategy.fingerprint,
+                    samples=estimate.samples,
+                    required=self._thresholds.min_probability_samples,
+                    basis=estimate.basis,
+                    evidence_label=estimate.label,
+                )
+                return None
             return estimate
         estimate = self._outcomes.estimate(strategy.fingerprint, state.regime)
         if estimate.samples < self._thresholds.min_probability_samples:
@@ -919,9 +931,23 @@ class ScalperDesk:
             actor="position_manager",
             position_id=position.position_id,
             entry_request_id=position.entry_request_id,
+            strategy_id=signal.strategy,
             strategy=signal.strategy,
             strategy_version=next((item.rule_version for item in self._strategies if item.name == signal.strategy), "unknown"),
             fingerprint=signal.parameter_fingerprint,
+            symbol=spec.symbol,
+            instrument_identity={
+                "symbol": spec.symbol, "pair": spec.pair, "point": str(spec.point),
+                "digits": spec.digits, "contract_size": str(spec.contract_size),
+                "volume_min": str(spec.volume_min), "volume_step": str(spec.volume_step),
+                "volume_max": str(spec.volume_max), "source": spec.source,
+            },
+            risk_state={
+                "risk_account": str(sizing.risk_account),
+                "notional_account": str(sizing.notional_account),
+                "guardian": self._guardian.status(),
+                "position_manager": position.audit_view(),
+            },
             side=signal.side,
             lots=str(position.lots),
             entry_price=str(position.entry_price),

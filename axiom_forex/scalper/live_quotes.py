@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -152,10 +153,11 @@ class LivePaperPump:
             try:
                 quote = self.source.read(self.symbol)
                 with self._lock:
-                    self._last_quote = quote
                     outcome = self.desk.on_tick(symbol=quote.symbol, bid=quote.bid, ask=quote.ask,
                                                 source_time=quote.source_time, received_at=quote.received_at,
                                                 source=quote.source, volume=None)
+                    if outcome.accepted:
+                        self._last_quote = quote
                     self._last_decision = (outcome.rejection or outcome.blocked or "quote_processed")
                     if self._persist is not None:
                         try:
@@ -198,8 +200,29 @@ class LivePaperPump:
             except Exception:
                 desk_status = {}
             stats = desk_status.get("stats", {}) if isinstance(desk_status, dict) else {}
+            tick_stats = desk_status.get("ticks", {}) if isinstance(desk_status, dict) else {}
+            quality = desk_status.get("quality", {}) if isinstance(desk_status, dict) else {}
             book = getattr(self.desk, "book", None)
             positions = getattr(book, "open_positions", ())
+            unrealized_values: list[Any] = []
+            if quote is not None:
+                for position in positions:
+                    point_value = getattr(position, "point_value_per_lot", None)
+                    point = getattr(position, "point", None)
+                    if point_value is None or point is None or point <= 0:
+                        unrealized_values = []
+                        break
+                    mark = quote.bid if position.side == "BUY" else quote.ask
+                    sign = Decimal(1) if position.side == "BUY" else Decimal(-1)
+                    points = (Decimal(str(mark)) - position.entry_price) / point * sign
+                    unrealized_values.append(points * point_value * position.lots)
+            unrealized = (str(sum(unrealized_values, Decimal(0)))
+                          if quote is not None and len(unrealized_values) == len(positions)
+                          else None)
+            equity = desk_status.get("equity") if isinstance(desk_status, dict) else None
+            starting_equity = desk_status.get("starting_equity") if isinstance(desk_status, dict) else None
+            realized = (str(Decimal(str(equity)) - Decimal(str(starting_equity)))
+                        if equity is not None and starting_equity is not None else None)
             return {
                 "mode": "PAPER", "source": "MT5_LIVE_PAPER", "state": self._state,
                 "reason": self._reason, "symbol": self.symbol,
@@ -210,7 +233,12 @@ class LivePaperPump:
                 "paper_fills": int(stats.get("fills", 0)),
                 "open_positions": len(positions),
                 "positions": [item.audit_view() for item in positions],
-                "paper_equity": desk_status.get("equity") if isinstance(desk_status, dict) else None,
-                "realized_pnl": desk_status.get("realized_pnl") if isinstance(desk_status, dict) else None,
+                "ticks": dict(tick_stats),
+                "accepted_ticks_by_symbol": {self.symbol: int(tick_stats.get("accepted", 0))},
+                "quality_by_symbol": dict(quality),
+                "paper_equity": equity,
+                "realized_pnl": realized,
+                "unrealized_pnl": unrealized,
+                "pnl_availability": "calculated_from_last_accepted_quote" if unrealized is not None else "unavailable_until_point_value_and_quote_are_available",
                 "paper_only": True,
             }

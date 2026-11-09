@@ -16,7 +16,10 @@ from .desk import ScalperDesk
 from .execution import PaperVenue
 from .live_config import RISK_KEYS, LiveScalperConfigError, load_live_paper_config
 from .live_quotes import LivePaperPump, MT5LiveQuoteSource
-from .scribe import EXECUTION_RESULT, POSITION_EXIT, POSITION_OPENED, STATE, read_jsonl, verify_jsonl
+from . import bayes
+from .skeptic import Criteria
+from .signals import default_strategies
+from .scribe import EXECUTION_RESULT, KINDS, POSITION_EXIT, POSITION_OPENED, STATE, read_jsonl, verify_jsonl
 
 
 class ScalperPaperHost:
@@ -78,6 +81,9 @@ class ScalperPaperHost:
             return {"ok": False, "reason": "ledger_checkpoint_schema_invalid"}, []
         try:
             rows = read_jsonl(path)
+            if any(row.get("kind") not in KINDS or not isinstance(row.get("payload"), dict)
+                   for row in rows):
+                return {"ok": False, "reason": "ledger_event_schema_invalid"}, rows
             run_ids = {str(row.get("run_id") or "") for row in rows}
             if run_ids != {str(checkpoint.get("run_id") or "")}:
                 return {"ok": False, "reason": "ledger_checkpoint_run_id_mismatch"}, rows
@@ -110,6 +116,8 @@ class ScalperPaperHost:
                 filled_entry_ids: set[str] = set()
                 for row in rows:
                     kind, payload = row.get("kind"), row.get("payload", {})
+                    if str(payload.get("mode") or "").upper() != PAPER:
+                        uncertain.append({"reason": "ledger_mode_not_paper_or_missing", "seq": row.get("seq")})
                     if kind == EXECUTION_RESULT:
                         request_id = str(payload.get("request_id") or "")
                         if payload.get("status") == "unknown_outcome":
@@ -122,17 +130,37 @@ class ScalperPaperHost:
                     elif kind == POSITION_OPENED:
                         pid = str(payload.get("position_id") or "")
                         request_id = str(payload.get("entry_request_id") or "")
-                        if pid:
-                            opened[pid] = payload
+                        if not pid:
+                            uncertain.append({"reason": "position_missing_id", "seq": row.get("seq")})
+                        elif pid in opened:
+                            uncertain.append({"position_id": pid, "reason": "duplicate_position_open_event"})
+                        else:
+                            opened[pid] = {**payload, "position_event_seq": row.get("seq"),
+                                           "position_event_hash": row.get("hash")}
                         if request_id:
+                            if request_id in opened_entry_ids:
+                                uncertain.append({"request_id": request_id,
+                                                  "reason": "duplicate_position_entry_request_link"})
                             opened_entry_ids.add(request_id)
                         else:
                             uncertain.append({"position_id": pid, "reason": "position_missing_entry_request_id"})
+                        required_state = (
+                            "strategy_id", "strategy_version", "fingerprint", "symbol",
+                            "instrument_identity", "side", "lots", "entry_price",
+                            "stop_price", "entry_request_id", "risk_state",
+                            "quote_tick_id", "quote_source", "quote_source_time",
+                            "quote_received_at", "quote_bid", "quote_ask",
+                        )
+                        missing_state = [key for key in required_state if payload.get(key) in (None, "")]
+                        if missing_state:
+                            uncertain.append({"position_id": pid,
+                                              "reason": "position_state_incomplete_for_exact_recovery",
+                                              "missing_fields": missing_state})
                     elif kind == POSITION_EXIT:
                         pid = str(payload.get("position_id") or "")
                         if pid:
                             closed.add(pid)
-                remaining = [dict(position_id=pid, **item) for pid, item in opened.items() if pid not in closed]
+                remaining = [dict(item, position_id=pid) for pid, item in opened.items() if pid not in closed]
                 uncertain.extend({"request_id": request_id, "reason": "filled_execution_without_position_record"}
                                   for request_id in filled_entry_ids - opened_entry_ids)
                 if remaining or uncertain:
@@ -147,6 +175,50 @@ class ScalperPaperHost:
         with self._ledger_lock:
             desk.scribe.to_jsonl(ledger_path)
             self._write_checkpoint(ledger_path, desk)
+
+    @staticmethod
+    def _unapproved_probability(_signal: Any, _regime: str) -> bayes.ProbabilityEstimate:
+        """Production admission is closed until independent OOS evidence is loaded.
+
+        Paper closes from this run are deliberately not used as training evidence;
+        that would let the runner validate itself on the same stream it trades.
+        """
+        return bayes.ProbabilityEstimate(
+            p=0.5, sd=0.5, low=0.0, high=1.0, samples=0,
+            basis="no_independently_approved_out_of_sample_artifact",
+            label="strategy_not_admitted",
+        )
+
+    @staticmethod
+    def _strategy_review() -> dict[str, Any]:
+        criteria = Criteria()
+        candidates = []
+        for strategy in default_strategies():
+            candidates.append({
+                **strategy.spec(),
+                "eligible": False,
+                "reason": "no_independent_broker-symbol OOS validation artifact is installed",
+                "required_evidence": [
+                    "chronological train/validation/test split",
+                    "walk-forward folds",
+                    "at least the declared in-sample and OOS sample counts",
+                    "positive net OOS expectancy after explicitly verified costs",
+                    "confidence interval excluding zero, PBO and deflated-Sharpe checks",
+                    "drawdown, tail-loss, regime, correlation and cost/parameter sensitivity",
+                ],
+            })
+        return {
+            "policy": criteria.audit_view(),
+            "candidates": candidates,
+            "eligible_count": 0,
+            "decision": "NO TRADE: no candidate has independent broker-symbol OOS evidence; drawdown/tail-risk and portfolio-correlation cutoffs are not fully declared",
+            "open_policy_questions": [
+                "The existing Criteria policy has no maximum drawdown or tail-loss cutoff; an authorized policy owner must declare these before any approval can be evaluated.",
+                "The live quote host supports one selected symbol only; portfolio correlation/overlap thresholds and multi-symbol joint exposure policy are not implemented.",
+                "No independently reviewed broker-symbol evidence artifact format or signer workflow is installed.",
+            ],
+            "live_route": "No AX-SCALPER intent is eligible. Any future eligible LIVE intent must use the existing /live guarded workflow; this host owns no LIVE adapter.",
+        }
 
     def status(self) -> dict[str, Any]:
         connected = bool(getattr(self.session, "connected", False))
@@ -208,6 +280,7 @@ class ScalperPaperHost:
             "account_type": str(account.get("mode") or "UNKNOWN"),
             "symbols": symbols, "symbol_exclusions": exclusions,
             "recovery": recovery, "quote": quote_status, "paper_only": True,
+            "strategy_review": self._strategy_review(),
             "last_result": dict(self._last_result),
             "ledger": str(self.ledger_path or ""),
         }
@@ -232,12 +305,20 @@ class ScalperPaperHost:
             self.ledger_dir.mkdir(parents=True, exist_ok=True)
             ledger_path = self.ledger_dir / f"{run_id}.jsonl"
             desk = ScalperDesk(config=config, venue=PaperVenue(cost=config.cost),
+                               probability_source=self._unapproved_probability,
                                starting_equity=capital, run_id=run_id)
+            instrument = config.instruments[0]
             fingerprint = hashlib.sha256(json.dumps({
-                "symbol": config.instruments[0].symbol,
+                "mode": PAPER,
+                "symbol": instrument.symbol,
+                "instrument": instrument.audit_view(),
+                "capital": str(capital),
                 "risk": {key: str(getattr(config, key)) for key in RISK_KEYS},
                 "cost": config.cost.audit_view(),
-            }, sort_keys=True).encode()).hexdigest()
+                "strategies": [{"name": item.name, "version": item.rule_version,
+                                "fingerprint": item.fingerprint}
+                               for item in default_strategies()],
+            }, sort_keys=True, default=str).encode()).hexdigest()
             desk.scribe.record(STATE, at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
                                actor="workstation", state="live_quote_paper_started",
                                config_fingerprint=fingerprint, strategy_versions=[
@@ -253,8 +334,52 @@ class ScalperPaperHost:
                 return self._refuse(str(outcome.get("reason") or "runner_start_refused"),
                                     "No PAPER decisions were started; check the connected session and local settings.")
             self.desk, self.pump, self.ledger_path = desk, pump, ledger_path
-            self._last_result = {"ok": True, "reason": "", "message": "AX-SCALPER live-quote PAPER started. Fills are local simulations only."}
+            self._last_result = {"ok": True, "reason": "", "message": "AX-SCALPER PAPER quote monitoring started. No strategy is admitted by the current evidence policy, so this run is no-trade; no PAPER order or fill will be generated until independent broker-symbol OOS evidence is approved."}
             return {**self._last_result, **self.status()}
+
+    def select_symbol(self, *, symbol: str) -> dict[str, Any]:
+        """Persist only an exact, currently verified tradable Forex symbol."""
+        with self._lock:
+            if self.pump and self.pump.status().get("state") == "RUNNING":
+                return self._refuse("stop_before_symbol_change", "Stop AX-SCALPER PAPER before changing its selected broker symbol.")
+            if not self.session.connected:
+                return self._refuse("terminal_not_connected", "Press Connect on Setup; symbol selection never connects in the background.")
+            from axiom_forex.workstation.symbols import build_catalogue
+            try:
+                catalogue = build_catalogue(tuple(self.session.symbols()), specs_reported=True)
+            except Exception as exc:
+                return self._refuse("terminal_symbol_catalogue_unavailable", f"Refresh the connected terminal catalogue ({type(exc).__name__}).")
+            candidate = next((item for item in catalogue.pairs if item.broker_symbol == symbol), None)
+            if candidate is None or not candidate.usable or not candidate.tradable:
+                return self._refuse("scalper_symbol_not_verified", "Choose an exact, verified, tradable Forex symbol shown by this workstation.")
+            try:
+                if self.config_path.exists():
+                    payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+                    if not isinstance(payload, dict) or payload.get("schema") != "axiom-scalper-paper-v1":
+                        return self._refuse("scalper_settings_schema_invalid", "The existing local settings were left untouched; repair their schema before selecting a symbol.")
+                else:
+                    payload = {"schema": "axiom-scalper-paper-v1", "margin_rate": "",
+                               "costs": {}, "risk": {}}
+                payload["symbol"] = symbol
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, raw_tmp = tempfile.mkstemp(prefix=self.config_path.name + ".", suffix=".tmp", dir=self.config_path.parent)
+                try:
+                    with fdopen(fd, "w", encoding="utf-8") as handle:
+                        json.dump(payload, handle, indent=2, sort_keys=True)
+                        handle.write("\n")
+                        handle.flush()
+                        fsync(handle.fileno())
+                    replace(raw_tmp, self.config_path)
+                except Exception:
+                    try:
+                        Path(raw_tmp).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
+            except Exception as exc:
+                return self._refuse("scalper_symbol_save_failed", f"The local selection was not saved ({type(exc).__name__}); check file permissions and preserve the existing file.")
+            self._last_result = {"ok": True, "reason": "", "message": f"Selected exact verified broker symbol {symbol}. Other settings were preserved; missing terms still block Start."}
+            return dict(self._last_result)
 
     def acknowledge_recovery(self, *, confirmation: str) -> dict[str, Any]:
         """Record the operator's choice to keep an unresumable book blocked."""
