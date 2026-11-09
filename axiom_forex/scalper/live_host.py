@@ -12,11 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import PAPER
-from .desk import ScalperDesk
+from .desk import DeskThresholds, ScalperDesk
 from .execution import PaperVenue
 from .live_config import RISK_KEYS, LiveScalperConfigError, load_live_paper_config
 from .live_quotes import LivePaperPump, MT5LiveQuoteSource
 from . import bayes
+from .admission import AdmissionError, evaluate_artifact, load_policy
 from .skeptic import Criteria
 from .signals import default_strategies
 from .scribe import EXECUTION_RESULT, KINDS, POSITION_EXIT, POSITION_OPENED, STATE, read_jsonl, verify_jsonl
@@ -29,6 +30,8 @@ class ScalperPaperHost:
                  paper_root: str | Path, ledger_dir: str | Path):
         self.session = session
         self.config_path = Path(config_path)
+        self.admission_policy_path = self.config_path.parent / "scalper_admission.local.json"
+        self.evidence_dir = self.config_path.parent / "scalper_evidence"
         self.paper_root = Path(paper_root)
         self.ledger_dir = Path(ledger_dir)
         self.pump: LivePaperPump | None = None
@@ -176,48 +179,68 @@ class ScalperPaperHost:
             desk.scribe.to_jsonl(ledger_path)
             self._write_checkpoint(ledger_path, desk)
 
-    @staticmethod
-    def _unapproved_probability(_signal: Any, _regime: str) -> bayes.ProbabilityEstimate:
-        """Production admission is closed until independent OOS evidence is loaded.
-
-        Paper closes from this run are deliberately not used as training evidence;
-        that would let the runner validate itself on the same stream it trades.
-        """
-        return bayes.ProbabilityEstimate(
-            p=0.5, sd=0.5, low=0.0, high=1.0, samples=0,
-            basis="no_independently_approved_out_of_sample_artifact",
-            label="strategy_not_admitted",
-        )
-
-    @staticmethod
-    def _strategy_review() -> dict[str, Any]:
+    def _strategy_review(self, *, currency: str = "", instrument: dict[str, Any] | None = None,
+                         expected_costs: dict[str, Any] | None = None) -> dict[str, Any]:
         criteria = Criteria()
+        policy = None
+        policy_error = ""
+        try:
+            if not currency:
+                raise AdmissionError("paper_currency_unavailable", "Connect and configure local PAPER capital.")
+            policy = load_policy(self.admission_policy_path, expected_currency=currency)
+        except AdmissionError as exc:
+            policy_error = f"{exc.reason}: {exc.detail}"
         candidates = []
         for strategy in default_strategies():
+            result = None
+            if policy is None:
+                reason = policy_error
+            elif instrument is None or expected_costs is None:
+                reason = "verified instrument and exact observed cost settings are required before evidence can be matched"
+            else:
+                artifact_path = self.evidence_dir / f"{strategy.fingerprint}.json"
+                result = evaluate_artifact(artifact_path, policy=policy,
+                                           strategy=strategy.spec(), instrument=instrument,
+                                           expected_costs=expected_costs)
+                reason = result.reason
             candidates.append({
                 **strategy.spec(),
-                "eligible": False,
-                "reason": "no_independent_broker-symbol OOS validation artifact is installed",
+                "eligible": bool(result and result.eligible),
+                "reason": "" if result and result.eligible else reason,
+                "metrics": {} if result is None else dict(result.metrics),
+                "evidence": {} if result is None else result.audit_view(),
+                "artifact_path": str(self.evidence_dir / f"{strategy.fingerprint}.json"),
                 "required_evidence": [
-                    "chronological train/validation/test split",
-                    "walk-forward folds",
-                    "at least the declared in-sample and OOS sample counts",
-                    "positive net OOS expectancy after explicitly verified costs",
-                    "confidence interval excluding zero, PBO and deflated-Sharpe checks",
-                    "drawdown, tail-loss, regime, correlation and cost/parameter sensitivity",
+                    "trusted Ed25519 reviewer signature, distinct from strategy developers",
+                    "digest-verified broker historical/tick dataset and date range",
+                    "chronological train/validation/test separation and walk-forward folds",
+                    "net expectancy with bootstrap confidence, and a win-rate confidence bound",
+                    "cost stress, parameter sensitivity, drawdown and 95% CVaR tail loss",
+                    "regime stability, peer-return correlation and overlapping exposure",
                 ],
             })
+        count = sum(bool(item["eligible"]) for item in candidates)
+        questions = []
+        if policy is None:
+            questions.append(policy_error or "Admission policy is not configured.")
+        if not instrument:
+            questions.append("Verified broker instrument/cost terms are missing; no evidence can be matched.")
+        if not count:
+            questions.append("No signed, exact-fingerprint evidence artifact currently passes every configured check.")
+        questions.append("This host is one symbol at a time; portfolio-wide multi-symbol risk aggregation is not available.")
         return {
             "policy": criteria.audit_view(),
+            "policy_path": str(self.admission_policy_path),
+            "evidence_dir": str(self.evidence_dir),
+            "policy_status": "configured" if policy else "blocked",
+            "effective_policy": {} if policy is None else policy.audit_view(),
             "candidates": candidates,
-            "eligible_count": 0,
-            "decision": "NO TRADE: no candidate has independent broker-symbol OOS evidence; drawdown/tail-risk and portfolio-correlation cutoffs are not fully declared",
-            "open_policy_questions": [
-                "The existing Criteria policy has no maximum drawdown or tail-loss cutoff; an authorized policy owner must declare these before any approval can be evaluated.",
-                "The live quote host supports one selected symbol only; portfolio correlation/overlap thresholds and multi-symbol joint exposure policy are not implemented.",
-                "No independently reviewed broker-symbol evidence artifact format or signer workflow is installed.",
-            ],
-            "live_route": "No AX-SCALPER intent is eligible. Any future eligible LIVE intent must use the existing /live guarded workflow; this host owns no LIVE adapter.",
+            "eligible_count": count,
+            "trade_admission_open": count > 0,
+            "decision": (f"{count} exact strategy fingerprint(s) pass signed evidence and policy checks"
+                         if count else "NO TRADE: policy or independent signed evidence is missing or failed validation"),
+            "open_policy_questions": questions,
+            "live_route": "No scalper intent routes from this host. An eligible PAPER result does not authorize LIVE; use only the separately confirmed and armed existing /live workflow.",
         }
 
     def status(self) -> dict[str, Any]:
@@ -250,10 +273,14 @@ class ScalperPaperHost:
         except Exception:
             symbols, exclusions = [], [{"reason": "terminal_symbol_catalogue_unavailable"}]
         config_view: dict[str, Any] = {}
+        instrument_view: dict[str, Any] | None = None
+        expected_costs: dict[str, Any] | None = None
         try:
             if connected:
                 config, capital, currency = load_live_paper_config(
                     session=self.session, settings_path=self.config_path, paper_root=self.paper_root)
+                instrument_view = config.instruments[0].audit_view()
+                expected_costs = {"currency": currency, **config.cost.audit_view()}
                 config_view = {
                     "symbol": config.instruments[0].symbol,
                     "point": str(config.instruments[0].point),
@@ -273,6 +300,10 @@ class ScalperPaperHost:
             config_view = {"reason": exc.reason, "remediation": exc.remediation}
             if state not in {"DISCONNECTED", "BLOCKED"}:
                 state, reason = "BLOCKED", exc.reason
+        review = self._strategy_review(currency=str(account.get("currency") or ""),
+                                       instrument=instrument_view, expected_costs=expected_costs)
+        start_allowed = bool(connected and not recovery and not running and instrument_view
+                             and state == "STOPPED")
         return {
             "available": True, "mode": PAPER, "source": "MT5_LIVE_PAPER",
             "state": state, "connected": connected, "reason": reason,
@@ -280,7 +311,7 @@ class ScalperPaperHost:
             "account_type": str(account.get("mode") or "UNKNOWN"),
             "symbols": symbols, "symbol_exclusions": exclusions,
             "recovery": recovery, "quote": quote_status, "paper_only": True,
-            "strategy_review": self._strategy_review(),
+            "strategy_review": review, "start_allowed": start_allowed,
             "last_result": dict(self._last_result),
             "ledger": str(self.ledger_path or ""),
         }
@@ -297,15 +328,31 @@ class ScalperPaperHost:
             if recovery:
                 return self._refuse("recovery_required", "A prior ledger has open paper positions, an unresolved fill, or failed integrity validation. Exact manager/risk restoration is unavailable; positions remain untouched and new entries are blocked.", recovery=recovery)
             try:
-                config, capital, _currency = load_live_paper_config(
+                config, capital, currency = load_live_paper_config(
                     session=self.session, settings_path=self.config_path, paper_root=self.paper_root)
             except LiveScalperConfigError as exc:
                 return self._refuse(exc.reason, exc.remediation)
+            review = self._strategy_review(currency=currency, instrument=config.instruments[0].audit_view(),
+                                           expected_costs={"currency": currency, **config.cost.audit_view()})
+            eligible = {item["fingerprint"]: item for item in review["candidates"] if item["eligible"]}
+            strategies = tuple(item for item in default_strategies() if item.fingerprint in eligible)
+            admitted_outcomes = bayes.OutcomeBook()
+            for fingerprint, candidate in eligible.items():
+                for regime, counts in candidate["metrics"].get("regime_outcomes", {}).items():
+                    for _ in range(int(counts.get("wins", 0))):
+                        admitted_outcomes.record(fingerprint=fingerprint, regime=regime, won=True)
+                    for _ in range(int(counts.get("losses", 0))):
+                        admitted_outcomes.record(fingerprint=fingerprint, regime=regime, won=False)
+            policy_min_samples = int(review["effective_policy"].get("min_oos_trades", 30))
             run_id = "scalper-paper-" + uuid.uuid4().hex
             self.ledger_dir.mkdir(parents=True, exist_ok=True)
             ledger_path = self.ledger_dir / f"{run_id}.jsonl"
-            desk = ScalperDesk(config=config, venue=PaperVenue(cost=config.cost),
-                               probability_source=self._unapproved_probability,
+            desk = ScalperDesk(config=config, strategies=strategies,
+                               venue=PaperVenue(cost=config.cost),
+                               outcome_book=bayes.OutcomeBook(),
+                               probability_source=lambda signal, regime: admitted_outcomes.estimate(
+                                   signal.parameter_fingerprint, regime),
+                               thresholds=DeskThresholds(min_probability_samples=policy_min_samples),
                                starting_equity=capital, run_id=run_id)
             instrument = config.instruments[0]
             fingerprint = hashlib.sha256(json.dumps({
@@ -317,7 +364,7 @@ class ScalperPaperHost:
                 "cost": config.cost.audit_view(),
                 "strategies": [{"name": item.name, "version": item.rule_version,
                                 "fingerprint": item.fingerprint}
-                               for item in default_strategies()],
+                               for item in desk.strategies],
             }, sort_keys=True, default=str).encode()).hexdigest()
             desk.scribe.record(STATE, at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
                                actor="workstation", state="live_quote_paper_started",
@@ -334,7 +381,11 @@ class ScalperPaperHost:
                 return self._refuse(str(outcome.get("reason") or "runner_start_refused"),
                                     "No PAPER decisions were started; check the connected session and local settings.")
             self.desk, self.pump, self.ledger_path = desk, pump, ledger_path
-            self._last_result = {"ok": True, "reason": "", "message": "AX-SCALPER PAPER quote monitoring started. No strategy is admitted by the current evidence policy, so this run is no-trade; no PAPER order or fill will be generated until independent broker-symbol OOS evidence is approved."}
+            self._last_result = {"ok": True, "reason": "", "message": (
+                "AX-SCALPER PAPER quote observation started. "
+                + ("Only strategy fingerprints passing signed-evidence policy are enabled. " if strategies else
+                   "No strategy passed signed-evidence policy; this is observation-only and generates no trades. ")
+                + "This is PAPER only; it does not imply profitability or authorize LIVE execution.")}
             return {**self._last_result, **self.status()}
 
     def select_symbol(self, *, symbol: str) -> dict[str, Any]:

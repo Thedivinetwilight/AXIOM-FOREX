@@ -8603,29 +8603,36 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     risk_rows = tuple((risk_names.get(str(k), str(k).replace("_", " ")), escape(str(v)))
                       for k, v in dict(config.get("risk") or {}).items())
     strategy_review = dict(view.get("strategy_review") or {})
-    policy = dict(strategy_review.get("policy") or {})
+    policy = dict(strategy_review.get("effective_policy") or {})
     body.append(dl((
         ("Strategy admission", escape(str(strategy_review.get("decision") or "No strategy evidence available; no trade."))),
-        ("Admission policy", escape(str(policy.get("version") or "unavailable"))),
-        ("Minimum total / OOS trades", f"{policy.get('min_trades', '—')} / {policy.get('min_out_of_sample_trades', '—')}"),
+        ("Admission policy", escape(str(strategy_review.get("policy_status") or "blocked"))),
+        ("Typed policy file", escape(str(strategy_review.get("policy_path") or "not configured"))),
+        ("Evidence directory", escape(str(strategy_review.get("evidence_dir") or "not configured"))),
+        ("Minimum total / OOS trades", f"{escape(str(policy.get('min_total_trades', '—')))} / {escape(str(policy.get('min_oos_trades', '—')))}"),
         ("Walk-forward folds", escape(str(policy.get("min_walk_forward_folds", "—")))),
-        ("Cost stress / max PBO", f"{policy.get('cost_multiple_survival', '—')}× / {policy.get('max_pbo', '—')}"),
-        ("Minimum DSR / profit factor", f"{policy.get('min_deflated_sharpe', '—')} / {policy.get('min_profit_factor', '—')}"),
+        ("Net expectancy / cost stress", f"{escape(str(policy.get('minimum_net_expectancy', '—')))} / {escape(str(policy.get('cost_stress_multiple', '—')))}×"),
+        ("PBO max / DSR min", f"{escape(str(policy.get('maximum_pbo', '—')))} / {escape(str(policy.get('minimum_deflated_sharpe', '—')))}"),
+        ("Profit factor min / q max", f"{escape(str(policy.get('minimum_profit_factor', '—')))} / {escape(str(policy.get('maximum_q_value', '—')))}"),
+        ("Max drawdown / CVaR 95%", f"{escape(str(policy.get('maximum_drawdown', '—')))} / {escape(str(policy.get('maximum_tail_loss_cvar_95', '—')))}"),
     )))
     candidates = [dict(item) for item in strategy_review.get("candidates", ())]
     if candidates:
-        body.append(table("Strategy review — no candidate currently admitted",
-                          (("Strategy", "text"), ("Family / version", "text"), ("Fingerprint", "mono"), ("Admission", "text"), ("Reason", "text")),
+        body.append(table("Strategy review — evidence and policy decision",
+                          (("Strategy", "text"), ("Family / version", "text"), ("Fingerprint", "mono"), ("Decision", "text"), ("Net OOS / CI lower", "text"), ("Win LCB 95%", "text"), ("Drawdown / CVaR", "text"), ("Reason", "text")),
                           ((escape(str(x.get("name", ""))),
                             escape(f"{x.get('family', '')} / {x.get('rule_version', '')}"),
                             escape(str(x.get("fingerprint", ""))),
                             "eligible" if x.get("eligible") else "NO TRADE",
+                            escape(f"{(x.get('metrics') or {}).get('net_expectancy', '—')} / {(x.get('metrics') or {}).get('net_expectancy_ci_lower_95', '—')}"),
+                            escape(str((x.get("metrics") or {}).get("win_rate_lcb_95", "—"))),
+                            escape(f"{(x.get('metrics') or {}).get('max_drawdown', '—')} / {(x.get('metrics') or {}).get('tail_loss_cvar_95', '—')}"),
                             escape(str(x.get("reason", "")))) for x in candidates)))
         body.append(notice("warn", "Evidence needed before strategy selection",
                            "A high win rate is not an admission criterion. Require chronological held-out data, walk-forward stability, net positive OOS expectancy after verified costs, uncertainty, drawdown/tail loss, regime and cost/parameter sensitivity, and portfolio correlation review. Paper outcomes from this live quote run do not self-train or approve strategies."))
     policy_questions = [str(item) for item in strategy_review.get("open_policy_questions", ())]
     if policy_questions:
-        body.append(notice("warn", "Admission policy still has undecided limits", " ".join(escape(item) for item in policy_questions)))
+        body.append(notice("warn", "Admission blockers / policy decisions", " ".join(escape(item) for item in policy_questions)))
     live_route = str(strategy_review.get("live_route") or "No AX-SCALPER LIVE route is configured.")
     body.append(notice("muted", "LIVE remains a separate workflow", escape(live_route) + " Select, confirm, arm and run LIVE only through the existing /live workflow; this PAPER controller has no live adapter."))
     body.append(dl((
@@ -8718,9 +8725,12 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     if state in {"RUNNING", "PAUSED"}:
         body.append(action_form("scalper-paper-stop", nonce, "Stop AX-SCALPER PAPER", tone="primary") +
                     "<p class='small muted'>Stop halts new decisions, appends the ledger, and leaves local paper positions open. It does not flatten or touch the connected account.</p>")
-    else:
+    elif view.get("start_allowed"):
         body.append(action_form("scalper-paper-start", nonce, "Start AX-SCALPER PAPER", tone="primary") +
-                    "<p class='small muted'>Start is refused until Connect, verified symbol facts, declared cost/risk terms, configured local paper capital and safe recovery checks all pass. No sample/historical fallback is used.</p>")
+                    "<p class='small muted'>Only strategies passing the exact-fingerprint signed evidence and typed-policy checks are enabled. Start uses explicit observation-session Connect and locally simulated PAPER fills only; LIVE is separate.</p>")
+    else:
+        blocker = str(view.get("reason") or config.get("reason") or "signed evidence / admission policy required")
+        body.append(notice("warn", "Start blocked — no PAPER session launched", escape(blocker)))
     return card("AX-SCALPER PAPER · live MT5 quotes", "".join(body), hint="No LIVE controls are provided here. The existing /live workflow remains separate and unchanged.")
 
 

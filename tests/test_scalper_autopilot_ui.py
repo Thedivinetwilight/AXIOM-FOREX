@@ -10,7 +10,7 @@ class FakeScalper:
         self.calls = []
     def status(self):
         return {"available": True, "state": "STOPPED", "mode": "PAPER",
-                "source": "MT5_LIVE_PAPER", "connected": False,
+                "source": "MT5_LIVE_PAPER", "connected": False, "start_allowed": False,
                 "account_type": "UNKNOWN", "config": {"reason": "terminal_not_connected",
                 "remediation": "Press Connect on Setup."}, "symbols": [],
                 "symbol_exclusions": [], "recovery": [], "quote": {}, "paper_only": True,
@@ -63,10 +63,18 @@ def test_autopilot_card_has_explicit_paper_label_and_handled_actions():
     html = _render_scalper_paper_card(FakeScalper().status(), "nonce-value")
     assert "AX-SCALPER PAPER" in html
     assert "MT5 live quote" in html
+    assert "Start blocked — no PAPER session launched" in html
+    assert "action='/actions/scalper-paper-start'" not in html
+    assert "cannot send or close broker orders" in html
+
+
+def test_ready_connected_status_shows_paper_observation_start():
+    view = FakeScalper().status()
+    view.update(connected=True, start_allowed=True)
+    view["config"] = {"symbol": "EURUSD.pro"}
+    html = _render_scalper_paper_card(view, "nonce-value")
     assert "Start AX-SCALPER PAPER" in html
     assert "action='/actions/scalper-paper-start'" in html
-    assert "name='nonce' value='nonce-value'" in html
-    assert "cannot send or close broker orders" in html
 
 
 def test_strategy_review_is_visible_and_symbol_picker_offers_exact_verified_names():
@@ -86,7 +94,8 @@ def test_autopilot_route_renders_scalper_card_even_without_catalog_runner():
     app = WorkstationApp(wizard=simulated_wizard(), scalper_paper=FakeScalper())
     status, html = app.page("/autopilot")
     assert status == 200
-    assert "AX-SCALPER PAPER" in html and "/actions/scalper-paper-start" in html
+    assert "AX-SCALPER PAPER" in html and "Start blocked — no PAPER session launched" in html
+    assert "/actions/scalper-paper-start" not in html
 
 
 def test_scalper_paper_source_has_no_broker_mutation_dependencies():

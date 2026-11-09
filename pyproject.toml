@@ -18,6 +18,9 @@ dependencies = [
 dev = [
   "pytest>=8,<10",
 ]
+evidence = [
+  "cryptography>=43",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

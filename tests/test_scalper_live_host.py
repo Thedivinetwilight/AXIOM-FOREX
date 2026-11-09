@@ -158,6 +158,8 @@ def test_host_start_stop_persists_fills_as_separate_verified_paper_ledger(tmp_pa
     assert host.status()["account_type"] == "DEMO"
     started = host.start()
     assert started["ok"] and started["mode"] == "PAPER"
+    assert "observation-only" in started["message"]
+    assert host.desk.strategies == ()
     deadline = time.monotonic() + 2
     while session.terminal.reads == 0 and time.monotonic() < deadline:
         time.sleep(.005)
