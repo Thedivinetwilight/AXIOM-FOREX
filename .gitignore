@@ -47,8 +47,9 @@ data/kronos/
 results/*
 !results/.gitkeep
 
-# Local lock files
+# Local lock files and signed PAPER admission artifacts (contain broker-derived data)
 *.paper.lock
+scalper_evidence/
 
 # Local MT5 configuration (never contains the password; the password lives in the OS vault)
 mt5_settings.local.json
