@@ -170,6 +170,15 @@ class ScalperPaperHost:
                     found.append({"path": str(path),
                                   "reason": "open_or_unresolved_paper_state_requires_exact_recovery",
                                   "positions": remaining, "uncertain": uncertain})
+                else:
+                    # Even a flat, integrity-valid ledger contains guardian,
+                    # equity, strategy posterior, tick-core and decision history
+                    # that this host cannot restore. Starting fresh would silently
+                    # reset those controls, so preserve the book and keep it blocked.
+                    found.append({"path": str(path),
+                                  "reason": "exact_scalper_state_restore_unavailable",
+                                  "positions": [], "uncertain": [],
+                                  "detail": "The ledger is intact and flat, but exact desk/guardian/tick state restoration is not implemented; no replacement run may silently reset it."})
             except Exception as exc:
                 found.append({"path": str(path), "reason": f"ledger_read_failed:{type(exc).__name__}"})
         return found
@@ -212,6 +221,7 @@ class ScalperPaperHost:
                 "artifact_path": str(self.evidence_dir / f"{strategy.fingerprint}.json"),
                 "required_evidence": [
                     "trusted Ed25519 reviewer signature, distinct from strategy developers",
+                    "production independent raw-tick replay verifier (not wired; blocks all admission)",
                     "digest-verified broker historical/tick dataset and date range",
                     "chronological train/validation/test separation and walk-forward folds",
                     "net expectancy with bootstrap confidence, and a win-rate confidence bound",
@@ -311,6 +321,11 @@ class ScalperPaperHost:
             "account_type": str(account.get("mode") or "UNKNOWN"),
             "symbols": symbols, "symbol_exclusions": exclusions,
             "recovery": recovery, "quote": quote_status, "paper_only": True,
+            "recovery_capability": {
+                "exact_restore_available": False,
+                "confirmed_action": "KEEP_PAPER_BOOK_BLOCKED",
+                "action_effect": "review is recorded; positions, ledgers and blockers remain unchanged",
+            },
             "strategy_review": review, "start_allowed": start_allowed,
             "last_result": dict(self._last_result),
             "ledger": str(self.ledger_path or ""),

@@ -8698,7 +8698,7 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     recovery = [dict(x) for x in view.get("recovery", ())]
     if recovery:
         body.append(notice("warn", "Recovery required — entries blocked",
-                           "An earlier ledger contains an open PAPER position, unresolved outcome, missing checkpoint, or integrity failure. This build cannot exactly restore its strategy, guardian, sizing and position-manager state. Preserve the named JSONL ledger and .head.json sidecar unchanged; review them read-only and retain the book as unresolved. Do not edit/delete either file or start another run: the review acknowledgement does not unlock Start. Exact recovery tooling remains an open implementation item."))
+                           "An earlier ledger has state this build cannot restore exactly: this includes open positions, unresolved outcomes, damaged/missing checkpoints, and even a flat completed run whose equity, guardian, TickCore, strategy posterior, or decision history would otherwise reset. Preserve the named JSONL ledger and .head.json sidecar unchanged; review them read-only and retain the book as unresolved. Do not edit/delete either file or start another run: the explicit review acknowledgement does not unlock Start. Exact recovery tooling remains an open implementation item."))
         body.append(table("Stored recovery blockers", (("Ledger", "text"), ("Reason", "text"), ("Positions", "num")),
                           ((escape(str(x.get("path", ""))), escape(str(x.get("reason", ""))), str(len(x.get("positions", ())))) for x in recovery)))
         recovery_positions = [{**dict(position), "ledger": x.get("path", "")}

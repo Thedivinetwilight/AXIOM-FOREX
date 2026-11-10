@@ -179,6 +179,33 @@ def test_host_start_stop_persists_fills_as_separate_verified_paper_ledger(tmp_pa
     assert session.terminal.mutations == []
 
 
+def test_restart_with_flat_but_unrestored_ledger_stays_blocked_and_unchanged(tmp_path):
+    session, config_path, capital_root, ledger_dir = setup(tmp_path)
+    ledger_dir.mkdir(parents=True)
+    scribe = Scribe(run_id="flat-prior", mode="PAPER")
+    scribe.record(STATE, at_ms=100, actor="test", state="paper_stopped_positions_left_open",
+                  open_positions=[])
+    ledger = ledger_dir / "flat-prior.jsonl"
+    scribe.to_jsonl(ledger)
+    ScalperPaperHost._write_checkpoint(ledger, SimpleNamespace(scribe=scribe))
+    before_ledger = ledger.read_bytes()
+    checkpoint = ScalperPaperHost._checkpoint_path(ledger)
+    before_checkpoint = checkpoint.read_bytes()
+    host = ScalperPaperHost(session=session, config_path=config_path,
+                            paper_root=capital_root, ledger_dir=ledger_dir)
+    status = host.status()
+    assert status["state"] == "BLOCKED"
+    assert status["recovery"][0]["reason"] == "exact_scalper_state_restore_unavailable"
+    assert status["recovery_capability"]["exact_restore_available"] is False
+    assert status["recovery_capability"]["confirmed_action"] == "KEEP_PAPER_BOOK_BLOCKED"
+    assert host.start()["reason"] == "recovery_required"
+    result = host.acknowledge_recovery(confirmation="KEEP_PAPER_BOOK_BLOCKED")
+    assert result["reason"] == "recovery_remains_blocked"
+    assert ledger.read_bytes() == before_ledger
+    assert checkpoint.read_bytes() == before_checkpoint
+    assert host.start()["reason"] == "recovery_required"
+
+
 def test_restart_with_open_position_is_blocked_without_flatten_or_reassignment(tmp_path):
     session, config_path, capital_root, ledger_dir = setup(tmp_path)
     ledger_dir.mkdir(parents=True)

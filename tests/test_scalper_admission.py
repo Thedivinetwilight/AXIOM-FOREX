@@ -68,6 +68,8 @@ def signed_artifact(tmp_path, strategy, private_key, *, mutations=None):
                   "slippage_state": "OBSERVED"},
         "trades": rows,
         "multiple_testing": {"pbo": "0.10", "deflated_sharpe": "0.98", "q_value": "0.05"},
+        "replay": {"replay_version": "fixture-v1", "engine_digest": "fixture-engine",
+                   "input_digest": "fixture-input", "output_digest": "fixture-output"},
         "walk_forward": [
             {"train_end": "2026-01-01T23:00:00+00:00", "test_start": "2026-01-02T00:00:00+00:00",
              "test_end": "2026-01-02T01:00:00+00:00", "test_net_account": ["1.4", "1.5"]},
@@ -107,7 +109,8 @@ def test_valid_signed_broker_evidence_passes_declared_policy(tmp_path):
                                instrument=INSTRUMENT,
                                expected_costs={"currency": "USD", "commission_per_lot": "7",
                                                "commission_state": "OBSERVED", "slippage_points": "1",
-                                               "slippage_state": "OBSERVED"}, now=NOW)
+                                               "slippage_state": "OBSERVED"},
+                               replay_verifier=lambda _path, doc: {"verified": True, **doc["replay"]}, now=NOW)
     assert result.eligible, result.reason
     assert result.metrics["oos_trades"] == 20
     assert Decimal(result.metrics["net_expectancy_ci_lower_95"]) > Decimal("1.2")
@@ -116,10 +119,12 @@ def test_valid_signed_broker_evidence_passes_declared_policy(tmp_path):
 
 @pytest.mark.parametrize(("mutations", "reason"), [
     (lambda x: x.update(instrument={"symbol": "wrong"}), "evidence_instrument_identity_mismatch"),
+    (lambda x: x["strategy"].update(rule_version="wrong"), "evidence_strategy_identity_mismatch"),
     (lambda x: x["costs"].update(verified=False), "evidence_costs_unverified_or_currency_mismatch"),
     (lambda x: x["costs"].update(commission_per_lot="0"), "evidence_configured_cost_mismatch"),
     (lambda x: x["data"].update(origin="SYNTHETIC"), "evidence_data_origin_not_independent"),
     (lambda x: x["trades"][-1].update(net_account="99"), "evidence_net_cost_arithmetic_mismatch"),
+    (lambda x: x["trades"][-1].update(timestamp="2026-01-02T03:00:00+00:00"), "evidence_chronology_invalid"),
     (lambda x: x["portfolio"]["overlap_intervals"][0].update(exposure_fraction="0.9"), "overlapping_exposure_above_policy"),
 ])
 def test_signed_but_invalid_evidence_fails_closed(tmp_path, mutations, reason):
@@ -158,6 +163,51 @@ def test_high_win_rate_does_not_pass_negative_net_expectancy(tmp_path):
     assert result.metrics["win_rate"] == 0.8
     assert Decimal(result.metrics["net_expectancy"]) < 0
     assert "net_expectancy_below_policy" in result.reason
+
+
+def test_signature_and_reported_metrics_alone_cannot_open_admission(tmp_path):
+    key = Ed25519PrivateKey.generate()
+    strategy = default_strategies()[0]
+    policy = setup_policy(tmp_path, key)
+    artifact = signed_artifact(tmp_path, strategy, key)
+    result = evaluate_artifact(artifact, policy=policy, strategy=strategy.spec(),
+                               instrument=INSTRUMENT,
+                               expected_costs={"currency": "USD", "commission_per_lot": "7",
+                                               "commission_state": "OBSERVED", "slippage_points": "1",
+                                               "slippage_state": "OBSERVED"}, now=NOW)
+    assert not result.eligible
+    assert result.reason == "evidence_raw_replay_verifier_unavailable"
+
+
+def test_referenced_dataset_substitution_is_detected_by_digest(tmp_path):
+    key = Ed25519PrivateKey.generate()
+    strategy = default_strategies()[0]
+    policy = setup_policy(tmp_path, key)
+    artifact = signed_artifact(tmp_path, strategy, key)
+    (tmp_path / "broker.csv").write_text("substituted dataset", encoding="utf-8")
+    result = evaluate_artifact(artifact, policy=policy, strategy=strategy.spec(),
+                               instrument=INSTRUMENT,
+                               expected_costs={"currency": "USD", "commission_per_lot": "7",
+                                               "commission_state": "OBSERVED", "slippage_points": "1",
+                                               "slippage_state": "OBSERVED"}, now=NOW)
+    assert result.reason == "evidence_data_digest_mismatch"
+
+
+def test_replay_verifier_must_match_signed_input_and_output_digests(tmp_path):
+    key = Ed25519PrivateKey.generate()
+    strategy = default_strategies()[0]
+    policy = setup_policy(tmp_path, key)
+    artifact = signed_artifact(tmp_path, strategy, key)
+    result = evaluate_artifact(artifact, policy=policy, strategy=strategy.spec(),
+                               instrument=INSTRUMENT,
+                               expected_costs={"currency": "USD", "commission_per_lot": "7",
+                                               "commission_state": "OBSERVED", "slippage_points": "1",
+                                               "slippage_state": "OBSERVED"},
+                               replay_verifier=lambda _path, doc: {
+                                   "verified": True, **doc["replay"], "output_digest": "wrong"
+                               }, now=NOW)
+    assert not result.eligible
+    assert result.reason == "evidence_raw_replay_digest_mismatch"
 
 
 def test_tampering_after_signature_is_rejected(tmp_path):

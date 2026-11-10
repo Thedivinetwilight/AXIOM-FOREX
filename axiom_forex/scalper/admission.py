@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 POLICY_SCHEMA = "axiom-scalper-admission-policy-v1"
 EVIDENCE_SCHEMA = "axiom-scalper-evidence-v1"
@@ -211,6 +211,7 @@ class AdmissionResult:
 def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
                       strategy: Mapping[str, Any], instrument: Mapping[str, Any],
                       expected_costs: Mapping[str, Any],
+                      replay_verifier: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] | None = None,
                       now: datetime | None = None) -> AdmissionResult:
     target = Path(path)
     def refuse(reason: str, detail: str = "", metrics: Mapping[str, Any] | None = None) -> AdmissionResult:
@@ -461,7 +462,23 @@ def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
         if peak > policy.maximum_overlapping_exposure_fraction: fails.append("overlapping_exposure_above_policy")
         if fails:
             return AdmissionResult(False, ",".join(fails), metrics, fingerprint, reviewer, str(target))
-        return AdmissionResult(True, "eligible_under_signed_policy", metrics, fingerprint, reviewer, str(target))
+        replay_manifest = document.get("replay")
+        if not isinstance(replay_manifest, dict) or not all(
+                replay_manifest.get(key) for key in ("replay_version", "engine_digest", "input_digest", "output_digest")):
+            return refuse("evidence_replay_manifest_missing", metrics=metrics)
+        if replay_verifier is None:
+            return refuse("evidence_raw_replay_verifier_unavailable", metrics=metrics)
+        try:
+            reproduced = replay_verifier(target, document)
+        except Exception as exc:
+            return refuse("evidence_raw_replay_failed", type(exc).__name__, metrics)
+        if not isinstance(reproduced, Mapping) or reproduced.get("verified") is not True:
+            return refuse("evidence_raw_replay_mismatch", metrics=metrics)
+        if any(str(reproduced.get(key) or "") != str(replay_manifest.get(key) or "")
+               for key in ("replay_version", "engine_digest", "input_digest", "output_digest")):
+            return refuse("evidence_raw_replay_digest_mismatch", metrics=metrics)
+        return AdmissionResult(True, "eligible_under_signed_policy_and_reproduced_replay", metrics,
+                               fingerprint, reviewer, str(target))
     except (AdmissionError, KeyError, TypeError, ValueError, OverflowError) as exc:
         return refuse("evidence_metrics_invalid", str(exc))
 
