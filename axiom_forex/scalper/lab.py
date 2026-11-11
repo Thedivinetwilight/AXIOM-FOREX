@@ -567,12 +567,14 @@ class RunResult:
     ledger: dict[str, Any]
     refusals: dict[str, Any]
     limitations: tuple[str, ...] = ()
+    account_trades: tuple[dict[str, Any], ...] = ()
 
     def audit_view(self) -> dict[str, Any]:
         return {
             "scenario": self.scenario,
             "ticks": self.ticks,
             "funnel": self.funnel,
+            "account_trades": list(self.account_trades),
             "metrics": self.metrics.audit_view(),
             "distributions": self.distributions,
             "by_regime": self.by_regime,
@@ -651,6 +653,7 @@ def run_scenario(
         probability_source=probability_source,
         thresholds=thresholds,
         run_id=run_id or f"lab-{scenario.name}-{scenario.digest[:8]}",
+        clock=(lambda: scenario.ticks[0].at) if scenario.ticks else (lambda: datetime(1970, 1, 1, tzinfo=UTC)),
     )
     equity_curve: list[float] = []
     realised = Decimal(0)
@@ -729,7 +732,13 @@ def run_scenario(
             "risk": status["risk_refusals"],
             "tick": status["tick_refusals"],
         },
+        account_trades=tuple(dict(row) for row in desk.trades),
         limitations=(
+            "declared broker-origin raw ticks; source authenticity is an operator/reviewer responsibility",
+            "the paper venue fills every accepted order unless a fault is injected",
+            "costs are the declared terms in the configuration, not a broker's schedule",
+            "no live execution path is exercised or reachable",
+        ) if scenario.data_class == "BROKER_RAW_EVIDENCE" else (
             "synthetic ticks; no broker feed, no real spread distribution",
             "the paper venue fills every accepted order unless a fault is injected",
             "costs are the declared terms in the configuration, not a broker's schedule",

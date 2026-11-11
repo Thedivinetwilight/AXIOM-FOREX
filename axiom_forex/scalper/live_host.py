@@ -18,6 +18,7 @@ from .live_config import RISK_KEYS, LiveScalperConfigError, load_live_paper_conf
 from .live_quotes import LivePaperPump, MT5LiveQuoteSource
 from . import bayes
 from .admission import AdmissionError, evaluate_artifact, load_policy
+from .raw_replay import verify_raw_artifact
 from .skeptic import Criteria
 from .signals import default_strategies
 from .scribe import EXECUTION_RESULT, KINDS, POSITION_EXIT, POSITION_OPENED, STATE, read_jsonl, verify_jsonl
@@ -189,7 +190,7 @@ class ScalperPaperHost:
             self._write_checkpoint(ledger_path, desk)
 
     def _strategy_review(self, *, currency: str = "", instrument: dict[str, Any] | None = None,
-                         expected_costs: dict[str, Any] | None = None) -> dict[str, Any]:
+                         expected_costs: dict[str, Any] | None = None, config: Any | None = None) -> dict[str, Any]:
         criteria = Criteria()
         policy = None
         policy_error = ""
@@ -208,9 +209,15 @@ class ScalperPaperHost:
                 reason = "verified instrument and exact observed cost settings are required before evidence can be matched"
             else:
                 artifact_path = self.evidence_dir / f"{strategy.fingerprint}.json"
+                verifier = None
+                if config is not None:
+                    verifier = lambda path, document, s=strategy: verify_raw_artifact(
+                        path, document, config=config, strategy=s,
+                        instrument=instrument or {}, expected_costs=expected_costs or {})
                 result = evaluate_artifact(artifact_path, policy=policy,
                                            strategy=strategy.spec(), instrument=instrument,
-                                           expected_costs=expected_costs)
+                                           expected_costs=expected_costs,
+                                           replay_verifier=verifier)
                 reason = result.reason
             candidates.append({
                 **strategy.spec(),
@@ -221,7 +228,7 @@ class ScalperPaperHost:
                 "artifact_path": str(self.evidence_dir / f"{strategy.fingerprint}.json"),
                 "required_evidence": [
                     "trusted Ed25519 reviewer signature, distinct from strategy developers",
-                    "production independent raw-tick replay verifier (not wired; blocks all admission)",
+                    "axiom_scalper_raw_replay_v1 over signed broker CSV, train calibration, validation/test, and declared walk-forward PAPER replays",
                     "digest-verified broker historical/tick dataset and date range",
                     "chronological train/validation/test separation and walk-forward folds",
                     "net expectancy with bootstrap confidence, and a win-rate confidence bound",
@@ -311,7 +318,8 @@ class ScalperPaperHost:
             if state not in {"DISCONNECTED", "BLOCKED"}:
                 state, reason = "BLOCKED", exc.reason
         review = self._strategy_review(currency=str(account.get("currency") or ""),
-                                       instrument=instrument_view, expected_costs=expected_costs)
+                                       instrument=instrument_view, expected_costs=expected_costs,
+                                       config=config if connected and "config" in locals() else None)
         start_allowed = bool(connected and not recovery and not running and instrument_view
                              and state == "STOPPED")
         return {
@@ -348,7 +356,8 @@ class ScalperPaperHost:
             except LiveScalperConfigError as exc:
                 return self._refuse(exc.reason, exc.remediation)
             review = self._strategy_review(currency=currency, instrument=config.instruments[0].audit_view(),
-                                           expected_costs={"currency": currency, **config.cost.audit_view()})
+                                           expected_costs={"currency": currency, **config.cost.audit_view()},
+                                           config=config)
             eligible = {item["fingerprint"]: item for item in review["candidates"] if item["eligible"]}
             strategies = tuple(item for item in default_strategies() if item.fingerprint in eligible)
             admitted_outcomes = bayes.OutcomeBook()

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 POLICY_SCHEMA = "axiom-scalper-admission-policy-v1"
-EVIDENCE_SCHEMA = "axiom-scalper-evidence-v1"
+EVIDENCE_SCHEMA = "axiom-scalper-evidence-v2"
 EVALUATION_METHOD = "chronological_holdout_walk_forward_v1"
 _POLICY_FIELDS = (
     "currency", "min_total_trades", "min_oos_trades", "min_walk_forward_folds",
@@ -473,10 +473,31 @@ def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
         except Exception as exc:
             return refuse("evidence_raw_replay_failed", type(exc).__name__, metrics)
         if not isinstance(reproduced, Mapping) or reproduced.get("verified") is not True:
-            return refuse("evidence_raw_replay_mismatch", metrics=metrics)
+            reason = str(reproduced.get("reason") or "evidence_raw_replay_mismatch") if isinstance(reproduced, Mapping) else "evidence_raw_replay_mismatch"
+            return refuse(reason, metrics=metrics)
         if any(str(reproduced.get(key) or "") != str(replay_manifest.get(key) or "")
                for key in ("replay_version", "engine_digest", "input_digest", "output_digest")):
             return refuse("evidence_raw_replay_digest_mismatch", metrics=metrics)
+        if replay_manifest.get("replay_version") == "axiom_scalper_raw_replay_v1":
+            replay_results = reproduced.get("results")
+            replay_test = replay_results.get("test") if isinstance(replay_results, Mapping) else None
+            actual_trades = replay_test.get("account_trades") if isinstance(replay_test, Mapping) else None
+            claimed_test = [row for row in rows if row.get("split") == "test"]
+            if not isinstance(actual_trades, list) or len(actual_trades) != len(claimed_test):
+                return refuse("evidence_replayed_test_trade_count_mismatch", metrics=metrics)
+            try:
+                for actual, claimed in zip(actual_trades, claimed_test):
+                    close_at = datetime.fromtimestamp(int(actual["closed_at_ms"]) / 1000, tz=timezone.utc)
+                    timestamp = datetime.fromisoformat(str(claimed["timestamp"]))
+                    gross = _decimal(actual.get("gross_account"), "gross_account")
+                    net = _decimal(actual.get("net_account"), "net_account")
+                    if (timestamp != close_at or str(claimed.get("regime")) != str(actual.get("regime"))
+                            or abs(_decimal(claimed.get("gross_account"), "gross_account") - gross) > Decimal("0.000001")
+                            or abs(_decimal(claimed.get("cost_account"), "cost_account") - (gross-net)) > Decimal("0.000001")
+                            or abs(_decimal(claimed.get("net_account"), "net_account") - net) > Decimal("0.000001")):
+                        return refuse("evidence_replayed_test_trade_mismatch", metrics=metrics)
+            except (KeyError, TypeError, ValueError, AdmissionError, OverflowError):
+                return refuse("evidence_replayed_test_trade_claim_invalid", metrics=metrics)
         return AdmissionResult(True, "eligible_under_signed_policy_and_reproduced_replay", metrics,
                                fingerprint, reviewer, str(target))
     except (AdmissionError, KeyError, TypeError, ValueError, OverflowError) as exc:
