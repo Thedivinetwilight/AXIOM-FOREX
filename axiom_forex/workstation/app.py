@@ -202,6 +202,7 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "autopilot-flat",
         "autopilot-kronos",
         "scalper-paper-start",
+        "scalper-paper-observe",
         "scalper-paper-stop",
         "scalper-paper-select-symbol",
         "scalper-paper-acknowledge-recovery",
@@ -1134,7 +1135,7 @@ class WorkstationApp:
     def _autopilot_action(
         self, action: str, form: Mapping[str, list[str]]
     ) -> tuple[int, str, str]:
-        if self.autopilot is None and action not in {"scalper-paper-start", "scalper-paper-stop", "scalper-paper-select-symbol", "scalper-paper-acknowledge-recovery"}:
+        if self.autopilot is None and action not in {"scalper-paper-start", "scalper-paper-observe", "scalper-paper-stop", "scalper-paper-select-symbol", "scalper-paper-acknowledge-recovery"}:
             return (
                 HTTPStatus.CONFLICT,
                 "/autopilot",
@@ -1146,7 +1147,7 @@ class WorkstationApp:
                 continue
             payload[name] = values if len(values) > 1 else (values[0] if values else "")
         try:
-            if action in {"scalper-paper-start", "scalper-paper-stop", "scalper-paper-select-symbol", "scalper-paper-acknowledge-recovery"}:
+            if action in {"scalper-paper-start", "scalper-paper-observe", "scalper-paper-stop", "scalper-paper-select-symbol", "scalper-paper-acknowledge-recovery"}:
                 if self.scalper_paper is None:
                     outcome = {
                         "ok": False,
@@ -1157,6 +1158,8 @@ class WorkstationApp:
                     outcome = dict(
                         self.scalper_paper.start()
                         if action == "scalper-paper-start"
+                        else self.scalper_paper.start(observation_only=True)
+                        if action == "scalper-paper-observe"
                         else self.scalper_paper.stop()
                         if action == "scalper-paper-stop"
                         else self.scalper_paper.select_symbol(

@@ -41,6 +41,7 @@ class ScalperPaperHost:
         self._lock = threading.RLock()
         self._ledger_lock = threading.RLock()
         self._last_result: dict[str, Any] = {}
+        self._observation_only = False
 
     @staticmethod
     def _checkpoint_path(ledger: Path) -> Path:
@@ -300,6 +301,7 @@ class ScalperPaperHost:
                 expected_costs = {"currency": currency, **config.cost.audit_view()}
                 config_view = {
                     "symbol": config.instruments[0].symbol,
+                    "max_quote_age_ms": config.max_quote_age_ms,
                     "point": str(config.instruments[0].point),
                     "contract_size": str(config.instruments[0].contract_size),
                     "capital": str(capital), "currency": currency,
@@ -320,8 +322,14 @@ class ScalperPaperHost:
         review = self._strategy_review(currency=str(account.get("currency") or ""),
                                        instrument=instrument_view, expected_costs=expected_costs,
                                        config=config if connected and "config" in locals() else None)
-        start_allowed = bool(connected and not recovery and not running and instrument_view
-                             and state == "STOPPED")
+        observation_start_allowed = bool(connected and not recovery and not running and instrument_view
+                                         and state == "STOPPED")
+        trading_start_allowed = bool(observation_start_allowed and review.get("trade_admission_open"))
+        quote_age = quote_status.get("quote_age_seconds")
+        quote_fresh = bool(running and quote_age is not None
+                           and int(float(quote_age) * 1000) <= int(config_view.get("max_quote_age_ms", 0))
+                           and int((quote_status.get("accepted_ticks_by_symbol") or {}).get(
+                               str(config_view.get("symbol") or ""), 0)) > 0)
         return {
             "available": True, "mode": PAPER, "source": "MT5_LIVE_PAPER",
             "state": state, "connected": connected, "reason": reason,
@@ -334,12 +342,22 @@ class ScalperPaperHost:
                 "confirmed_action": "KEEP_PAPER_BOOK_BLOCKED",
                 "action_effect": "review is recorded; positions, ledgers and blockers remain unchanged",
             },
-            "strategy_review": review, "start_allowed": start_allowed,
+            "strategy_review": review,
+            "observation_start_allowed": observation_start_allowed,
+            "start_allowed": trading_start_allowed,
+            "quote_fresh": quote_fresh,
+            "trading_ready": bool(review.get("trade_admission_open") and running and not recovery
+                                  and quote_fresh),
+            "observation_only": bool(self._observation_only and running),
+            "live_handoff": {"available": False, "status": "BLOCKED",
+                             "reason": "scalper_live_intent_handoff_not_implemented",
+                             "route": "No scalper order route exists; LIVE review remains exclusively on /live."},
             "last_result": dict(self._last_result),
             "ledger": str(self.ledger_path or ""),
         }
 
-    def start(self) -> dict[str, Any]:
+    def start(self, *, observation_only: bool = False) -> dict[str, Any]:
+        """Start entries only for admitted evidence, or a distinct no-entry observer."""
         with self._lock:
             if self.pump and self.pump.status().get("state") == "RUNNING":
                 return {"ok": False, "reason": "already_running", "message": "AX-SCALPER PAPER is already running."}
@@ -359,7 +377,11 @@ class ScalperPaperHost:
                                            expected_costs={"currency": currency, **config.cost.audit_view()},
                                            config=config)
             eligible = {item["fingerprint"]: item for item in review["candidates"] if item["eligible"]}
-            strategies = tuple(item for item in default_strategies() if item.fingerprint in eligible)
+            if not observation_only and not eligible:
+                return self._refuse("no_admitted_strategy",
+                    "No candidate passed the signed policy and independent raw replay. PAPER decision start is blocked; choose the separate observation-only action if you only need quotes.")
+            strategies = (() if observation_only else
+                          tuple(item for item in default_strategies() if item.fingerprint in eligible))
             admitted_outcomes = bayes.OutcomeBook()
             for fingerprint, candidate in eligible.items():
                 for regime, counts in candidate["metrics"].get("regime_outcomes", {}).items():
@@ -405,10 +427,11 @@ class ScalperPaperHost:
                 return self._refuse(str(outcome.get("reason") or "runner_start_refused"),
                                     "No PAPER decisions were started; check the connected session and local settings.")
             self.desk, self.pump, self.ledger_path = desk, pump, ledger_path
+            self._observation_only = bool(observation_only)
             self._last_result = {"ok": True, "reason": "", "message": (
                 "AX-SCALPER PAPER quote observation started. "
-                + ("Only strategy fingerprints passing signed-evidence policy are enabled. " if strategies else
-                   "No strategy passed signed-evidence policy; this is observation-only and generates no trades. ")
+                + ("Only independently replayed, policy-approved strategy fingerprints are enabled. " if strategies else
+                   "Observation-only: no strategies are attached and no PAPER entries or trades can be generated. ")
                 + "This is PAPER only; it does not imply profitability or authorize LIVE execution.")}
             return {**self._last_result, **self.status()}
 
@@ -489,6 +512,7 @@ class ScalperPaperHost:
                                         actor="workstation", state="paper_stopped_positions_left_open",
                                         open_positions=[item.audit_view() for item in self.desk.book.open_positions])
                 self._persist_run(self.desk, self.ledger_path)
+            self._observation_only = False
             self._last_result = {"ok": True, "reason": "", "message": "AX-SCALPER PAPER stopped. Local paper positions remain open and were not flattened."}
             return {**self._last_result, **status, "ledger": str(self.ledger_path or "")}
 

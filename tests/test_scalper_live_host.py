@@ -116,6 +116,20 @@ def test_host_strategy_review_fails_closed_until_independent_oos_evidence(tmp_pa
     assert all(not item["eligible"] for item in review["candidates"])
 
 
+def test_no_evidence_blocks_decisions_but_explicit_observer_has_no_strategies(tmp_path):
+    session, config_path, capital_root, ledger_dir = setup(tmp_path)
+    host = ScalperPaperHost(session=session, config_path=config_path,
+                            paper_root=capital_root, ledger_dir=ledger_dir)
+    blocked = host.start()
+    assert not blocked["ok"] and blocked["reason"] == "no_admitted_strategy"
+    assert not ledger_dir.exists()
+    observed = host.start(observation_only=True)
+    assert observed["ok"] and observed["observation_only"] is True
+    assert host.desk is not None and not host.desk.strategies
+    host.stop()
+    assert session.terminal.mutations == []
+
+
 def test_live_config_uses_verified_broker_spec_and_local_paper_capital(tmp_path):
     session, config_path, capital_root, _ = setup(tmp_path)
     config, capital, currency = load_live_paper_config(session=session,
@@ -156,9 +170,9 @@ def test_host_start_stop_persists_fills_as_separate_verified_paper_ledger(tmp_pa
     host = ScalperPaperHost(session=session, config_path=config_path,
                             paper_root=capital_root, ledger_dir=ledger_dir)
     assert host.status()["account_type"] == "DEMO"
-    started = host.start()
+    started = host.start(observation_only=True)
     assert started["ok"] and started["mode"] == "PAPER"
-    assert "observation-only" in started["message"]
+    assert "observation-only" in started["message"].lower()
     assert host.desk.strategies == ()
     deadline = time.monotonic() + 2
     while session.terminal.reads == 0 and time.monotonic() < deadline:
@@ -240,7 +254,7 @@ def test_truncated_checkpointed_ledger_blocks_start_without_repair(tmp_path):
     session, config_path, capital_root, ledger_dir = setup(tmp_path)
     host = ScalperPaperHost(session=session, config_path=config_path,
                             paper_root=capital_root, ledger_dir=ledger_dir)
-    started = host.start()
+    started = host.start(observation_only=True)
     assert started["ok"]
     stopped = host.stop()
     ledger = Path(stopped["ledger"])

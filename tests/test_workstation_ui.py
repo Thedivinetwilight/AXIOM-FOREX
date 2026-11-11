@@ -738,6 +738,7 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "autopilot-flat",
         "autopilot-kronos",
         "scalper-paper-start",
+        "scalper-paper-observe",
         "scalper-paper-stop",
         "scalper-paper-select-symbol",
         "scalper-paper-acknowledge-recovery",

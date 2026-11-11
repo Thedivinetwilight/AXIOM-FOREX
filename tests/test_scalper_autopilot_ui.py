@@ -11,6 +11,8 @@ class FakeScalper:
     def status(self):
         return {"available": True, "state": "STOPPED", "mode": "PAPER",
                 "source": "MT5_LIVE_PAPER", "connected": False, "start_allowed": False,
+                "observation_start_allowed": False, "trading_ready": False,
+                "observation_only": False, "live_handoff": {"reason": "blocked"},
                 "account_type": "UNKNOWN", "config": {"reason": "terminal_not_connected",
                 "remediation": "Press Connect on Setup."}, "symbols": [],
                 "symbol_exclusions": [], "recovery": [], "quote": {}, "paper_only": True,
@@ -23,8 +25,8 @@ class FakeScalper:
                 "rule_version": "v1", "fingerprint": "abc", "eligible": False,
                 "reason": "no independent OOS evidence"}],
                 "live_route": "No candidate is eligible."}}
-    def start(self):
-        self.calls.append("start")
+    def start(self, *, observation_only=False):
+        self.calls.append(("start", observation_only))
         return {"ok": False, "reason": "terminal_not_connected",
                 "message": "Press Connect on Setup."}
     def stop(self):
@@ -42,15 +44,17 @@ class FakeScalper:
 def test_start_stop_handlers_require_nonce_and_return_visible_result():
     host = FakeScalper()
     app = WorkstationApp(wizard=SimpleNamespace(session=SimpleNamespace(source=None)), scalper_paper=host)
-    assert {"scalper-paper-start", "scalper-paper-stop", "scalper-paper-select-symbol"} <= POST_ACTIONS
+    assert {"scalper-paper-start", "scalper-paper-observe", "scalper-paper-stop", "scalper-paper-select-symbol"} <= POST_ACTIONS
     status, _, message = app.act("scalper-paper-start", {"nonce": ["stale"]})
     assert status == 403 and "stale" in message and host.calls == []
     status, _, message = app.act("scalper-paper-start", {})
     assert status == 403 and host.calls == []
     status, path, message = app.act("scalper-paper-start", {"nonce": [app.nonce]})
     assert status == 409 and path == "/autopilot" and "Connect" in message
+    status, path, _ = app.act("scalper-paper-observe", {"nonce": [app.nonce]})
+    assert status == 409 and path == "/autopilot" and host.calls[-1] == ("start", True)
     status, path, _ = app.act("scalper-paper-stop", {"nonce": [app.nonce]})
-    assert status == 303 and path == "/autopilot" and host.calls == ["start", "stop"]
+    assert status == 303 and path == "/autopilot" and host.calls[-1] == "stop"
     status, path, _ = app.act("scalper-paper-select-symbol",
                               {"nonce": [app.nonce], "symbol": ["EURUSD.pro"]})
     assert status == 303 and path == "/autopilot" and host.calls[-1] == ("select_symbol", "EURUSD.pro")
@@ -68,13 +72,15 @@ def test_autopilot_card_has_explicit_paper_label_and_handled_actions():
     assert "cannot send or close broker orders" in html
 
 
-def test_ready_connected_status_shows_paper_observation_start():
+def test_connected_without_admission_offers_observation_only_not_paper_decisions():
     view = FakeScalper().status()
-    view.update(connected=True, start_allowed=True)
-    view["config"] = {"symbol": "EURUSD.pro"}
+    view.update(connected=True, observation_start_allowed=True, start_allowed=False)
+    view["config"] = {"symbol": "EURUSD.pro", "risk": {"max_quote_age_ms": 1500}}
     html = _render_scalper_paper_card(view, "nonce-value")
-    assert "Start AX-SCALPER PAPER" in html
-    assert "action='/actions/scalper-paper-start'" in html
+    assert "Start quote observation only" in html
+    assert "no strategies attached" in html
+    assert "action='/actions/scalper-paper-observe'" in html
+    assert "Start admitted PAPER decisions" not in html
 
 
 def test_strategy_review_is_visible_and_symbol_picker_offers_exact_verified_names():

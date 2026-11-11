@@ -8577,6 +8577,18 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
                    "This is a local simulated paper book using live terminal quotes. "
                    "It is separate from the connected account's "
                    f"{escape(str(view.get('account_type') or 'UNKNOWN'))} account and cannot send or close broker orders.")]
+    review_state = dict(view.get("strategy_review") or {})
+    handoff = dict(view.get("live_handoff") or {})
+    body.append(dl((
+        ("Quote observation", "connected" if view.get("connected") else "disconnected"),
+        ("Quote freshness", "not measured" if quote.get("quote_age_seconds") is None else
+         ("stale" if float(quote.get("quote_age_seconds") or 0) * 1000 > int(dict(config.get("risk") or {}).get("max_quote_age_ms", 0)) else "within configured age")),
+        ("Admitted strategy readiness", "admitted" if review_state.get("trade_admission_open") else "blocked — no admitted candidate"),
+        ("PAPER session", "observation-only — entries disabled" if view.get("observation_only") else
+         "running PAPER decisions" if state == "RUNNING" else "not running"),
+        ("Stored-book recovery", "blocked — exact restore unavailable" if view.get("recovery") else "no unresolved stored book detected"),
+        ("LIVE handoff", escape(str(handoff.get("reason") or "blocked / unavailable"))),
+    )))
     if result.get("message"):
         body.append(notice("ok" if result.get("ok") else "warn", "Last AX-SCALPER action", str(result["message"])))
     risk_names = {
@@ -8602,7 +8614,7 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     }
     risk_rows = tuple((risk_names.get(str(k), str(k).replace("_", " ")), escape(str(v)))
                       for k, v in dict(config.get("risk") or {}).items())
-    strategy_review = dict(view.get("strategy_review") or {})
+    strategy_review = review_state
     policy = dict(strategy_review.get("effective_policy") or {})
     body.append(dl((
         ("Strategy admission", escape(str(strategy_review.get("decision") or "No strategy evidence available; no trade."))),
@@ -8726,8 +8738,11 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
         body.append(action_form("scalper-paper-stop", nonce, "Stop AX-SCALPER PAPER", tone="primary") +
                     "<p class='small muted'>Stop halts new decisions, appends the ledger, and leaves local paper positions open. It does not flatten or touch the connected account.</p>")
     elif view.get("start_allowed"):
-        body.append(action_form("scalper-paper-start", nonce, "Start AX-SCALPER PAPER", tone="primary") +
-                    "<p class='small muted'>Only strategies passing the exact-fingerprint signed evidence and typed-policy checks are enabled. Start uses explicit observation-session Connect and locally simulated PAPER fills only; LIVE is separate.</p>")
+        body.append(action_form("scalper-paper-start", nonce, "Start admitted PAPER decisions", tone="primary") +
+                    "<p class='small muted'>Starts only strategies independently replayed and admitted by the configured policy. Fills remain local PAPER simulations; LIVE is separate.</p>")
+    elif view.get("observation_start_allowed"):
+        body.append(action_form("scalper-paper-observe", nonce, "Start quote observation only", tone="primary") +
+                    "<p class='small muted'>No candidate is admitted. This starts a feed observer with no strategies attached, no entries and no simulated trades.</p>")
     else:
         blocker = str(view.get("reason") or config.get("reason") or "signed evidence / admission policy required")
         body.append(notice("warn", "Start blocked — no PAPER session launched", escape(blocker)))
