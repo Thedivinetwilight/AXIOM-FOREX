@@ -171,6 +171,7 @@ class LiveTrading:
         audit_log: Any = None,
         live_interval_seconds: int = 0,
         settings_path: Any = None,
+        scalper_bridge: Any = None,
     ) -> None:
         self.adapter = adapter
         self.mode = mode
@@ -193,6 +194,9 @@ class LiveTrading:
         #: The local settings document the adapter was built from.  Read only, to
         #: tell the operator when the file and the running adapter disagree.
         self.settings_path = settings_path
+        #: Optional AX-SCALPER typed-intent bridge. It owns no order route; its
+        #: only submission calls the same LiveLeg this workflow already builds.
+        self.scalper_bridge = scalper_bridge
         #: Why the stored plan could not be read, if it could not (e.g. it predates
         #: the protective-stop requirement and must be reviewed again).
         self.plan_error = ""
@@ -259,7 +263,7 @@ class LiveTrading:
     def blank_values(self) -> dict[str, str]:
         """The form starts empty: nothing is preselected or defaulted."""
 
-        return {
+        values = {
             "candidate_id": "",
             "pair": "",
             "timeframe": "",
@@ -268,6 +272,10 @@ class LiveTrading:
             "max_daily_loss_account": "",
             "protective_stop_pips": "",
         }
+        values.update({
+            f"scalper_{field}": "" for field in plans.SCALPER_BINDING_FIELDS
+        })
+        return values
 
     def symbol_choices(self) -> list[str]:
         setup, reason = self._setup()
@@ -277,33 +285,43 @@ class LiveTrading:
 
     # -- validation ------------------------------------------------------
 
-    def build(self, values: Mapping[str, Any]) -> tuple[dict[str, Any] | None, tuple[plans.PlanProblem, ...]]:
+    def build(self, values: Mapping[str, Any], *, candidates: Sequence[Any] | None = None) -> tuple[dict[str, Any] | None, tuple[plans.PlanProblem, ...]]:
+        """Validate the form. An exact candidate list bypasses evidence lookup.
+
+        The typed AX-SCALPER bridge supplies the one candidate whose signed
+        independent replay it just verified. A separate catalog lookup must not
+        silently downgrade or replace that evidence.
+        """
         setup, _ = self._setup()
-        items = []
-        for item in self.candidates:
-            evidence = dict(getattr(item, "evidence", {}) or {})
-            if self.evidence_lookup is not None:
-                try:
-                    evidence = {**evidence, **dict(self.evidence_lookup(
-                        str(getattr(item, "candidate_id", ""))
-                    ) or {})}
-                except Exception:
-                    pass
-            items.append(_with_evidence(item, evidence))
+        if candidates is not None:
+            items = tuple(candidates)
+        else:
+            items = []
+            for item in self.candidates:
+                evidence = dict(getattr(item, "evidence", {}) or {})
+                if self.evidence_lookup is not None:
+                    try:
+                        evidence = {**evidence, **dict(self.evidence_lookup(
+                            str(getattr(item, "candidate_id", ""))
+                        ) or {})}
+                    except Exception:
+                        pass
+                items.append(_with_evidence(item, evidence))
         return plans.build_plan(values, setup=setup, candidates=items, now=self.clock())
 
-    def review(self, values: Mapping[str, Any]) -> dict[str, Any]:
+    def review(self, values: Mapping[str, Any], *, candidates: Sequence[Any] | None = None) -> dict[str, Any]:
         """Validate the form and describe exactly what arming would authorise."""
 
         setup, setup_reason = self._setup()
-        document, problems = self.build(values)
+        document, problems = self.build(values, candidates=candidates)
         blockers = self.blockers(values, document=document)
         view = {
             "ok": not problems and not blockers,
             "values": {key: str(values.get(key, "") or "").strip() for key in
                        ("candidate_id", "pair", "timeframe", "quantity",
                         "max_open_positions", "max_daily_loss_account",
-                        "protective_stop_pips")},
+                        "protective_stop_pips",
+                        *(f"scalper_{field}" for field in plans.SCALPER_BINDING_FIELDS))},
             "problems": [item.audit_view() for item in problems],
             "blockers": [item.audit_view() for item in blockers],
             "plan": plans.plan_view(document),
@@ -719,6 +737,7 @@ class LiveTrading:
         confirmation: str = "",
         reviewed: bool = False,
         account_confirmation: str = "",
+        candidates: Sequence[Any] | None = None,
     ) -> ArmResult:
         """Write the plan and arm the broker, or refuse without doing either.
 
@@ -727,7 +746,7 @@ class LiveTrading:
         account in the terminal later refuses the order instead of receiving it.
         """
 
-        document, problems = self.build(values)
+        document, problems = self.build(values, candidates=candidates)
         blockers = list(self.blockers(values, document=document))
         if problems:
             blockers.extend(Blocker(PLAN_INVALID, plans.describe_problem(item)) for item in problems)
@@ -1071,9 +1090,13 @@ class LiveTrading:
 
     # -- read model ------------------------------------------------------
 
-    def view(self, *, runner: Any = None) -> dict[str, Any]:
-        """Everything the Live execution page shows.  Reads only."""
+    def scalper_live_facts(self, *, runner: Any = None) -> dict[str, Any]:
+        """Authoritative, read-only facts shared with the typed-intent bridge.
 
+        This deliberately does not read the bridge view.  The /live page passes
+        the result into that view; a direct bridge view call reads it here.  The
+        two read models therefore cannot recurse into one another.
+        """
         adapter = self.adapter
         blockers = list(self.blockers())
         status: dict[str, Any] = {}
@@ -1088,24 +1111,69 @@ class LiveTrading:
                 runner_view = dict(runner.view() or {})
             except Exception:
                 runner_view = {}
-        connected = bool(status.get("connected", False))
-        armed = bool(status.get("armed", False))
-        live_effective = str(getattr(self.mode, "mode", "") or "").upper() == "LIVE" and bool(
-            getattr(self.mode, "live_effective", False)
-        )
-        plan = plans.plan_view(self.plan)
         session_view: dict[str, Any] = {}
         if self.session is not None:
             try:
                 session_view = dict(self.session.view() or {})
             except Exception:
                 session_view = {}
+        connected = bool(status.get("connected", False))
+        armed = bool(status.get("armed", False))
+        live_effective = str(getattr(self.mode, "mode", "") or "").upper() == "LIVE" and bool(
+            getattr(self.mode, "live_effective", False)
+        )
+        running = bool(runner_view.get("running", session_view.get("running", False)))
+        return {
+            "adapter_present": adapter is not None,
+            "status": status,
+            "runner_view": runner_view,
+            "session_view": session_view,
+            "connected": connected,
+            "armed": armed,
+            "mode": str(getattr(self.mode, "mode", "") or ""),
+            "live_effective": live_effective,
+            "blockers": [item.audit_view() for item in blockers],
+            "positions": self._broker_positions(),
+            "account": self._account_facts(),
+            "account_fingerprint": str(status.get("account_fingerprint", "") or ""),
+            "confirmed_account_fingerprint": self.confirmed_account_fingerprint(),
+            "session_running": running,
+            "next_signal_sends_real_order": bool(
+                armed and connected and live_effective and running and not blockers
+            ),
+        }
+
+    def view(self, *, runner: Any = None) -> dict[str, Any]:
+        """Everything the Live execution page shows.  Reads only."""
+
+        facts = self.scalper_live_facts(runner=runner)
+        status = dict(facts["status"])
+        runner_view = dict(facts["runner_view"])
+        session_view = dict(facts["session_view"])
+        blocker_views = list(facts["blockers"])
+        connected = bool(facts["connected"])
+        armed = bool(facts["armed"])
+        live_effective = bool(facts["live_effective"])
+        plan = plans.plan_view(self.plan)
         stop = _decimal(self.plan.get("protective_stop_pips"))
         stop_setting = self.stop_setting()
         broker_stop = self._broker_stop_facts(stop_setting)
+        positions = list(facts["positions"])
+        account_facts = dict(facts["account"])
+        scalper_live: dict[str, Any] = {"available": self.scalper_bridge is not None}
+        if self.scalper_bridge is not None:
+            try:
+                scalper_live = {**scalper_live, **dict(self.scalper_bridge.view(live_view=facts))}
+            except Exception as exc:
+                scalper_live = {
+                    "available": True,
+                    "error": "scalper_live_view_unreadable",
+                    "detail": type(exc).__name__,
+                    "submission_available": False,
+                }
         return {
-            "configured": adapter is not None,
-            "adapter_present": adapter is not None,
+            "configured": facts["adapter_present"],
+            "adapter_present": facts["adapter_present"],
             "live_timeframe": self.live_timeframe,
             "live_interval_seconds": int(self.live_interval_seconds),
             "timeframes": list(plans.TIMEFRAMES),
@@ -1120,36 +1188,26 @@ class LiveTrading:
             "mode": str(getattr(self.mode, "mode", "") or "PAPER"),
             "live_effective": live_effective,
             "trading_enabled": bool(status.get("trading_enabled_setting", False)),
-            "account": self._account_facts(),
+            "account": account_facts,
             "account_mode": str(status.get("account_mode", "")),
             "unresolved": list(status.get("unresolved_orders", []) or []),
-            "positions": self._broker_positions(),
+            "positions": positions,
             "stop_setting": stop_setting,
             "broker_stop": broker_stop,
             "warnings": self._stop_warnings(broker_stop),
             "plan": plan,
             "plan_path": str(self.plan_path or ""),
-            "blockers": [item.audit_view() for item in blockers],
-            "ready_to_arm": not blockers,
+            "blockers": blocker_views,
+            "ready_to_arm": not blocker_views,
             "review": dict(self.last_review),
             "last_refusal": dict(self.last_refusal),
             "confirmation_phrase": ARM_CONFIRMATION_PHRASE,
-            "account_fingerprint": self.confirmed_account_fingerprint(),
+            "account_fingerprint": facts["confirmed_account_fingerprint"],
             "candidates": self.candidate_choices(),
             "symbols": self.symbol_choices(),
             "runner": runner_view or session_view,
-            "session_running": bool(
-                runner_view.get("running", session_view.get("running", False))
-            ),
-            "next_signal_sends_real_order": bool(
-                armed
-                and connected
-                and live_effective
-                and bool(
-                    runner_view.get("running", session_view.get("running", False))
-                )
-                and not blockers
-            ),
+            "session_running": bool(facts["session_running"]),
+            "next_signal_sends_real_order": bool(facts["next_signal_sends_real_order"]),
             "orders_sent": int(
                 runner_view.get("live_orders", session_view.get("live_orders", 0)) or 0
             ),
@@ -1158,6 +1216,7 @@ class LiveTrading:
             ),
             "session_state": str(session_view.get("state", "")),
             "stopped_reason": str(session_view.get("stopped_reason", "")),
+            "scalper_live": scalper_live,
         }
 
     def summary(self) -> dict[str, Any]:

@@ -940,6 +940,11 @@ def _wire_live(args, app, *, settings, settings_path: Path, extra_candidates: An
             else None
         ),
         audit_log=getattr(getattr(app, "platform", None), "audit_log", None),
+        # Read the PAPER host's signed-evidence admission; this does not promote
+        # a PAPER result or open its blocked handoff. A missing or failing policy
+        # leaves the separate exact-plan LIVE bridge fail-closed.
+        scalper_host=getattr(app, "scalper_paper", None),
+        scalper_approval_path=settings_path.parent / "scalper_live_approval.local.json",
     )
     if live is not None:
         print(

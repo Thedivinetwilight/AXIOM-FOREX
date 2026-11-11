@@ -18,10 +18,172 @@ Assembly sends nothing, connects nothing, and arms nothing.  It builds:
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Any, Callable, Mapping, Sequence
 
-from .live_plan import PLAN_FILENAME
+from ..scalper.live_approval import plan_fingerprint
+from ..scalper.live_bridge import (
+    ScalperLiveIntentBridge,
+    blocked_evidence_gate,
+    paper_host_evidence_gate,
+    scalper_host_policy,
+)
+from .live_host import LiveRunnerHost, OwnerThreadLeg, OwnerThreadPlatform
+from .live_plan import PLAN_FILENAME, SCALPER_BINDING_FIELDS
 from .live_workflow import ArmedStrategy, LiveTrading
+
+
+class UnavailableOneShotPlatform:
+    """A planning stack has not been resolved; every exact identity check fails closed."""
+
+
+class UnavailableOneShotLeg:
+    """No owner-thread one-shot stack exists; no order can be executed."""
+
+    one_shot_ready = False
+
+    def status(self) -> dict[str, Any]:
+        return {"configured": False, "ready": False, "active": False,
+                "blockers": [{"reason": "one_shot_stack_unavailable",
+                              "message": "The exact one-shot stack is not prepared.", "hint": ""}]}
+
+    def execute(self, _plan: Any) -> dict[str, Any]:
+        raise RuntimeError("one_shot_stack_unavailable")
+
+    def reconcile(self) -> dict[str, Any]:
+        return {"available": False, "reconciled": False,
+                "reason": "one_shot_stack_unavailable", "recovered": []}
+
+    def close(self) -> None:
+        return None
+
+
+class OneShotStackFactory:
+    """Resolve the exact planning platform and the one owner-thread live leg.
+
+    Read-only exact checks use a planning platform built on the calling thread.
+    An armed submission uses a dedicated LiveRunnerHost whose worker thread
+    builds the provider platform and the *existing* LiveLeg; the bridge receives
+    only owner-thread proxies. Starting a host here starts no strategy runner.
+    """
+
+    def __init__(self, *, live: LiveTrading,
+                 platform_factory: Callable[[str], Any],
+                 session_factory: Callable[[Mapping[str, Any]], Any]):
+        self.live = live
+        self.platform_factory = platform_factory
+        self.session_factory = session_factory
+        self._lock = threading.RLock()
+        self._unavailable_leg = UnavailableOneShotLeg()
+        self._planning_pair = ""
+        self._planning_platform: Any = None
+        self._owner_key = ""
+        self._owner_host: LiveRunnerHost | None = None
+        self._owner_stack: tuple[OwnerThreadPlatform, OwnerThreadLeg] | None = None
+
+    @staticmethod
+    def _close_platform(platform: Any) -> None:
+        repository = getattr(platform, "repository", None)
+        close = getattr(repository, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def _close_owner_locked(self) -> None:
+        host = self._owner_host
+        if host is not None:
+            if host.alive:
+                try:
+                    host.submit(lambda: self._close_platform(host.platform))
+                except Exception:
+                    pass
+            try:
+                host.close()
+            except Exception:
+                pass
+        self._owner_host = None
+        self._owner_stack = None
+        self._owner_key = ""
+
+    def _close_planning_locked(self) -> None:
+        if self._planning_platform is not None:
+            self._close_platform(self._planning_platform)
+        self._planning_platform = None
+        self._planning_pair = ""
+
+    def release(self) -> None:
+        with self._lock:
+            self._close_owner_locked()
+            self._close_planning_locked()
+
+    def _owner_ready(self, state: Mapping[str, Any], intent: Any) -> bool:
+        try:
+            if not bool(getattr(self.live, "armed", False)):
+                return False
+            session = getattr(self.live, "session", None)
+            if session is not None:
+                session_view = dict(session.view() or {})
+                if bool(session_view.get("running") or session_view.get("next_signal_sends_real_order")):
+                    return False
+            plan = dict(getattr(self.live, "plan", {}) or {})
+            evidence = dict(state.get("evidence") or {})
+            digest = str(evidence.get("evidence_digest") or "")
+            fingerprint = plan_fingerprint(intent=intent.as_payload(), plan=plan,
+                                           evidence_digest=digest)
+            if fingerprint != str(state.get("plan_fingerprint") or ""):
+                return False
+            bindings = dict(plan.get("scalper_live") or {})
+            if set(bindings) != set(SCALPER_BINDING_FIELDS):
+                return False
+            values = dict(state.get("values") or {})
+            for field in SCALPER_BINDING_FIELDS:
+                if str(bindings.get(field, "") or "") != str(values.get(f"scalper_{field}", "") or ""):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _owner_stack_locked(self, key: str) -> tuple[OwnerThreadPlatform, OwnerThreadLeg]:
+        if self._owner_stack is not None and self._owner_key == key:
+            return self._owner_stack
+        self._close_owner_locked()
+        plan = dict(getattr(self.live, "plan", {}) or {})
+        host = self.session_factory(dict(plan))
+        try:
+            stack = host.one_shot_stack()
+        except Exception:
+            try:
+                host.close()
+            except Exception:
+                pass
+            raise
+        self._owner_host = host
+        self._owner_stack = stack
+        self._owner_key = key
+        return stack
+
+    def _planning_stack_locked(self, pair: str) -> tuple[Any, Any]:
+        if self._planning_pair == pair and self._planning_platform is not None:
+            return self._planning_platform, self._unavailable_leg
+        try:
+            platform = self.platform_factory(pair)
+        except Exception:
+            return UnavailableOneShotPlatform(), self._unavailable_leg
+        self._close_planning_locked()
+        self._planning_pair = pair
+        self._planning_platform = platform
+        return platform, self._unavailable_leg
+
+    def __call__(self, state: Mapping[str, Any], intent: Any, *, prepare: bool = False):
+        key = str(state.get("plan_fingerprint") or "")
+        with self._lock:
+            if self._owner_key and key != self._owner_key:
+                self._close_owner_locked()
+            if prepare and self._owner_ready(state, intent):
+                return self._owner_stack_locked(key)
+            return self._planning_stack_locked(str(intent.symbol))
 
 
 def build_live_workflow(
@@ -42,6 +204,8 @@ def build_live_workflow(
     audit_log: Any = None,
     vault: Any = None,
     pause_seconds: float = 1.0,
+    scalper_host: Any = None,
+    scalper_approval_path: str | Path | None = None,
 ) -> LiveTrading | None:
     """Return the workflow, or ``None`` when this deployment cannot trade live."""
 
@@ -69,6 +233,7 @@ def build_live_workflow(
     #: Live authority is the operator's armed plan, so the adapter's "approved
     #: and active" question is answered by that plan and nothing else.
     armed_strategy = ArmedStrategy()
+    live: LiveTrading | None = None
 
     adapter = make_mt5_adapter(
         settings=settings,
@@ -89,10 +254,11 @@ def build_live_workflow(
         return platform, feed, platform.spec
 
     def session_factory(plan: Mapping[str, Any]) -> LiveRunnerHost:
+        available = tuple(getattr(live, "candidates", ()) or ()) if live is not None else tuple(candidates)
         candidate = next(
             (
                 item
-                for item in candidates
+                for item in available
                 if str(getattr(item, "candidate_id", "")) == str(plan.get("candidate_id", ""))
             ),
             None,
@@ -134,7 +300,7 @@ def build_live_workflow(
             pause_seconds=pause_seconds,
         )
 
-    return LiveTrading(
+    live = LiveTrading(
         adapter=adapter,
         mode=mode,
         plan_path=Path(project_root) / PLAN_FILENAME,
@@ -151,5 +317,39 @@ def build_live_workflow(
         settings_path=settings_path,
     )
 
+    approval_path = (
+        Path(scalper_approval_path)
+        if scalper_approval_path is not None
+        else Path(project_root) / "scalper_live_approval.local.json"
+    )
+    stacks = OneShotStackFactory(
+        live=live,
+        platform_factory=platform_factory,
+        session_factory=session_factory,
+    )
+    bridge = ScalperLiveIntentBridge(
+        repository=repository,
+        live=live,
+        leg=stacks._unavailable_leg,
+        platform=UnavailableOneShotPlatform(),
+        policy=None,
+        approval_path=approval_path,
+        evidence_gate=(
+            paper_host_evidence_gate(scalper_host)
+            if scalper_host is not None
+            else blocked_evidence_gate("independent_replay_admission_unavailable")
+        ),
+        policy_loader=scalper_host_policy(scalper_host) if scalper_host is not None else None,
+        stack_loader=stacks,
+        audit_log=audit_log,
+    )
+    live.scalper_bridge = bridge
+    return live
 
-__all__ = ["build_live_workflow"]
+
+__all__ = [
+    "OneShotStackFactory",
+    "UnavailableOneShotLeg",
+    "UnavailableOneShotPlatform",
+    "build_live_workflow",
+]

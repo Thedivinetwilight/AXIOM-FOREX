@@ -32,6 +32,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable
 
 from .host import READ_TIMEOUT_SECONDS, RunnerSetupRefused
@@ -56,6 +57,93 @@ class _Reply:
     done: threading.Event = field(default_factory=threading.Event)
     value: Any = None
     error: BaseException | None = None
+
+
+class OwnerThreadProxy:
+    """Read attributes and call methods on the live host's owner thread.
+
+    The provider platform owns a SQLite connection and a portfolio that must not
+    be used from a browser request thread.  This proxy keeps every access on the
+    thread that built them; only plain values and results cross the boundary.
+    """
+
+    def __init__(self, host: "LiveRunnerHost", getter: Callable[[], Any]):
+        self._host = host
+        self._getter = getter
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+
+        def read() -> Any:
+            return getattr(self._getter(), name)
+
+        value = self._host.submit(read)
+        if callable(value):
+            def call(*args: Any, **kwargs: Any) -> Any:
+                def invoke() -> Any:
+                    return getattr(self._getter(), name)(*args, **kwargs)
+                return self._host.submit(invoke)
+            return call
+        if value is None or isinstance(value, (str, bytes, int, float, bool,
+                                               Decimal, datetime, dict, list,
+                                               tuple, set, frozenset)):
+            return value
+        return OwnerThreadProxy(self._host, lambda: getattr(self._getter(), name))
+
+
+class OwnerThreadPlatform(OwnerThreadProxy):
+    """The one-shot bridge's view of the owner-thread provider platform."""
+
+    def __init__(self, host: "LiveRunnerHost"):
+        super().__init__(host, lambda: host.platform)
+
+
+class OwnerThreadLeg:
+    """The only one-shot submission surface: the host's existing LiveLeg."""
+
+    one_shot_ready = True
+
+    def __init__(self, host: "LiveRunnerHost"):
+        self.host = host
+
+    def _unavailable(self, reason: str = "one_shot_stack_unavailable") -> dict[str, Any]:
+        return {
+            "configured": False,
+            "ready": False,
+            "active": False,
+            "blockers": [{"reason": reason, "message": "The exact one-shot stack is not prepared.",
+                          "hint": ""}],
+        }
+
+    def execute(self, plan: Any) -> dict[str, Any]:
+        if not self.host.alive or self.host.leg is None:
+            raise RuntimeError("one_shot_stack_unavailable")
+
+        def task() -> dict[str, Any]:
+            return dict(self.host.leg.execute(plan) or {})
+        return self.host.submit(task)
+
+    def status(self) -> dict[str, Any]:
+        if not self.host.alive or self.host.leg is None:
+            return self._unavailable()
+        try:
+            return self.host.submit(lambda: dict(self.host.leg.status() or {}))
+        except Exception as exc:
+            return self._unavailable(f"one_shot_status_unreadable:{type(exc).__name__}")
+
+    def reconcile(self) -> dict[str, Any]:
+        if not self.host.alive or self.host.leg is None:
+            return {"available": False, "reconciled": False,
+                    "reason": "one_shot_stack_unavailable", "recovered": []}
+        try:
+            return self.host.submit(lambda: dict(self.host.leg.reconcile() or {}))
+        except Exception as exc:
+            return {"available": False, "reconciled": False,
+                    "reason": type(exc).__name__, "recovered": []}
+
+    def close(self) -> None:
+        self.host.close()
 
 
 class LiveRunnerHost:
@@ -334,6 +422,30 @@ class LiveRunnerHost:
         self.stopped_reason = ""
         self.stopped_detail = ""
 
+    def prepare_one_shot(self) -> dict[str, Any]:
+        """Build the exact stack and leg on the owner thread; start no runner."""
+        if not self.alive:
+            self.start()
+
+        def task() -> dict[str, Any]:
+            if self.platform is None or self.leg is None:
+                self._build_now()
+            return {
+                "ready": bool(self.platform is not None and self.leg is not None),
+                "runner_started": bool(self.runner is not None and self.runner.state == "RUNNING"),
+                "platform": self.platform is not None,
+                "leg": self.leg is not None,
+            }
+        result = self.submit(task)
+        return dict(result or {})
+
+    def one_shot_stack(self) -> tuple[OwnerThreadPlatform, OwnerThreadLeg]:
+        """Prepare, then return the owner-thread read/execute proxies."""
+        prepared = self.prepare_one_shot()
+        if not prepared.get("ready") or prepared.get("runner_started"):
+            raise RuntimeError("one_shot_stack_refused")
+        return OwnerThreadPlatform(self), OwnerThreadLeg(self)
+
     def _make_leg(self, platform: Any, spec: Any) -> LiveLeg:
         from axiom_forex.execution.mode_router import ExecutionRouter
 
@@ -475,7 +587,7 @@ class LiveRunnerHost:
 
 
 __all__ = [
-    "LiveRunnerHost",
+    "LiveRunnerHost", "OwnerThreadLeg", "OwnerThreadPlatform", "OwnerThreadProxy",
     "STOP_BLOCKED",
     "STOP_BOOKING_FAILED",
     "STOP_DISCONNECTED",

@@ -749,6 +749,15 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         # this layer.
         "autopilot-live-start",
         "autopilot-live-stop",
+        # The guarded AX-SCALPER typed-intent bridge: six separate exact-plan
+        # decisions. Registration, review, approval, arming, one submission and
+        # reconciliation each re-check signed evidence and the exact identity.
+        "scalper-live-register",
+        "scalper-live-review",
+        "scalper-live-approve",
+        "scalper-live-arm",
+        "scalper-live-submit",
+        "scalper-live-reconcile",
         # The full-catalog audit: it reads the stored evaluation record and writes
         # one report file. It evaluates nothing, re-ranks nothing, promotes
         # nothing, and holds no order, arming or mode surface at all.

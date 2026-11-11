@@ -2,7 +2,7 @@
 
 Forex research and paper-trading adaptation based on AXIOM's modular architecture.
 
-**Current status:** repository-only, research/paper mode. Live trading is disabled in the new code; no real-money broker, data provider, account, credential, or running-system integration is enabled. Historical or simulated results are not evidence of profitability or live-trading readiness.
+**Current status:** repository-only, research/paper mode by default. Guarded MT5 live execution is an explicit, in-process opt-in on `/live`; it stays unavailable without an exact plan, confirmed account, independent signed evidence and a separate exact-plan approval. No real-money broker, data provider, account, credential, or running-system integration is enabled by this repository itself. Historical or simulated results are not evidence of profitability or live-trading readiness.
 
 - [Architecture assessment and staged plan](docs/ARCHITECTURE_AND_PLAN.md)
 - [Forex adaptation guide](docs/FOREX_ADAPTATION.md)
@@ -11,6 +11,7 @@ Forex research and paper-trading adaptation based on AXIOM's modular architectur
 - [Historical data import](docs/HISTORICAL_DATA_IMPORT.md)
 - [Multi-pair research evaluation](docs/RESEARCH_EVALUATION.md)
 - [The autopilot: evaluate, select, then follow](docs/AUTOPILOT.md)
+- [Guarded AX-SCALPER one-shot LIVE bridge](docs/SCALPER_LIVE_BRIDGE.md)
 - [Running-system boundary](docs/RUNNING_SYSTEM_BOUNDARY.md)
 
 ## What is implemented
@@ -231,17 +232,21 @@ scripts\update-workstation.cmd
 It updates the branch you already have, in place:
 
 ```bat
-git fetch origin arena/f67c2859-axiom-forex
-git merge --ff-only origin/arena/f67c2859-axiom-forex
+git fetch origin arena/51d820ec-axiom-forex
+git merge --ff-only origin/arena/51d820ec-axiom-forex
 .venv\Scripts\python.exe -m pip install -e . --no-deps
 ```
 
 It never reclones, resets, cleans, stashes, or overwrites anything, and it leaves
-`mt5_settings.local.json`, `.venv`, and every other untracked or ignored file exactly as
-it is. It stops **before changing anything** — and says why — when Git is missing, the folder
-is not a Git working tree, the checkout is on another branch (or detached), a *tracked* file
-has local changes, or the branch cannot fast-forward. Your local edits are never discarded for
-you: commit or revert them yourself, then re-run the updater.
+`mt5_settings.local.json`, `provider_setup.local.json`,
+`scalper_admission.local.json`, `scalper_evidence/`,
+`scalper_live_approval.local.json`, `.venv`, and every other untracked or ignored file
+exactly as it is. It stops **before changing anything** — and says why — when Git is
+missing, the folder is not a Git working tree, the checkout is on another branch (or
+detached), a *tracked* file has local changes, or the branch cannot fast-forward. Your
+local edits are never discarded for you: commit or revert them yourself, then re-run the
+updater. Re-read `/live` afterwards: arming is an in-process decision and is never
+restored automatically.
 
 ### What the two launches mean
 
@@ -375,6 +380,27 @@ confirmation phrase. A strategy without measured results is labelled
 Every order still goes through the same planner, pre-trade gate, risk limits and
 ledger the paper lane uses; the intent is written durably before submission, and
 an in-doubt order is never re-sent. Full detail: `docs/LIVE_EXECUTION.md`.
+
+#### Guarded AX-SCALPER one-shot LIVE bridge
+
+The `/live` page also has a separate **Guarded AX-SCALPER one-shot LIVE intent**
+card. It does not promote a PAPER result and does not start a continuous
+AX-SCALPER session. Recording a `v3` typed intent, reviewing it, verifying a
+separate signed exact-plan approval, arming, submitting once and reconciling are
+six different actions. Every step re-checks exact evidence, account/instrument/
+risk/config identity, plan fingerprint, quote freshness, expiry and unresolved
+orders. Submission uses the existing live leg once; an ambiguous request is
+queried by its durable id, never re-sent. The one-shot plan is disarmed after an
+outcome or refusal.
+
+No genuine AX-SCALPER candidate has passed independent replay in this
+deployment by default, and no deployment approval is shipped. The bridge needs
+`scalper_admission.local.json`, digest-verified artifacts under
+`scalper_evidence/`, and an independently signed
+`scalper_live_approval.local.json` beside the settings file. The card reports
+broker-reported open-position profit only — never balance, equity or closed P&L.
+See [`docs/SCALPER_LIVE_BRIDGE.md`](docs/SCALPER_LIVE_BRIDGE.md) for the exact
+operator/update/Windows/MT5 flow.
 
 ### Strategy library (optional, `/strategies`)
 

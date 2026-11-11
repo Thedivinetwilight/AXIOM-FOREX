@@ -220,6 +220,15 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "live-start",
         "live-stop",
         "live-stop-settings",
+        # The guarded AX-SCALPER typed-intent bridge on /live. Registration and
+        # each later decision are separate, exact-plan actions. Submission calls
+        # the same live leg once and never retries an ambiguous request.
+        "scalper-live-register",
+        "scalper-live-review",
+        "scalper-live-approve",
+        "scalper-live-arm",
+        "scalper-live-submit",
+        "scalper-live-reconcile",
         "catalog-audit",
         # The paper starting capital: one local, Git-ignored document holding the
         # amount and currency the operator typed.  It is the basis of the paper
@@ -373,6 +382,8 @@ class WorkstationApp:
     scalper_paper: Any = None
     #: Last AX-SCALPER action result for the Autopilot notice.
     scalper_paper_result: dict[str, Any] = field(default_factory=dict)
+    #: Last guarded AX-SCALPER LIVE bridge result, shown once on /live.
+    scalper_live_result: dict[str, Any] = field(default_factory=dict)
     #: The last autopilot action's result, shown once on the next render.
     autopilot_result: dict[str, Any] = field(default_factory=dict)
 
@@ -623,6 +634,8 @@ class WorkstationApp:
         """The live page's whole model.  Reads only, never sends."""
 
         if self.live is None:
+            result = dict(self.scalper_live_result)
+            self.scalper_live_result = {}
             return {
                 "configured": False,
                 "armed": False,
@@ -635,9 +648,17 @@ class WorkstationApp:
                 "positions": [],
                 "confirmation_phrase": "",
                 "review": {},
+                "scalper_live": {"available": False, "submission_available": False,
+                                 "one_shot_submission_available": False, "result": result},
             }
         try:
-            return self.live.view()
+            view = dict(self.live.view())
+            scalper_live = dict(view.get("scalper_live") or {})
+            if self.scalper_live_result:
+                scalper_live["result"] = dict(self.scalper_live_result)
+                self.scalper_live_result = {}
+            view["scalper_live"] = scalper_live
+            return view
         except Exception as exc:
             return {
                 "configured": True,
@@ -655,6 +676,8 @@ class WorkstationApp:
                 "plan": {"present": False},
                 "account": {},
                 "positions": [],
+                "scalper_live": {"available": False, "submission_available": False,
+                                 "one_shot_submission_available": False},
             }
 
     def connected_account_fingerprint(self) -> str:
@@ -1366,6 +1389,8 @@ class WorkstationApp:
             return self._paper_capital_action(form)
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
+        if action.startswith("scalper-live-"):
+            return self._scalper_live_action(action, form)
         if action.startswith("autopilot-") or action.startswith("scalper-paper-"):
             return self._autopilot_action(action, form)
         if action.startswith("catalog-"):
@@ -1649,6 +1674,85 @@ class WorkstationApp:
         if was_confirmed and not wizard.choices.confirmed:
             message += " The configuration is unconfirmed until you confirm it again."
         return HTTPStatus.SEE_OTHER, back, message
+
+    # -- guarded AX-SCALPER LIVE bridge --------------------------------------
+    def _scalper_live_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        """One exact typed-intent decision at a time; the bridge owns the gates."""
+        bridge = getattr(self.live, "scalper_bridge", None) if self.live is not None else None
+        if bridge is None:
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "/live",
+                "No guarded AX-SCALPER LIVE bridge is wired into this workstation. "
+                "No proposal was recorded and no order was submitted.",
+            )
+
+        def field(name: str) -> str:
+            raw = form.get(name)
+            if isinstance(raw, (list, tuple)):
+                raw = raw[0] if raw else ""
+            return str(raw if raw is not None else "").strip()
+
+        intent_id = field("intent_id")
+        try:
+            if action == "scalper-live-register":
+                outcome = bridge.register(field("intent_json"))
+            elif action == "scalper-live-review":
+                outcome = bridge.review(
+                    intent_id,
+                    reviewed=field("reviewed") == "yes",
+                    phrase=field("phrase"),
+                    account_confirmation=field("account_confirmation"),
+                )
+            elif action == "scalper-live-approve":
+                outcome = bridge.approve(
+                    intent_id,
+                    plan_fingerprint_value=field("plan_fingerprint"),
+                    phrase=field("phrase"),
+                    account_confirmation=field("account_confirmation"),
+                )
+            elif action == "scalper-live-arm":
+                outcome = bridge.arm(
+                    intent_id,
+                    confirmation=field("confirmation"),
+                    account_confirmation=field("account_confirmation"),
+                )
+            elif action == "scalper-live-submit":
+                outcome = bridge.submit(intent_id)
+            elif action == "scalper-live-reconcile":
+                reconciled = bridge.reconcile(intent_id)
+                if isinstance(reconciled, Mapping) and reconciled.get("ok") is False:
+                    outcome = dict(reconciled)
+                else:
+                    outcome = {
+                        "ok": True,
+                        "reason": "reconciled",
+                        "message": "The same durable request identity was reconciled; no order was resent.",
+                        "state": dict(reconciled or {}),
+                    }
+            else:
+                return HTTPStatus.NOT_FOUND, "/live", "unknown action"
+        except Exception as exc:
+            outcome = {
+                "ok": False,
+                "reason": type(exc).__name__,
+                "message": "The exact-plan bridge refused this action. Nothing was armed or submitted.",
+                "blockers": [],
+            }
+        result = dict(outcome or {})
+        self.scalper_live_result = result
+        self._log(
+            f"AX-SCALPER LIVE {action}: "
+            + ("ok" if result.get("ok") else str(result.get("reason") or "refused"))
+        )
+        reason = str(result.get("reason") or ("accepted" if result.get("ok") else "refused"))
+        message = str(result.get("message") or reason)
+        status = (
+            HTTPStatus.SEE_OTHER
+            if result.get("ok") or action == "scalper-live-submit"
+            else HTTPStatus.CONFLICT
+        )
+        return status, "/live", f"AX-SCALPER LIVE {action}: {reason}. {message}"
 
     # -- live execution -----------------------------------------------------
     def _live_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:

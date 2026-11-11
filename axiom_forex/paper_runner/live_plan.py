@@ -58,6 +58,9 @@ SOURCE = "OPERATOR_LIVE_PLAN"
 #: The bar sizes the evaluation and the live loop may both be configured for.
 #: A plan names one of these; the live stack's own interval is compared with it.
 TIMEFRAME_SECONDS: dict[str, int] = {
+    # AX-SCALPER's exact M1 evidence horizon. The live loop must read the same
+    # 60-second bar size; a 5m fallback would be a different strategy.
+    "1m": 60,
     "5m": 300,
     "15m": 900,
     "30m": 1800,
@@ -93,6 +96,17 @@ PROTECTIVE_STOP_NOTE = (
 #: How the evidence behind a candidate is described in the plan and on the page.
 EVIDENCE_MEASURED = "MEASURED"
 EVIDENCE_UNVALIDATED = "UNVALIDATED"
+
+#: Optional AX-SCALPER typed-intent bindings. They are all-or-nothing: a plan
+#: with half a proposal identity is refused rather than completed by guesswork.
+SCALPER_BINDING_FIELDS: tuple[str, ...] = (
+    "intent_id", "candidate_fingerprint", "evidence_fingerprint",
+    "account_fingerprint", "instrument_fingerprint", "risk_fingerprint",
+    "config_fingerprint", "broker_symbol", "declared_quantity",
+    "declared_quantity_unit", "quantity_unit", "stop_price", "target_price", "quote_bid",
+    "quote_ask", "quote_timestamp", "quote_received_at", "quote_source",
+    "expires_at", "intent_schema", "intent_timeframe", "side",
+)
 
 #: Keys the plan may never carry, whatever the caller passes.
 CREDENTIAL_KEYS = frozenset(
@@ -257,6 +271,37 @@ def build_plan(
 
     def text(name: str) -> str:
         return str(values.get(name, "") or "").strip()
+
+    bindings = {
+        field: text(f"scalper_{field}") for field in SCALPER_BINDING_FIELDS
+    }
+    present_bindings = [field for field, value in bindings.items() if value]
+    if present_bindings:
+        missing_bindings = [field for field, value in bindings.items() if not value]
+        if missing_bindings:
+            problems.append(
+                PlanProblem(
+                    "plan.scalper_live",
+                    "a typed AX-SCALPER plan needs every exact identity field: missing "
+                    + ", ".join(missing_bindings),
+                )
+            )
+        if bindings["intent_schema"] != "axiom-scalper-live-intent-v3":
+            problems.append(
+                PlanProblem("plan.scalper_live.intent_schema",
+                            "only the exact v3 typed intent may enter LIVE")
+            )
+        if bindings["declared_quantity_unit"] not in {"lots", "base_units"}:
+            problems.append(
+                PlanProblem("plan.scalper_live.declared_quantity_unit",
+                            "the declared size unit must be lots or base_units")
+            )
+        declared_quantity = _decimal(bindings["declared_quantity"])
+        if declared_quantity is None or declared_quantity <= 0:
+            problems.append(
+                PlanProblem("plan.scalper_live.declared_quantity",
+                            "the typed intent's exact size is missing or invalid")
+            )
 
     candidate_id = text("candidate_id")
     candidate = next(
@@ -427,6 +472,8 @@ def build_plan(
         "evidence": evidence,
         "source": SOURCE,
     }
+    if present_bindings:
+        plan["scalper_live"] = dict(bindings)
     return plan, ()
 
 
@@ -492,6 +539,20 @@ def plan_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     document["timeframe_seconds"] = int(TIMEFRAME_SECONDS[timeframe])
     document["protective_stop_pips"] = str(stop)
     document.setdefault("protective_stop_note", PROTECTIVE_STOP_NOTE)
+    bindings = payload.get("scalper_live")
+    if bindings is not None:
+        if not isinstance(bindings, Mapping) or any(
+            not str(bindings.get(field, "") or "").strip()
+            for field in SCALPER_BINDING_FIELDS
+        ):
+            raise PlanError("plan_scalper_bindings_incomplete")
+        if str(bindings.get("intent_schema")) != "axiom-scalper-live-intent-v3":
+            raise PlanError("plan_scalper_bindings_wrong_schema")
+        if str(bindings.get("declared_quantity_unit")) not in {"lots", "base_units"}:
+            raise PlanError("plan_scalper_bindings_unit_invalid")
+        document["scalper_live"] = {
+            field: str(bindings[field]) for field in SCALPER_BINDING_FIELDS
+        }
     return document
 
 
@@ -571,6 +632,7 @@ def plan_view(document: Mapping[str, Any] | None) -> dict[str, Any]:
             dict(document.get("evidence", {}) or {}),
         ),
         "validated": str(document.get("evidence_state", "")) == EVIDENCE_MEASURED,
+        "scalper_live": dict(document.get("scalper_live") or {}),
     }
 
 
@@ -605,6 +667,7 @@ __all__ = [
     "EVIDENCE_UNVALIDATED",
     "PLAN_FILENAME",
     "PROTECTIVE_STOP_NOTE",
+    "SCALPER_BINDING_FIELDS",
     "PlanError",
     "PlanProblem",
     "SCHEMA",

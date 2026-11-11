@@ -4993,6 +4993,167 @@ def _live_session_card(view: Mapping[str, Any]) -> str:
     )
 
 
+def _scalper_live_text_field(name: str, label: str, *, value: str = "",
+                             placeholder: str = "", required: bool = True) -> str:
+    attrs = " required" if required else ""
+    return (
+        "<label class='field'><span>" + escape(label) + "</span>"
+        f"<input type='text' name='{escape(name)}' value='{escape(value)}' "
+        f"placeholder='{escape(placeholder)}' autocomplete='off' spellcheck='false'{attrs}>"
+        "</label>"
+    )
+
+
+def _scalper_live_form(action: str, nonce: str, fields: str, label: str,
+                       *, tone: str = "") -> str:
+    klass = "btn" + (f" btn--{escape(tone)}" if tone else "")
+    return (
+        f"<form method='post' action='/actions/{escape(action)}' class='stack' style='gap:8px'>"
+        f"<input type='hidden' name='nonce' value='{escape(nonce)}'>"
+        f"{fields}"
+        f"<div class='row'><button class='{klass}' type='submit'>{escape(label)}</button></div>"
+        "</form>"
+    )
+
+
+def _render_scalper_live_card(view: Mapping[str, Any], nonce: str) -> str:
+    """The guarded one-shot AX-SCALPER bridge, on the separate LIVE page."""
+    scalper = dict(view.get("scalper_live") or {})
+    if not scalper:
+        return ""
+    title = "Guarded AX-SCALPER one-shot LIVE intent"
+    if not scalper.get("available"):
+        return card(title, notice("muted", "Bridge unavailable",
+                                  "This workstation has no exact typed-intent bridge. "
+                                  "PAPER results cannot authorise LIVE trading."))
+    selected = dict(scalper.get("selected") or {})
+    result = dict(scalper.get("result") or {})
+    blockers = [dict(item) for item in scalper.get("blockers") or ()]
+    positions = [dict(item) for item in scalper.get("positions") or ()]
+    proposals = [dict(item) for item in scalper.get("proposals") or ()]
+    pnl = dict(scalper.get("pnl") or {})
+    one_shot = bool(scalper.get("one_shot_submission_available",
+                                scalper.get("submission_available", False)))
+    intent_id = str(selected.get("intent_id") or "")
+    fingerprint = str(selected.get("plan_fingerprint") or "")
+    account = str(scalper.get("account_fingerprint") or "")
+    review_phrase = str(scalper.get("review_phrase") or "")
+    approval_phrase = str(scalper.get("approval_phrase") or "")
+    arm_phrase = str(scalper.get("arm_phrase") or "")
+    body = [notice(
+        "danger" if scalper.get("continuous_session_sending") else
+        "warn" if not one_shot else "ok",
+        "One-shot submission " + ("BLOCKED" if not one_shot else "available"),
+        ("Stop the continuous /live session before any one-shot typed intent. "
+         if scalper.get("continuous_session_sending") else
+         "The exact signed evidence, separate approval, account identity, quote freshness "
+         "and durable order ledger are all re-checked before one submission. "
+         if one_shot else
+         "Resolve every blocker below. No order is sent from a blocked state. "),
+    )]
+    body.append(dl((
+        ("Continuous /live session", chip("running", "danger", dot=True)
+         if scalper.get("session_running") else chip("stopped", "muted")),
+        ("Next signal could send", chip("yes", "danger", dot=True)
+         if scalper.get("continuous_session_sending") else chip("no", "ok")),
+        ("Selected intent", f"<span class='mono'>{escape(intent_id or 'none')}</span>"),
+        ("Proposal status", escape(str(selected.get("status") or "not recorded"))),
+        ("Plan fingerprint", f"<span class='mono'>{escape(fingerprint or '—')}</span>"),
+        ("Review / approval / armed",
+         f"{'yes' if selected.get('reviewed') else 'no'} / "
+         f"{'yes' if selected.get('approved') else 'no'} / "
+         f"{'yes' if selected.get('armed') else 'no'}"),
+        ("Broker open-position P&L",
+         escape(f"{pnl.get('total', '')} {pnl.get('currency', '')}".strip())
+         if pnl.get("available") else "unavailable"),
+        ("P&L basis", escape(str(pnl.get("basis") or "broker-reported open position profit only"))),
+        ("Open broker positions", str(len(positions))),
+        ("Unresolved order ids", escape(str(len(scalper.get("unresolved_orders") or ())))),
+        ("Approval file", f"<span class='mono'>{escape(str(scalper.get('approval_file') or 'not wired'))}</span>"),
+    )))
+    if result:
+        body.append(notice("ok" if result.get("ok") else "warn",
+                           "Last guarded AX-SCALPER action",
+                           f"{result.get('reason') or ('accepted' if result.get('ok') else 'refused')}: "
+                           f"{result.get('message') or ''}"))
+    if blockers:
+        body.append(_blocker_list(blockers))
+    body.append("<p class='small muted'>" + escape(str(scalper.get("note") or "")) + "</p>")
+
+    intent_field = _scalper_live_text_field(
+        "intent_id", "Exact intent id", value=intent_id, placeholder=intent_id or "paste or keep empty for a new proposal",
+    )
+    account_field = _scalper_live_text_field(
+        "account_confirmation", "Type the exact account fingerprint", placeholder=account or "account fingerprint",
+    )
+    fingerprint_field = _scalper_live_text_field(
+        "plan_fingerprint", "Type the exact plan fingerprint", value=fingerprint,
+        placeholder=fingerprint or "plan fingerprint",
+    )
+    register_fields = (
+        "<label class='field'><span>One v3 typed-intent JSON object</span>"
+        "<textarea name='intent_json' rows='7' spellcheck='false' required "
+        "placeholder='Paste the exact v3 proposal; it must not contain credentials.'></textarea>"
+        "<span class='small muted'>Only the exact schema, broker symbol, quote receive time, "
+        "declared size unit and signed-evidence fingerprint are accepted.</span></label>"
+    )
+    body.append(_scalper_live_form("scalper-live-register", nonce, register_fields,
+                                   "Record exact proposal"))
+    body.append(_scalper_live_form(
+        "scalper-live-review", nonce,
+        intent_field + "<label class='field field--check'><input type='checkbox' name='reviewed' value='yes'>"
+        f"<span>I reviewed this exact plan and typed <span class='mono'>{escape(review_phrase)}</span>.</span></label>"
+        + _scalper_live_text_field("phrase", "Review phrase", placeholder=review_phrase)
+        + account_field,
+        "Review exact proposal",
+    ))
+    body.append(_scalper_live_form(
+        "scalper-live-approve", nonce,
+        intent_field + fingerprint_field
+        + _scalper_live_text_field("phrase", "Approval phrase", placeholder=approval_phrase)
+        + account_field,
+        "Verify signed approval and approve",
+    ))
+    body.append(_scalper_live_form(
+        "scalper-live-arm", nonce,
+        intent_field
+        + _scalper_live_text_field("confirmation", "Arming confirmation", placeholder=arm_phrase)
+        + account_field,
+        "Arm this exact plan",
+        tone="danger",
+    ))
+    body.append(_scalper_live_form(
+        "scalper-live-submit", nonce, intent_field,
+        "Submit one guarded intent", tone="danger",
+    ))
+    body.append(_scalper_live_form(
+        "scalper-live-reconcile", nonce, intent_field,
+        "Reconcile the same request id",
+    ))
+    if proposals:
+        body.append(table(
+            "Durable exact-plan proposals",
+            (("Intent", "mono"), ("Status", "text"), ("Candidate", "mono"),
+             ("Evidence", "mono"), ("Reviewed", "text"), ("Approved", "text"),
+             ("Armed", "text"), ("Broker", "text"), ("Events", "num")),
+            ((escape(str(item.get("intent_id") or "")),
+              escape(str(item.get("status") or "")),
+              escape(str(item.get("candidate_fingerprint") or "")[:16]),
+              escape(str(item.get("evidence_fingerprint") or "")[:16]),
+              "yes" if item.get("reviewed") else "no",
+              "yes" if item.get("approved") else "no",
+              "yes" if item.get("armed") else "no",
+              escape(str(dict(item.get("broker") or {}).get("state") or "none")),
+              str(item.get("events") or 0)) for item in proposals[:20]),
+        ))
+    return card(
+        title, "".join(body),
+        hint="PAPER and LIVE stay separate: this card never promotes a PAPER result, "
+             "never starts a continuous session, and never re-sends an ambiguous request.",
+        right=chip("ready" if one_shot else "blocked", "ok" if one_shot else "warn", dot=True),
+    )
+
+
 def render_live(ctx: PageContext) -> str:
     view = _live_view(ctx)
     configured = bool(view.get("configured"))
@@ -5069,6 +5230,7 @@ def render_live(ctx: PageContext) -> str:
     body.append(_broker_stop_settings_card(view, nonce))
     body.append(_live_blockers(view))
     body.append(_live_review_card(view))
+    body.append(_render_scalper_live_card(view, nonce))
 
     # -- the plan form ----------------------------------------------------
     options = ["<option value=''>Choose a strategy…</option>"]

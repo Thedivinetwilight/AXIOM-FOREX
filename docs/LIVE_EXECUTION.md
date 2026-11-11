@@ -303,9 +303,34 @@ page was reloaded.
 | `live_plan.local.json` | the armed plan: strategy, symbol, size, limits | ignored |
 | `paper_runner.local.sqlite3` | durable orders, intents, fills, audit | ignored |
 | `mt5_settings.local.json` | terminal path, server, login, mode, per-symbol stop distances | ignored; written by the stop control only, one `protective_stops` entry at a time |
+| `scalper_admission.local.json` | independent-reviewer keys and explicit AX-SCALPER admission thresholds | ignored |
+| `scalper_evidence/` | signed raw-replay artifacts, one per exact strategy fingerprint | ignored |
+| `scalper_live_approval.local.json` | one independently signed exact-plan LIVE approval | ignored |
 
 No credential is written to any of them. The MT5 password belongs to the terminal
 and to the OS vault, and AXIOM never asks for it in the browser.
+
+## Guarded AX-SCALPER one-shot intents
+
+The separate **Guarded AX-SCALPER one-shot LIVE intent** card on this page is a
+distinct path from the continuous strategy session described above. It never
+promotes a PAPER result, never starts an AX-SCALPER loop, and never creates a
+second broker order route.
+
+Six separate actions are required: record one `axiom-scalper-live-intent-v3`
+proposal, review it, verify a separately signed exact-plan approval, arm that
+exact plan, submit once, and reconcile the same durable request id. All of them
+re-check exact signed evidence, runtime account/instrument/risk/config identity,
+the plan fingerprint and bindings, quote freshness, expiry, mode, connection,
+arming, unresolved orders and broker protections. Submission calls the existing
+`LiveLeg` once; a duplicate or in-doubt request is queried, never re-sent. The
+one-shot plan is disarmed after a broker outcome or refusal.
+
+No genuine AX-SCALPER candidate passes independent replay in this deployment by
+default, and no real approval is shipped. The card reports broker-reported
+open-position profit only, never balance, equity or closed P&L. See
+[`SCALPER_LIVE_BRIDGE.md`](SCALPER_LIVE_BRIDGE.md) for the exact operator flow,
+local files and Windows/MT5 update instructions.
 
 ## What this does not claim
 

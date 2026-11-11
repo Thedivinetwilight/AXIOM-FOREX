@@ -6,7 +6,7 @@ This is an adaptation plan, not a profitability claim or a live-trading readines
 
 ## 1. What was inspected
 
-- **Target repository:** `Thedivinetwilight/AXIOM-FOREX`, branch `arena/f67c2859-axiom-forex`. At inspection time it contained only a two-line `README.md`: no application code, configuration, database schema, or tests.
+- **Target repository:** `Thedivinetwilight/AXIOM-FOREX`, branch `arena/51d820ec-axiom-forex`. At inspection time it contained only a two-line `README.md`: no application code, configuration, database schema, or tests.
 - **Source architecture:** the user-owned [`Thedivinetwilight/AXIOM`](https://github.com/Thedivinetwilight/AXIOM/tree/0314db2c2d1473b0b63e04ce7c1455695f93a885) repository, commit `0314db2c2d1473b0b63e04ce7c1455695f93a885`, whose README identifies it as **Arena 3.0.5**.
 - **Source size:** 200 Python files, about 17,888 lines under `app/`, 39 test files, about 9,176 test lines. Python 3.11+; FastAPI/Pydantic for the API, standard library for the research core, SQLite for persistence, PySide6 for the optional desktop UI.
 - **Observed test baseline:** in an isolated Python 3.11 virtual environment, `pytest --collect-only` collected **546 tests**; the full run produced **545 passed, 1 skipped**. The skip was an external public instrument-file test that could not reach its URL. The source's `ARENA_FINAL_VERIFICATION.md` records a historical **491-test** release baseline, so the current checkout — not that document — is the test-count authority for this migration.

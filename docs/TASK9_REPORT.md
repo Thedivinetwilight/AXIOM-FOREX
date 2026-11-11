@@ -298,4 +298,4 @@ real trailing exits on a live quote stream, a real terminal restart against a v3
 state file, and a genuine stale-feed episode on Windows/MT5.
 
 No commit, push or pull request was made from this report — the trailing-stop fix
-is a separate follow-up commit on `arena/f67c2859-axiom-forex`.
+is a separate follow-up commit on `arena/51d820ec-axiom-forex`.

@@ -1,5 +1,11 @@
 # AX-SCALPER PAPER Autopilot setup
 
+This setup is **PAPER only**. An eligible signed-replay admission result does not
+authorise LIVE trading. The separate `/live` one-shot bridge reads the PAPER
+host's authoritative status, but requires its own exact `v3` proposal,
+independent signed exact-plan approval, account confirmation and arming. See
+[`SCALPER_LIVE_BRIDGE.md`](SCALPER_LIVE_BRIDGE.md) before using that page.
+
 ## Safe Windows fast-forward update
 
 Do not update files or the Python environment while the previous patch is actively
@@ -14,10 +20,10 @@ In PowerShell, change to your existing AXIOM checkout and inspect it first:
 Set-Location C:\path\to\AXIOM-FOREX
 git status --short --branch
 git fetch origin
-git switch arena/f67c2859-axiom-forex
-git merge-base --is-ancestor HEAD origin/arena/f67c2859-axiom-forex
+git switch arena/51d820ec-axiom-forex
+git merge-base --is-ancestor HEAD origin/arena/51d820ec-axiom-forex
 if ($LASTEXITCODE -ne 0) { throw "Local branch is not behind the published feature branch; stop and review before updating." }
-git merge --ff-only origin/arena/f67c2859-axiom-forex
+git merge --ff-only origin/arena/51d820ec-axiom-forex
 ```
 
 If `git status` lists any modified, staged, untracked, ignored, or local paper-state

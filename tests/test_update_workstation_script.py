@@ -30,7 +30,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "update-workstation.cmd"
 START_SCRIPT = REPO_ROOT / "scripts" / "start-workstation.cmd"
-EXPECTED_BRANCH = "arena/f67c2859-axiom-forex"
+EXPECTED_BRANCH = "arena/51d820ec-axiom-forex"
 
 #: Git subcommands the updater is allowed to execute.
 ALLOWED_GIT_SUBCOMMANDS = {"rev-parse", "status", "fetch", "merge"}
