@@ -11,6 +11,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 SCHEMA = "axiom-scalper-live-intent-v1"
+#: v2 adds the declared size unit.  v1 remains readable for stored research
+#: proposals, but the LIVE bridge refuses a v1 proposal that has no unit.
+SCHEMA_V2 = "axiom-scalper-live-intent-v2"
+SCHEMAS = frozenset({SCHEMA, SCHEMA_V2})
+QUANTITY_UNITS = frozenset({"lots", "base_units"})
+
 
 class IntentError(ValueError):
     """A malformed or unsafe proposal; callers must fail closed."""
@@ -36,6 +42,17 @@ def _instant(raw: Any, field: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _quantity_unit(value: Any, *, required: bool) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        if required:
+            raise IntentError("missing_quantity_unit")
+        return ""
+    if raw not in QUANTITY_UNITS:
+        raise IntentError("invalid_quantity_unit")
+    return raw
+
+
 @dataclass(frozen=True)
 class ScalperLiveIntent:
     intent_id: str
@@ -56,17 +73,22 @@ class ScalperLiveIntent:
     expires_at: datetime
     risk_fingerprint: str
     config_fingerprint: str
+    quantity_unit: str = ""
     schema: str = SCHEMA
 
     @classmethod
     def parse(cls, raw: Mapping[str, Any], *, now: datetime | None = None) -> "ScalperLiveIntent":
-        if not isinstance(raw, Mapping) or raw.get("schema") != SCHEMA:
+        if not isinstance(raw, Mapping) or raw.get("schema") not in SCHEMAS:
             raise IntentError("wrong_schema")
+        schema = str(raw["schema"])
         text_fields = ("intent_id", "candidate_fingerprint", "evidence_fingerprint", "account_fingerprint",
                        "instrument_fingerprint", "symbol", "timeframe", "side", "quote_source",
                        "risk_fingerprint", "config_fingerprint", "quote_timestamp", "expires_at")
         if any(not str(raw.get(key, "") or "").strip() for key in text_fields):
             raise IntentError("missing_field")
+        # A separate reason keeps remediation precise: v2 without a unit is not
+        # a generic malformed document, and v1 is never given an invented unit.
+        unit = _quantity_unit(raw.get("quantity_unit"), required=schema == SCHEMA_V2)
         side = str(raw["side"]).upper()
         if side not in {"BUY", "SELL"}:
             raise IntentError("invalid_side")
@@ -84,11 +106,28 @@ class ScalperLiveIntent:
             raise IntentError("future_quote")
         if expiry <= current:
             raise IntentError("expired")
-        return cls(str(raw["intent_id"]), str(raw["candidate_fingerprint"]), str(raw["evidence_fingerprint"]),
-                   str(raw["account_fingerprint"]), str(raw["instrument_fingerprint"]), str(raw["symbol"]),
-                   str(raw["timeframe"]), side, _positive(raw.get("quantity"), "quantity"), stop, target,
-                   bid, ask, quote, str(raw["quote_source"]), expiry, str(raw["risk_fingerprint"]),
-                   str(raw["config_fingerprint"]), SCHEMA)
+        return cls(
+            intent_id=str(raw["intent_id"]),
+            candidate_fingerprint=str(raw["candidate_fingerprint"]),
+            evidence_fingerprint=str(raw["evidence_fingerprint"]),
+            account_fingerprint=str(raw["account_fingerprint"]),
+            instrument_fingerprint=str(raw["instrument_fingerprint"]),
+            symbol=str(raw["symbol"]),
+            timeframe=str(raw["timeframe"]),
+            side=side,
+            quantity=_positive(raw.get("quantity"), "quantity"),
+            stop_price=stop,
+            target_price=target,
+            quote_bid=bid,
+            quote_ask=ask,
+            quote_timestamp=quote,
+            quote_source=str(raw["quote_source"]),
+            expires_at=expiry,
+            risk_fingerprint=str(raw["risk_fingerprint"]),
+            config_fingerprint=str(raw["config_fingerprint"]),
+            quantity_unit=unit,
+            schema=schema,
+        )
 
     def quote_is_fresh(self, *, now: datetime, max_age_seconds: Decimal | int | float) -> bool:
         """Freshness is re-evaluated by /live at submission; parsing alone is insufficient."""
@@ -98,19 +137,25 @@ class ScalperLiveIntent:
 
     def matches(self, *, candidate_fingerprint: str, evidence_fingerprint: str, account_fingerprint: str,
                 instrument_fingerprint: str, symbol: str, timeframe: str, risk_fingerprint: str,
-                config_fingerprint: str) -> bool:
-        return (self.candidate_fingerprint == candidate_fingerprint and self.evidence_fingerprint == evidence_fingerprint
-                and self.account_fingerprint == account_fingerprint and self.instrument_fingerprint == instrument_fingerprint
-                and self.symbol == symbol and self.timeframe == timeframe and self.risk_fingerprint == risk_fingerprint
-                and self.config_fingerprint == config_fingerprint)
+                config_fingerprint: str, quantity_unit: str = "") -> bool:
+        result = (self.candidate_fingerprint == candidate_fingerprint and self.evidence_fingerprint == evidence_fingerprint
+                  and self.account_fingerprint == account_fingerprint and self.instrument_fingerprint == instrument_fingerprint
+                  and self.symbol == symbol and self.timeframe == timeframe and self.risk_fingerprint == risk_fingerprint
+                  and self.config_fingerprint == config_fingerprint)
+        if quantity_unit:
+            result = result and self.quantity_unit == _quantity_unit(quantity_unit, required=True)
+        return result
 
     def as_payload(self) -> dict[str, str]:
-        return {"schema": self.schema, "intent_id": self.intent_id,
-                "candidate_fingerprint": self.candidate_fingerprint, "evidence_fingerprint": self.evidence_fingerprint,
-                "account_fingerprint": self.account_fingerprint, "instrument_fingerprint": self.instrument_fingerprint,
-                "symbol": self.symbol, "timeframe": self.timeframe, "side": self.side, "quantity": str(self.quantity),
-                "stop_price": str(self.stop_price), "target_price": str(self.target_price),
-                "quote_bid": str(self.quote_bid), "quote_ask": str(self.quote_ask),
-                "quote_timestamp": self.quote_timestamp.isoformat(), "quote_source": self.quote_source,
-                "expires_at": self.expires_at.isoformat(), "risk_fingerprint": self.risk_fingerprint,
-                "config_fingerprint": self.config_fingerprint}
+        payload = {"schema": self.schema, "intent_id": self.intent_id,
+                   "candidate_fingerprint": self.candidate_fingerprint, "evidence_fingerprint": self.evidence_fingerprint,
+                   "account_fingerprint": self.account_fingerprint, "instrument_fingerprint": self.instrument_fingerprint,
+                   "symbol": self.symbol, "timeframe": self.timeframe, "side": self.side, "quantity": str(self.quantity),
+                   "stop_price": str(self.stop_price), "target_price": str(self.target_price),
+                   "quote_bid": str(self.quote_bid), "quote_ask": str(self.quote_ask),
+                   "quote_timestamp": self.quote_timestamp.isoformat(), "quote_source": self.quote_source,
+                   "expires_at": self.expires_at.isoformat(), "risk_fingerprint": self.risk_fingerprint,
+                   "config_fingerprint": self.config_fingerprint}
+        if self.quantity_unit:
+            payload["quantity_unit"] = self.quantity_unit
+        return payload
