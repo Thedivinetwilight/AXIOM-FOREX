@@ -439,9 +439,13 @@ class ScalperPaperHost:
             "trading_ready": bool(review.get("trade_admission_open") and running and not recovery
                                   and quote_fresh),
             "observation_only": bool(self._observation_only and running),
+            # PAPER signals never mint LIVE authority. Independent replay admission
+            # and separate LIVE approval are prerequisites; execution remains solely
+            # in the established /live workflow.
             "live_handoff": {"available": False, "status": "BLOCKED",
-                             "reason": "scalper_live_intent_handoff_not_implemented",
-                             "route": "No scalper order route exists; LIVE review remains exclusively on /live."},
+                             "reason": "independent_replay_admission_required",
+                             "intent_schema": "axiom-scalper-live-intent-v1",
+                             "route": "No scalper order route exists; admitted proposals must enter the existing /live workflow."},
             "last_result": dict(self._last_result),
             "ledger": str(self.ledger_path or ""),
         }
