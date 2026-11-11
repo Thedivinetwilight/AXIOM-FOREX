@@ -2,6 +2,11 @@
 
 No broker interfaces are imported. Validation does not imply admission, review,
 approval, arming, freshness at submission, or authority to execute.
+
+v1 is the archived quote-bound contract. v2 adds the declared size unit. v3 adds
+the exact broker instrument name and the separately observed quote receive time,
+so a LIVE bridge never has to infer either one. Older proposals remain readable
+for research, but the guarded /live bridge accepts only v3.
 """
 from __future__ import annotations
 
@@ -14,7 +19,10 @@ SCHEMA = "axiom-scalper-live-intent-v1"
 #: v2 adds the declared size unit.  v1 remains readable for stored research
 #: proposals, but the LIVE bridge refuses a v1 proposal that has no unit.
 SCHEMA_V2 = "axiom-scalper-live-intent-v2"
-SCHEMAS = frozenset({SCHEMA, SCHEMA_V2})
+#: v3 adds the exact broker instrument and the observed receive time. These are
+#: not defaults or derived fields: the gate must see the values the source gave.
+SCHEMA_V3 = "axiom-scalper-live-intent-v3"
+SCHEMAS = frozenset({SCHEMA, SCHEMA_V2, SCHEMA_V3})
 QUANTITY_UNITS = frozenset({"lots", "base_units"})
 
 
@@ -74,6 +82,8 @@ class ScalperLiveIntent:
     risk_fingerprint: str
     config_fingerprint: str
     quantity_unit: str = ""
+    broker_symbol: str = ""
+    quote_received_at: datetime | None = None
     schema: str = SCHEMA
 
     @classmethod
@@ -81,14 +91,23 @@ class ScalperLiveIntent:
         if not isinstance(raw, Mapping) or raw.get("schema") not in SCHEMAS:
             raise IntentError("wrong_schema")
         schema = str(raw["schema"])
-        text_fields = ("intent_id", "candidate_fingerprint", "evidence_fingerprint", "account_fingerprint",
-                       "instrument_fingerprint", "symbol", "timeframe", "side", "quote_source",
-                       "risk_fingerprint", "config_fingerprint", "quote_timestamp", "expires_at")
+        text_fields = (
+            "intent_id", "candidate_fingerprint", "evidence_fingerprint",
+            "account_fingerprint", "instrument_fingerprint", "symbol", "timeframe",
+            "side", "quote_source", "risk_fingerprint", "config_fingerprint",
+            "quote_timestamp", "expires_at",
+        )
         if any(not str(raw.get(key, "") or "").strip() for key in text_fields):
             raise IntentError("missing_field")
-        # A separate reason keeps remediation precise: v2 without a unit is not
-        # a generic malformed document, and v1 is never given an invented unit.
-        unit = _quantity_unit(raw.get("quantity_unit"), required=schema == SCHEMA_V2)
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        exact = schema == SCHEMA_V3
+        if exact and not str(raw.get("broker_symbol", "") or "").strip():
+            raise IntentError("missing_broker_symbol")
+        if exact and not str(raw.get("quote_received_at", "") or "").strip():
+            raise IntentError("missing_quote_received_at")
+        # A separate reason keeps remediation precise: v2/v3 without a unit is
+        # not a generic malformed document, and v1 is never given an invented unit.
+        unit = _quantity_unit(raw.get("quantity_unit"), required=schema in {SCHEMA_V2, SCHEMA_V3})
         side = str(raw["side"]).upper()
         if side not in {"BUY", "SELL"}:
             raise IntentError("invalid_side")
@@ -100,12 +119,23 @@ class ScalperLiveIntent:
             raise IntentError("invalid_buy_protections")
         if side == "SELL" and not (target < bid < ask < stop):
             raise IntentError("invalid_sell_protections")
-        quote, expiry = _instant(raw["quote_timestamp"], "quote_timestamp"), _instant(raw["expires_at"], "expires_at")
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        quote = _instant(raw["quote_timestamp"], "quote_timestamp")
+        expiry = _instant(raw["expires_at"], "expires_at")
+        received = (
+            _instant(raw["quote_received_at"], "quote_received_at")
+            if exact else None
+        )
         if quote > current:
             raise IntentError("future_quote")
+        if expiry <= quote:
+            raise IntentError("expiry_not_after_quote")
         if expiry <= current:
             raise IntentError("expired")
+        if received is not None:
+            if received < quote:
+                raise IntentError("quote_received_before_timestamp")
+            if received > current:
+                raise IntentError("future_quote_received_at")
         return cls(
             intent_id=str(raw["intent_id"]),
             candidate_fingerprint=str(raw["candidate_fingerprint"]),
@@ -126,24 +156,43 @@ class ScalperLiveIntent:
             risk_fingerprint=str(raw["risk_fingerprint"]),
             config_fingerprint=str(raw["config_fingerprint"]),
             quantity_unit=unit,
+            broker_symbol=str(raw.get("broker_symbol", "") or "") if exact else "",
+            quote_received_at=received,
             schema=schema,
         )
 
     def quote_is_fresh(self, *, now: datetime, max_age_seconds: Decimal | int | float) -> bool:
         """Freshness is re-evaluated by /live at submission; parsing alone is insufficient."""
         current = now.astimezone(timezone.utc)
-        return (self.quote_timestamp <= current and
-                Decimal(str((current - self.quote_timestamp).total_seconds())) <= Decimal(str(max_age_seconds)))
+        if self.quote_timestamp > current:
+            return False
+        if self.quote_received_at is not None and (
+            self.quote_received_at < self.quote_timestamp or self.quote_received_at > current
+        ):
+            return False
+        age = Decimal(str((current - self.quote_timestamp).total_seconds()))
+        return age <= Decimal(str(max_age_seconds))
+
+    def feed_latency_seconds(self) -> Decimal | None:
+        """Declared quote-to-receive latency; absent for archived v1/v2 documents."""
+        if self.quote_received_at is None:
+            return None
+        return Decimal(str((self.quote_received_at - self.quote_timestamp).total_seconds()))
 
     def matches(self, *, candidate_fingerprint: str, evidence_fingerprint: str, account_fingerprint: str,
                 instrument_fingerprint: str, symbol: str, timeframe: str, risk_fingerprint: str,
-                config_fingerprint: str, quantity_unit: str = "") -> bool:
+                config_fingerprint: str, quantity_unit: str = "", broker_symbol: str = "",
+                quote_received_at: datetime | None = None) -> bool:
         result = (self.candidate_fingerprint == candidate_fingerprint and self.evidence_fingerprint == evidence_fingerprint
                   and self.account_fingerprint == account_fingerprint and self.instrument_fingerprint == instrument_fingerprint
                   and self.symbol == symbol and self.timeframe == timeframe and self.risk_fingerprint == risk_fingerprint
                   and self.config_fingerprint == config_fingerprint)
         if quantity_unit:
             result = result and self.quantity_unit == _quantity_unit(quantity_unit, required=True)
+        if broker_symbol:
+            result = result and self.broker_symbol == broker_symbol
+        if quote_received_at is not None:
+            result = result and self.quote_received_at == quote_received_at
         return result
 
     def as_payload(self) -> dict[str, str]:
@@ -158,4 +207,8 @@ class ScalperLiveIntent:
                    "config_fingerprint": self.config_fingerprint}
         if self.quantity_unit:
             payload["quantity_unit"] = self.quantity_unit
+        if self.schema == SCHEMA_V3:
+            payload["broker_symbol"] = self.broker_symbol
+            assert self.quote_received_at is not None
+            payload["quote_received_at"] = self.quote_received_at.isoformat()
         return payload
