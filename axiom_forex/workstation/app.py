@@ -3,12 +3,15 @@
 The surface is deliberately tiny:
 
 ``GET``
-    Seven pages. Rendering never changes state and never runs a preflight that
-    could change anything.
-``POST /actions/{connect,disconnect,acknowledge-sign-in,confirm,unconfirm,symbols}``
-    Session and setup actions. Each requires the per-process nonce embedded in
-    the page that offered the button, so an unrelated page cannot drive a
-    connection.
+    Sixteen routes. Rendering never changes state and never runs a preflight that
+    could change anything.  The current route map below is authoritative; the
+    longer action lists in this docstring describe the original core surface,
+    not a complete inventory of the panels added later.
+``POST /actions/{...}``
+    Every state-changing action is named in ``POST_ACTIONS`` and dispatched
+    once, under the per-process nonce embedded in the page that offered the
+    button.  An action's own sentence is shown once on the page it redirects
+    to; a refusal is shown on the error page, with a link back to its form.
 ``POST /actions/{imports-refresh,ticks-convert,dataset-evaluate}``
     The data workflow: re-scan the import folder, convert one broker tick export
     into the canonical CSV, or evaluate the candidate grid on one canonical file.
@@ -27,8 +30,10 @@ The surface is deliberately tiny:
     Changing modes is not a trade, and nothing a preflight reports can take the
     switch away; those checks refuse orders, with their reasons, further down.
 
-Anything else is a 405/404. There is no JSON API, no order endpoint, no arming
-endpoint, no account switch, and no background timer: a request renders the
+Anything else is a 405/404. There is no JSON API, no generic order endpoint, no
+account switch, and no background timer.  The LIVE arming actions exist only on
+the /live route and are guarded by the live workflow and the exact typed-intent
+bridge; they are not reachable from any paper page.  A request renders the
 current state and then the process waits. Nothing polls, nothing reconnects, and
 nothing changes the mode or the account except an explicit click on the page
 that offers it.
@@ -44,6 +49,7 @@ import secrets
 import sys
 import threading
 from dataclasses import dataclass, field
+from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Mapping
@@ -84,10 +90,10 @@ GET_ROUTES: dict[str, tuple[str, str]] = {
     "/provider-setup": ("provider-setup", "Broker terms (advanced)"),
     "/live": ("live", "Live execution"),
     "/kronos": ("kronos", "Kronos forecast"),
-    # One page for the whole autonomous paper workflow: evaluate, select, follow.
-    # It has one start and one stop for that loop; the only other control is a
-    # start/stop for the live session /live already wired, which refuses unless
-    # the operator has armed a plan there. Arming itself is not offered here.
+    # The PAPER command center: evaluate, select, follow and monitor locally
+    # simulated fills.  Its LIVE handoff section is visually and structurally
+    # separate and only starts/stops the session /live already wired; every
+    # review, approval and arming decision stays on /live.
     "/autopilot": ("autopilot", "Autopilot"),
     "/strategies": ("strategies", "Strategy library"),
     "/activity": ("activity", "Activity"),
@@ -237,6 +243,43 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "paper-capital",
     }
 )
+
+#: A redirected action still carries its own success or refusal sentence.  These
+#: are the exact operator-facing refusal markers the dispatcher emits; a plain
+#: "Done." is never invented and an unknown tone is never guessed from a colour.
+_FEEDBACK_REFUSAL_MARKERS = (
+    "could not",
+    "did not",
+    "was not",
+    "was refused",
+    "refused",
+    "not saved",
+    "not confirmed",
+    "nothing was",
+    "no terminal",
+    "no live",
+    "no paper",
+    "no guarded",
+    "cannot",
+    "unavailable",
+    "stale",
+    "invalid",
+)
+_FEEDBACK_TITLES = {
+    "ok": "Action complete",
+    "warn": "Action refused",
+    "error": "Action failed",
+}
+
+
+def _feedback_tone(status: int, message: str) -> str:
+    """Classify one action's own sentence, never the state of another panel."""
+
+    if int(status) >= 400:
+        return "error"
+    lowered = str(message).lower()
+    return "warn" if any(marker in lowered for marker in _FEEDBACK_REFUSAL_MARKERS) else "ok"
+
 
 #: Field names that would mean a credential is being handed to us. Their mere
 #: presence rejects the request; nothing is read, echoed, or logged.
@@ -394,6 +437,11 @@ class WorkstationApp:
     autopilot_live: Any = None
     #: The last live-bridge action's result, shown once on the next render.
     autopilot_live_result: dict[str, Any] = field(default_factory=dict)
+    #: One-shot, path-scoped outcome of the last POST.  It is consumed by the
+    #: GET that the POST redirected to, and by no other render.  Keeping this in
+    #: the app (rather than in a cookie, query string or client storage) keeps
+    #: the strict no-script, no-storage design intact.
+    action_feedback: dict[str, Any] = field(default_factory=dict)
 
     #: The optional Kronos forecasting panel. ``None`` means this deployment has
     #: no forecasting component, which is the default and leaves every other page
@@ -447,9 +495,18 @@ class WorkstationApp:
             return HTTPStatus.NOT_FOUND, render_page(ctx)
         page, title = route
         with self.lock:
+            # One click, one outcome: the notice is consumed only by the route
+            # the action redirected to, then forgotten.  A later refresh cannot
+            # repeat a stale success or refusal.
+            feedback: dict[str, Any] = {}
+            if self.action_feedback and self.action_feedback.get("path") == path:
+                feedback = dict(self.action_feedback)
+                self.action_feedback = {}
             # The route, not the page key: the Refresh control has to return to
             # the page the operator is on, and "/" + "start" is not a page.
-            ctx = self._context(page, title, query=query, path=path)
+            ctx = self._context(
+                page, title, query=query, path=path, feedback=feedback
+            )
             html = render_page(ctx)
         return HTTPStatus.OK, html
 
@@ -633,10 +690,15 @@ class WorkstationApp:
     def live_view(self) -> dict[str, Any]:
         """The live page's whole model.  Reads only, never sends."""
 
+        # The last arm result used to be written but never read.  It is consumed
+        # here so /live has exactly one source for "what did arming decide".
+        last_arm = dict(self.live_result)
+        self.live_result = {}
         if self.live is None:
             result = dict(self.scalper_live_result)
             self.scalper_live_result = {}
             return {
+                "last_arm": last_arm,
                 "configured": False,
                 "armed": False,
                 "next_signal_sends_real_order": False,
@@ -653,6 +715,7 @@ class WorkstationApp:
             }
         try:
             view = dict(self.live.view())
+            view["last_arm"] = last_arm
             scalper_live = dict(view.get("scalper_live") or {})
             if self.scalper_live_result:
                 scalper_live["result"] = dict(self.scalper_live_result)
@@ -663,6 +726,7 @@ class WorkstationApp:
             return {
                 "configured": True,
                 "armed": False,
+                "last_arm": last_arm,
                 "next_signal_sends_real_order": False,
                 "blockers": [
                     {
@@ -745,6 +809,7 @@ class WorkstationApp:
         notice: str = "",
         query: Mapping[str, Any] | None = None,
         path: str = "",
+        feedback: Mapping[str, Any] | None = None,
     ) -> PageContext:
         # One preflight per page render: it is read-only, and running it twice
         # would let two panels disagree about the same facts.
@@ -767,6 +832,7 @@ class WorkstationApp:
             preflight=preflight,
             runner=self.runner_view(data=data),
             path=path,
+            feedback=feedback,
             extra={
                 # The paper account, on every page: orders, fills, open positions,
                 # P&L, freshness and integrity all come from this one reading.
@@ -1378,10 +1444,41 @@ class WorkstationApp:
 
         with self.lock:
             try:
-                return self._dispatch(action, form)
+                result = self._dispatch(action, form)
             except Exception as exc:  # never leak a stack trace into the page
                 self._log(f"action {action} failed: {type(exc).__name__}")
-                return HTTPStatus.INTERNAL_SERVER_ERROR, "/", f"{action} failed ({type(exc).__name__})"
+                result = (
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "/",
+                    f"{action} failed ({type(exc).__name__})",
+                )
+            self._record_feedback(action, result)
+            return result
+
+    def _record_feedback(
+        self, action: str, result: tuple[int, str, str]
+    ) -> None:
+        """Keep one POST's own sentence for the GET it redirects to.
+
+        A 4xx is rendered immediately by the handler, so it needs no stored
+        notice.  A redirect with no message already has a page-specific result
+        card (catalog, autopilot, research, Kronos, …); inventing a generic
+        "Done." here would create a second, weaker status source.
+        """
+
+        status, path, message = result
+        if int(status) not in (HTTPStatus.SEE_OTHER, HTTPStatus.FOUND) or not message:
+            self.action_feedback = {}
+            return
+        tone = _feedback_tone(int(status), str(message))
+        destination = str(path) if str(path) in GET_ROUTES else "/"
+        self.action_feedback = {
+            "path": destination,
+            "action": str(action),
+            "tone": tone,
+            "title": _FEEDBACK_TITLES[tone],
+            "message": str(message),
+        }
 
     def _dispatch(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         wizard = self.wizard
@@ -2439,10 +2536,22 @@ class _Handler(BaseHTTPRequestHandler):
             # destination page's own state. Keeps the URL free of query strings.
             self._send(int(status), b"", "text/plain; charset=utf-8", {"Location": redirect_path})
             return
-        ctx = self.app._context("overview", "Workstation", notice="")
+        ctx = self.app._context("overview", "Request refused", notice="")
+        route = GET_ROUTES.get(redirect_path)
+        back = (
+            f"<a class='btn' href='{escape(redirect_path)}'>Back to {escape(route[1])}</a>"
+            if route is not None
+            else "<a class='btn' href='/'>Back to the workstation</a>"
+        )
         self._html(
             int(status),
-            render_message(ctx, tone="error", title="Request refused", message=message),
+            render_message(
+                ctx,
+                tone="error",
+                title="Request refused",
+                message=message,
+                actions=back,
+            ),
         )
 
     def do_PUT(self) -> None:  # noqa: N802

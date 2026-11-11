@@ -215,10 +215,12 @@ can be told apart from a global one at a glance. If `.venv` is missing it stops 
 three commands that create it; `scripts\start-workstation.cmd --system-python` is the explicit
 opt-in for a system-wide install, and it warns when used.
 
-The launcher opens `http://127.0.0.1:8765/` in your browser once the server is listening
-(`--no-browser` suppresses that). It binds to loopback only. The launcher refuses to
-expose a real terminal session on any other interface, and on a machine without Windows or
-MetaTrader 5 it stops and prints exactly what is missing instead of pretending to connect.
+The launcher opens `http://127.0.0.1:8765/autopilot` — the PAPER command center — in your
+browser once the server is listening (`--no-browser` suppresses that). It also prints the
+five-step guided flow at `/` and, for a real terminal session, the separate LIVE review at
+`/live`. It binds to loopback only. The launcher refuses to expose a real terminal session on
+any other interface, and on a machine without Windows or MetaTrader 5 it stops and prints
+exactly what is missing instead of pretending to connect.
 
 ### Updating an existing clone
 

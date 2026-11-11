@@ -279,6 +279,10 @@ class PageContext:
     #: a context was assembled outside a request, in which case ``PAGE_PATHS``
     #: answers for it.
     path: str = ""
+    #: One-shot outcome of the POST that redirected here.  Empty on every other
+    #: render: an action result must never outlive the click that produced it.
+    #: The page shell is the only place that renders it.
+    feedback: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def safety(self) -> dict[str, Any]:
@@ -345,6 +349,7 @@ def build_context(
     preflight: Mapping[str, Any] | None = None,
     runner: Mapping[str, Any] | None = None,
     path: str = "",
+    feedback: Mapping[str, Any] | None = None,
 ) -> PageContext:
     """Assemble a page.
 
@@ -374,4 +379,5 @@ def build_context(
         preflight=dict(preflight or {}),
         runner=dict(runner or {}),
         path=path or PAGE_PATHS.get(page, ""),
+        feedback=dict(feedback or {}),
     )

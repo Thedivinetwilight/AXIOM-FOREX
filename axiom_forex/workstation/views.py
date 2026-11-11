@@ -94,6 +94,49 @@ NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
+#: The lane a page belongs to, shown once in the page chrome.  PAPER, LIVE and
+#: sample data must never be inferred from a chip's colour: this is a word and a
+#: machine-readable scope, on every route, from one table.
+PAGE_SCOPES: dict[str, tuple[str, str, str, str]] = {
+    "autopilot": (
+        "paper-command",
+        "PAPER COMMAND CENTER",
+        "paper",
+        "Simulated fills on this machine; LIVE review and arming are on /live.",
+    ),
+    "live": (
+        "live-execution",
+        "LIVE · REAL BROKER",
+        "danger",
+        "Real MetaTrader 5 account. Nothing here is a simulated fill.",
+    ),
+    "mode": (
+        "execution-mode",
+        "EXECUTION MODE",
+        "warn",
+        "Choose PAPER or LIVE; choosing alone sends nothing.",
+    ),
+    "start": (
+        "paper-guided",
+        "PAPER GUIDED FLOW",
+        "paper",
+        "Five steps to a locally simulated paper session.",
+    ),
+    "performance": ("paper-detail", "PAPER PERFORMANCE", "paper", "Local ledger only."),
+    "positions": ("paper-detail", "PAPER POSITIONS", "paper", "Locally simulated book."),
+    "activity": ("paper-detail", "PAPER ACTIVITY", "paper", "Local paper audit events."),
+    "overview": ("observation", "OBSERVATION", "muted", "Terminal and paper facts, kept separate."),
+    "setup": ("observation", "OBSERVATION SETUP", "muted", "Read-only terminal connection."),
+    "account": ("observation", "ACCOUNT & SYMBOLS", "muted", "Read-only terminal facts."),
+    "data": ("research", "RESEARCH DATA", "fixture", "Imported or sample research data."),
+    "quick-setup": ("research", "RESEARCH SETUP", "fixture", "Local evaluation data."),
+    "provider-setup": ("research", "BROKER TERMS", "fixture", "Local document, validated before saving."),
+    "strategies": ("research", "STRATEGY LIBRARY", "fixture", "Local evaluation evidence."),
+    "kronos": ("research", "FORECAST RESEARCH", "fixture", "Optional forecast; never a trading authority."),
+    "health": ("system", "SYSTEM HEALTH", "muted", "Local process and data checks."),
+}
+_DEFAULT_SCOPE = ("system", "WORKSTATION", "muted", "Local workstation status.")
+
 ICONS: dict[str, str] = {
     "overview": "M3 12h4l3 7 4-14 3 7h4",
     "start": "M5 4l14 8-14 8z",
@@ -185,7 +228,17 @@ a:hover{text-decoration:underline}
   background:rgba(11,15,20,.86); backdrop-filter:blur(10px);
 }
 .topbar h1{font-size:19px;margin:0;font-weight:650;letter-spacing:-.01em}
-.topbar .sub{color:var(--text-3);font-size:12.5px;margin-top:2px}
+.topbar .sub{color:var(--text-3);font-size:12.5px;margin-top:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.page-scope{
+  display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;
+  padding:1px 8px;font-size:10.5px;font-weight:700;letter-spacing:.08em;
+  color:var(--text-2);background:var(--panel);white-space:nowrap;
+}
+.page-scope--paper{color:var(--paper);border-color:rgba(201,167,255,.45);background:rgba(201,167,255,.1)}
+.page-scope--danger{color:var(--danger);border-color:rgba(255,138,138,.5);background:rgba(255,138,138,.1)}
+.page-scope--warn{color:var(--warn);border-color:rgba(255,192,97,.45);background:rgba(255,192,97,.1)}
+.page-scope--fixture{color:var(--fixture);border-color:rgba(147,170,191,.45);background:rgba(147,170,191,.1)}
+.page-scope--muted{color:var(--text-3)}
 .topbar-actions{margin-left:auto;display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;justify-content:flex-end}
 .content{padding:var(--s6);display:flex;flex-direction:column;gap:var(--s5);max-width:1320px;width:100%}
 
@@ -318,7 +371,10 @@ details.disclosure[open]>summary{margin-bottom:6px}
 }
 .notice--ok{border-color:rgba(69,217,154,.35);background:rgba(69,217,154,.08)}
 .notice--warn{border-color:rgba(255,192,97,.35);background:rgba(255,192,97,.08)}
-.notice--error{border-color:rgba(255,138,138,.4);background:rgba(255,138,138,.08)}
+.notice--error,.notice--danger{border-color:rgba(255,138,138,.4);background:rgba(255,138,138,.08)}
+.notice--info{border-color:rgba(94,200,255,.4);background:rgba(94,200,255,.08)}
+.notice--muted{border-color:var(--line);background:rgba(255,255,255,.02)}
+.notice[data-action]{border-left:3px solid var(--accent)}
 .notice strong{display:block;margin-bottom:2px}
 .notice p{margin:0;color:var(--text-2)}
 .spinner{width:18px;height:18px;border-radius:50%;border:2px solid rgba(255,255,255,.18);border-top-color:var(--accent);animation:spin .8s linear infinite;flex:0 0 auto}
@@ -605,10 +661,27 @@ def empty_state(title: str, message: str, action: str = "") -> str:
     )
 
 
-def notice(tone: str, title: str, message: str = "") -> str:
+def notice(
+    tone: str,
+    title: str,
+    message: str = "",
+    *,
+    role: str = "",
+    data_action: str = "",
+) -> str:
+    """One notice, with a tone that has a stylesheet rule and an honest ARIA role.
+
+    A danger/error notice is an alert; everything else is a status.  The action
+    id is carried as data for tests and operators, never as executable markup.
+    """
+
     body = f"<p>{escape(message)}</p>" if message else ""
+    resolved_role = role or ("alert" if tone in {"danger", "error"} else "status")
+    attributes = f" role='{escape(resolved_role)}'"
+    if data_action:
+        attributes += f" data-action='{escape(data_action)}'"
     return (
-        f"<div class='notice notice--{escape(tone)}' role='status'>"
+        f"<div class='notice notice--{escape(tone)}'{attributes}>"
         f"<div><strong>{escape(title)}</strong>{body}</div></div>"
     )
 
@@ -1038,6 +1111,12 @@ def _sidebar(ctx: PageContext) -> str:
     )
 
 
+def page_scope(ctx: PageContext) -> tuple[str, str, str, str]:
+    """One lane label for the route, from the single page-scope table."""
+
+    return PAGE_SCOPES.get(ctx.page, _DEFAULT_SCOPE)
+
+
 def _topbar(ctx: PageContext) -> str:
     # The paper loop's state leads: it is the one thing that changes while the
     # operator is somewhere else in the workstation.  It lives here rather than in
@@ -1060,10 +1139,14 @@ def _topbar(ctx: PageContext) -> str:
     else:
         actions.append("<a class='btn btn-sm' href='/mode'>Trading mode</a>")
         actions.append("<a class='btn btn-sm' href='/setup'>Open setup</a>")
+    scope_key, scope_label, scope_tone, scope_note = page_scope(ctx)
     return (
         "<header class='topbar'>"
-        f"<div><h1>{escape(ctx.title)}</h1>"
-        f"<div class='sub'>AXIOM-FOREX · trading workstation</div></div>"
+        f"<div><h1 aria-describedby='page-scope'>{escape(ctx.title)}</h1>"
+        "<div class='sub'>AXIOM-FOREX · trading workstation "
+        f"<span id='page-scope' class='page-scope page-scope--{escape(scope_tone)}' "
+        f"data-scope='{escape(scope_key)}' title='{escape(scope_note)}'>"
+        f"{escape(scope_label)}</span></div></div>"
         f"<div class='topbar-actions'>{''.join(actions)}</div></header>"
     )
 
@@ -1081,25 +1164,40 @@ def render_shell(ctx: PageContext, body: str | Sequence[str]) -> str:
 
     if not isinstance(body, str):
         body = "".join(str(item) for item in body)
-    banner = ""
+    # The sample-data warning and an action's own outcome are different facts.
+    # The old `elif` silently discarded every action notice in a simulator, so a
+    # click could succeed or be refused with no message at all.
+    banners: list[str] = []
     if ctx.terminal.simulated:
         if ctx.terminal.connected:
-            banner = notice(
+            banners.append(notice(
                 "warn",
                 "SIMULATED / SAMPLE DATA — no MetaTrader 5 terminal is attached",
                 "The offline simulator is running because the launcher was started with "
                 "--simulate. Nothing on this page was read from a broker or an account, and "
                 "this preview can never reach observation mode.",
-            )
+            ))
         else:
-            banner = notice(
+            banners.append(notice(
                 "warn",
                 "SIMULATED / SAMPLE DATA — offline simulator enabled",
                 "The launcher was started with --simulate. The preview is not started, no "
                 "terminal is attached, and nothing here was read from a broker or account.",
-            )
-    elif ctx.notice:
-        banner = notice("ok", ctx.notice)
+            ))
+    if ctx.notice:
+        banners.append(notice("ok", ctx.notice))
+    feedback = dict(ctx.feedback or {})
+    if feedback:
+        tone = str(feedback.get("tone") or "ok")
+        banners.append(notice(
+            tone,
+            str(feedback.get("title") or "Action outcome"),
+            str(feedback.get("message") or ""),
+            role="alert" if tone in {"warn", "error", "danger"} else "status",
+            data_action=str(feedback.get("action") or ""),
+        ))
+    banner = "".join(banners)
+    scope_key, _scope_label, _scope_tone, _scope_note = page_scope(ctx)
     legend = (
         "<div class='legend' aria-label='Data legend'>"
         "<span>Data labels:</span>"
@@ -1118,7 +1216,7 @@ def render_shell(ctx: PageContext, body: str | Sequence[str]) -> str:
         "<a class='skip' href='#main'>Skip to content</a>"
         "<div class='shell'>"
         f"{_sidebar(ctx)}"
-        "<main class='main' id='main' tabindex='-1'>"
+        f"<main class='main' id='main' tabindex='-1' data-scope='{escape(scope_key)}'>"
         f"{_topbar(ctx)}"
         f"<div class='content'>{banner}{body}"
         f"<footer class='row small muted' style='justify-content:space-between;padding-top:8px'>"
@@ -2630,16 +2728,19 @@ def _step_item(step: Mapping[str, Any], ctx: PageContext) -> str:
     }.get(status, (status, "muted"))
     items_html = ""
     if step["items"]:
+        # A key/value list is still a data table: it needs a caption and a
+        # scoped column header, not a bare tbody that a screen reader cannot name.
         items_html = (
-            "<div class='table-wrap' style='margin-top:12px'>"
-            "<table><tbody>"
-            + "".join(
-                f"<tr><th scope='row' style='width:38%;background:transparent;text-transform:none;"
-                f"letter-spacing:0;font-size:12.5px;color:var(--text-3)'>{escape(item['label'])}</th>"
-                f"<td>{escape(item['value'])}</td></tr>"
-                for item in step["items"]
+            "<div style='margin-top:12px'>"
+            + table(
+                "Facts for this setup step",
+                (("Field", "text"), ("Value", "text")),
+                (
+                    (escape(item["label"]), escape(item["value"]))
+                    for item in step["items"]
+                ),
             )
-            + "</tbody></table></div>"
+            + "</div>"
         )
     detail = f"<div class='detail'>{escape(step['detail'])}</div>" if step["detail"] else ""
     actions = ""
@@ -6582,7 +6683,7 @@ def render_quick_setup(ctx: PageContext) -> str:
         body.append(
             card(
                 "What the terminal answered",
-                "<div class='table-wrap'><table><thead><tr>"
+                "<div class='table-wrap'><table><caption>Terminal answers and their provenance</caption><thead><tr>"
                 "<th scope='col'>Field</th><th scope='col'>Value</th>"
                 "<th scope='col'>Provenance</th><th scope='col'>What it means</th>"
                 f"</tr></thead><tbody>{rows_html}</tbody></table></div>",
@@ -6637,7 +6738,7 @@ def render_quick_setup(ctx: PageContext) -> str:
                     if len(symbols) > len(drawn)
                     else ""
                 ),
-                "<div class='table-wrap'><table><thead><tr>"
+                "<div class='table-wrap'><table><caption>Broker-reported symbol specifications</caption><thead><tr>"
                 "<th scope='col'>Broker symbol</th><th scope='col'>Pair</th>"
                 "<th scope='col'>Min volume</th><th scope='col'>Step</th>"
                 "<th scope='col'>Stops level</th><th scope='col'>Swap</th>"
@@ -6807,7 +6908,7 @@ def render_quick_setup(ctx: PageContext) -> str:
         body.append(
             card(
                 "Stored history, and whether it is usable",
-                "<div class='table-wrap'><table><thead><tr>"
+                "<div class='table-wrap'><table><caption>Stored history coverage and usability</caption><thead><tr>"
                 "<th scope='col'>Symbol</th><th scope='col'>Timeframe</th>"
                 "<th scope='col'>Bars</th><th scope='col'>First</th>"
                 "<th scope='col'>Last</th><th scope='col'>Coverage</th>"
@@ -6905,7 +7006,7 @@ def render_quick_setup(ctx: PageContext) -> str:
             body.append(
                 card(
                     "By strategy, symbol and timeframe",
-                    "<div class='table-wrap'><table><thead><tr>"
+                    "<div class='table-wrap'><table><caption>Evaluation results by strategy, symbol and timeframe</caption><thead><tr>"
                     + head
                     + "</tr></thead><tbody>"
                     + "".join(table_rows)
@@ -6936,7 +7037,7 @@ def render_quick_setup(ctx: PageContext) -> str:
             body.append(
                 card(
                     "Which history was actually used",
-                    "<div class='table-wrap'><table><thead><tr>"
+                    "<div class='table-wrap'><table><caption>History actually used in the evaluation</caption><thead><tr>"
                     "<th scope='col'>Symbol</th><th scope='col'>TF</th>"
                     "<th scope='col'>Bars</th><th scope='col'>Coverage</th>"
                     "<th scope='col'>Gaps</th><th scope='col'>Used</th>"
@@ -6956,7 +7057,7 @@ def render_quick_setup(ctx: PageContext) -> str:
                     + kpi("Positive folds", f"{int(item.get('positive_folds', 0))} of {len(folds)}", foot="later chunks of the same history")
                     + kpi("Median fold", f"{float(item.get('median_net_return', 0)):+.4%}", foot="net of the stated costs")
                     + "</div>"
-                    + "<div class='table-wrap'><table><thead><tr>"
+                    + "<div class='table-wrap'><table><caption>Later out-of-sample chunks for this symbol and timeframe</caption><thead><tr>"
                     "<th scope='col'>Fold</th><th scope='col'>From</th><th scope='col'>To</th>"
                     "<th scope='col'>Trades</th><th scope='col'>Net</th><th scope='col'>Max DD</th>"
                     "</tr></thead><tbody>"
@@ -6983,7 +7084,7 @@ def render_quick_setup(ctx: PageContext) -> str:
                 card(
                     f"Would a dearer cost assumption change it? {item.get('symbol', '')} "
                     f"{item.get('timeframe', '')}",
-                    "<div class='table-wrap'><table><thead><tr>"
+                    "<div class='table-wrap'><table><caption>Cost and slippage sensitivity for this symbol and timeframe</caption><thead><tr>"
                     "<th scope='col'>Cost multiplier</th><th scope='col'>Slippage (pips)</th>"
                     "<th scope='col'>Commission / lot</th><th scope='col'>Trades</th>"
                     "<th scope='col'>Validation net</th>"
@@ -7023,7 +7124,7 @@ def render_quick_setup(ctx: PageContext) -> str:
             body.append(
                 card(
                     "What did not run, and why",
-                    "<div class='table-wrap'><table><thead><tr>"
+                    "<div class='table-wrap'><table><caption>Candidates that did not run, with the reason</caption><thead><tr>"
                     "<th scope='col'>Symbol</th><th scope='col'>TF</th>"
                     "<th scope='col'>Variant</th><th scope='col'>Reason</th>"
                     "<th scope='col'>Detail</th>"
@@ -9716,6 +9817,8 @@ def render_page(ctx: PageContext) -> str:
 __all__ = [
     "APP_NAME",
     "NAV",
+    "NAV_GROUPS",
+    "PAGE_SCOPES",
     "PAGES",
     "STYLES",
     "render_account",

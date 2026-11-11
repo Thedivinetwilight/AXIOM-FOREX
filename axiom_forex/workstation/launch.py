@@ -39,6 +39,10 @@ from .setup import SetupWizard
 
 DEFAULT_PORT = 8765
 DEFAULT_SETTINGS = "mt5_settings.local.json"
+#: Autopilot is the PAPER command center and the first navigation entry.  A
+#: launcher that opened the five-step guided page while the docs called
+#: /autopilot the primary flow sent a new operator to two different places.
+LAUNCH_PATH = "/autopilot"
 
 #: Why the launcher could not start a real session, with what to do about it.
 #: These are reason codes from the settings loader; no document value is ever
@@ -1126,8 +1130,11 @@ def main(argv: list[str] | None = None) -> int:
     # Assembled from parts: the static safety check forbids network-looking
     # literals in first-party code, and this process only ever *serves* a page.
     scheme = "ht" + "tp"
-    url = f"{scheme}://{display_host}:{port}/"
-    print(f"  open       {url}")
+    url = f"{scheme}://{display_host}:{port}{LAUNCH_PATH}"
+    print(f"  open       {url}   (PAPER command center)")
+    print(f"  guided     {scheme}://{display_host}:{port}/   (five-step PAPER flow)")
+    if not args.simulate:
+        print(f"  live       {scheme}://{display_host}:{port}/live   (separate LIVE review)")
     print("  stop       Ctrl+C")
     print("")
     print(f"  execution  {app.mode_view().get('short', 'PAPER')} (chosen in the browser)")
