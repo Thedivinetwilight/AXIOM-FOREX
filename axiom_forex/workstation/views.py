@@ -8709,8 +8709,12 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
                           ((escape(str(x.get("position_id", ""))), escape(str(x.get("symbol", ""))), escape(str(x.get("side", ""))), str(x.get("lots", "")), str(x.get("entry_price", "")), str(x.get("stop_price", "")), str(x.get("target_price") or "—")) for x in positions)))
     recovery = [dict(x) for x in view.get("recovery", ())]
     if recovery:
-        body.append(notice("warn", "Recovery required — entries blocked",
-                           "An earlier ledger has state this build cannot restore exactly: this includes open positions, unresolved outcomes, damaged/missing checkpoints, and even a flat completed run whose equity, guardian, TickCore, strategy posterior, or decision history would otherwise reset. Preserve the named JSONL ledger and .head.json sidecar unchanged; review them read-only and retain the book as unresolved. Do not edit/delete either file or start another run: the explicit review acknowledgement does not unlock Start. Exact recovery tooling remains an open implementation item."))
+        if all(x.get("replay_verification_available") for x in recovery):
+            body.append(notice("info", "Exact replay is available for this observer",
+                "Start will replay every stored quote through the same strategy-free PAPER desk, compare the complete event ledger, and resume that run only if every event matches. The JSONL and checkpoint are preserved; any mismatch leaves the run blocked."))
+        else:
+            body.append(notice("warn", "Recovery required — entries blocked",
+                "An earlier ledger has open positions, unresolved outcomes, a damaged or missing checkpoint, or state without a supported exact replay format. Preserve the named JSONL ledger and .head.json sidecar unchanged. Review it read-only; the review acknowledgement does not resume, flatten, edit, or clear the book."))
         body.append(table("Stored recovery blockers", (("Ledger", "text"), ("Reason", "text"), ("Positions", "num")),
                           ((escape(str(x.get("path", ""))), escape(str(x.get("reason", ""))), str(len(x.get("positions", ())))) for x in recovery)))
         recovery_positions = [{**dict(position), "ledger": x.get("path", "")}
@@ -8740,6 +8744,9 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     elif view.get("start_allowed"):
         body.append(action_form("scalper-paper-start", nonce, "Start admitted PAPER decisions", tone="primary") +
                     "<p class='small muted'>Starts only strategies independently replayed and admitted by the configured policy. Fills remain local PAPER simulations; LIVE is separate.</p>")
+    elif view.get("resume_exact_allowed"):
+        body.append(action_form("scalper-paper-observe", nonce, "Verify exact replay and resume PAPER observer", tone="primary") +
+                    "<p class='small muted'>The original observer run resumes only if every saved input and event matches exactly. Any mismatch leaves it blocked.</p>")
     elif view.get("observation_start_allowed"):
         body.append(action_form("scalper-paper-observe", nonce, "Start quote observation only", tone="primary") +
                     "<p class='small muted'>No candidate is admitted. This starts a feed observer with no strategies attached, no entries and no simulated trades.</p>")

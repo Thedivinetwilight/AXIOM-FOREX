@@ -83,6 +83,21 @@ def test_connected_without_admission_offers_observation_only_not_paper_decisions
     assert "Start admitted PAPER decisions" not in html
 
 
+def test_replayable_observer_offers_exact_resume_and_keeps_legacy_books_blocked():
+    view = FakeScalper().status()
+    view.update(connected=True, resume_exact_allowed=True,
+                observation_start_allowed=False, recovery=[{
+                    "path": "local-ledger.jsonl",
+                    "reason": "exact_replay_verification_available",
+                    "replay_verification_available": True,
+                    "positions": [],
+                }])
+    html = _render_scalper_paper_card(view, "nonce-value")
+    assert "Verify exact replay and resume PAPER observer" in html
+    assert "compare the complete event ledger" in html
+    assert "action='/actions/scalper-paper-observe'" in html
+
+
 def test_strategy_review_is_visible_and_symbol_picker_offers_exact_verified_names():
     view = FakeScalper().status()
     view["connected"] = True

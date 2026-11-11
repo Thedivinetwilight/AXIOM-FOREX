@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict
 from os import O_RDONLY, close as os_close, fdopen, fsync, open as os_open, replace
 import tempfile
 import threading
@@ -21,7 +22,7 @@ from .admission import AdmissionError, evaluate_artifact, load_policy
 from .raw_replay import verify_raw_artifact
 from .skeptic import Criteria
 from .signals import default_strategies
-from .scribe import EXECUTION_RESULT, KINDS, POSITION_EXIT, POSITION_OPENED, STATE, read_jsonl, verify_jsonl
+from .scribe import EXECUTION_RESULT, KINDS, POSITION_EXIT, POSITION_OPENED, RAW_TICK, REJECTION, STATE, Scribe, read_jsonl, verify_jsonl
 
 
 class ScalperPaperHost:
@@ -173,14 +174,20 @@ class ScalperPaperHost:
                                   "reason": "open_or_unresolved_paper_state_requires_exact_recovery",
                                   "positions": remaining, "uncertain": uncertain})
                 else:
-                    # Even a flat, integrity-valid ledger contains guardian,
-                    # equity, strategy posterior, tick-core and decision history
-                    # that this host cannot restore. Starting fresh would silently
-                    # reset those controls, so preserve the book and keep it blocked.
-                    found.append({"path": str(path),
-                                  "reason": "exact_scalper_state_restore_unavailable",
-                                  "positions": [], "uncertain": [],
-                                  "detail": "The ledger is intact and flat, but exact desk/guardian/tick state restoration is not implemented; no replacement run may silently reset it."})
+                    manifest = self._replay_manifest(rows)
+                    if manifest is not None:
+                        found.append({"path": str(path),
+                                      "reason": "exact_replay_verification_available",
+                                      "positions": [], "uncertain": [],
+                                      "replay_verification_available": True,
+                                      "detail": "This strategy-free observer has a versioned input manifest. Start will replay every stored quote and compare every event before it resumes."})
+                    else:
+                        # Summary-only or strategy-bearing ledgers lack a proven
+                        # deterministic restore path and remain untouched.
+                        found.append({"path": str(path),
+                                      "reason": "exact_scalper_state_restore_unavailable",
+                                      "positions": [], "uncertain": [],
+                                      "detail": "The ledger is intact and flat, but exact desk/guardian/tick state restoration is unavailable for this run; no replacement run may silently reset it."})
             except Exception as exc:
                 found.append({"path": str(path), "reason": f"ledger_read_failed:{type(exc).__name__}"})
         return found
@@ -189,6 +196,82 @@ class ScalperPaperHost:
         with self._ledger_lock:
             desk.scribe.to_jsonl(ledger_path)
             self._write_checkpoint(ledger_path, desk)
+
+    @staticmethod
+    def _config_fingerprint(config: Any, capital: Any, currency: str) -> str:
+        payload = {"config": asdict(config), "capital": str(capital), "currency": currency}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+    @classmethod
+    def _replay_manifest(cls, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        starts = [row for row in rows if row.get("kind") == STATE
+                  and row.get("payload", {}).get("state") == "live_quote_paper_started"]
+        if len(starts) != 1:
+            return None
+        manifest = starts[0].get("payload", {}).get("recovery_manifest")
+        if not isinstance(manifest, dict) or manifest.get("schema") != "axiom-scalper-replay-v1":
+            return None
+        if manifest.get("observation_only") is not True or manifest.get("strategies") != []:
+            return None
+        if not isinstance(manifest.get("config_fingerprint"), str):
+            return None
+        return manifest
+
+    @classmethod
+    def _replay_observation_ledger(
+        cls, rows: list[dict[str, Any]], *, config: Any, capital: Any, currency: str,
+    ) -> ScalperDesk:
+        """Rebuild a strategy-free PAPER observer from its verified quote inputs.
+
+        Legacy ledgers, strategy-bearing runs, unsupported event kinds and any
+        replay mismatch remain blocked. This is deliberately a narrow recovery
+        contract; it never edits the original JSONL or its checkpoint.
+        """
+        manifest = cls._replay_manifest(rows)
+        if manifest is None:
+            raise ValueError("exact_replay_manifest_unavailable")
+        if manifest["config_fingerprint"] != cls._config_fingerprint(config, capital, currency):
+            raise ValueError("paper_configuration_changed_since_run")
+        run_id = str(rows[0].get("run_id") or "") if rows else ""
+        if not run_id:
+            raise ValueError("paper_run_id_missing")
+        desk = ScalperDesk(config=config, strategies=(), venue=PaperVenue(cost=config.cost),
+                           starting_equity=capital, run_id=run_id)
+        external_states = {"live_quote_paper_started", "paper_resumed_exactly",
+                           "paper_stopped_positions_left_open"}
+        for row in rows:
+            kind, payload = row.get("kind"), dict(row.get("payload") or {})
+            at_ms, actor = int(row["at_ms"]), str(row.get("actor") or "desk")
+            payload.pop("mode", None)
+            if kind == RAW_TICK:
+                required = ("symbol", "bid", "ask", "source_time", "received_at", "source")
+                if any(payload.get(key) in (None, "") for key in required):
+                    raise ValueError("raw_tick_input_incomplete")
+                desk.scribe.record(RAW_TICK, at_ms=at_ms, actor=actor, **payload)
+                desk.on_tick(symbol=str(payload["symbol"]), bid=payload["bid"], ask=payload["ask"],
+                             source_time=datetime.fromisoformat(str(payload["source_time"])),
+                             received_at=datetime.fromisoformat(str(payload["received_at"])),
+                             source=str(payload["source"]), volume=payload.get("volume"))
+            elif kind == STATE and payload.get("state") in external_states:
+                desk.scribe.record(STATE, at_ms=at_ms, actor=actor, **payload)
+            elif kind == REJECTION and payload.get("stage") == "live_quote_source":
+                reason = str(payload.pop("reason", ""))
+                stage = str(payload.pop("stage", ""))
+                desk.scribe.reject(at_ms=at_ms, actor=actor, reason=reason, stage=stage, **payload)
+            elif kind in {STATE, REJECTION, "system_error"}:
+                raise ValueError("unsupported_external_event_in_paper_ledger")
+        expected = [row for row in rows]
+        actual = [entry.as_dict() for entry in desk.scribe.entries()]
+        if len(actual) != len(expected):
+            raise ValueError("paper_replay_event_count_mismatch")
+        for index, (left, right) in enumerate(zip(actual, expected), start=1):
+            if left != right:
+                raise ValueError(f"paper_replay_mismatch_at_event_{index}")
+        if desk.book.open_positions or desk.status().get("unresolved"):
+            raise ValueError("observation_replay_unexpected_position_or_order")
+        desk.scribe.mark_persisted_prefix(len(rows))
+        return desk
 
     def _strategy_review(self, *, currency: str = "", instrument: dict[str, Any] | None = None,
                          expected_costs: dict[str, Any] | None = None, config: Any | None = None) -> dict[str, Any]:
@@ -263,8 +346,9 @@ class ScalperPaperHost:
 
     def status(self) -> dict[str, Any]:
         connected = bool(getattr(self.session, "connected", False))
-        running = bool(self.pump and self.pump.status().get("state") == "RUNNING")
-        recovery = self._unresolved_ledgers(exclude_current=running)
+        pump_state = str(self.pump.status().get("state")) if self.pump else ""
+        running = pump_state == "RUNNING"
+        recovery = self._unresolved_ledgers(exclude_current=pump_state in {"RUNNING", "PAUSED"})
         state = "DISCONNECTED" if not connected else "BLOCKED" if recovery else "STOPPED"
         reason = "terminal_not_connected" if not connected else "recovery_required" if recovery else ""
         quote_status = self.pump.status() if self.pump else {}
@@ -324,6 +408,8 @@ class ScalperPaperHost:
                                        config=config if connected and "config" in locals() else None)
         observation_start_allowed = bool(connected and not recovery and not running and instrument_view
                                          and state == "STOPPED")
+        resume_exact_allowed = bool(connected and not running and recovery
+                                    and all(item.get("replay_verification_available") for item in recovery))
         trading_start_allowed = bool(observation_start_allowed and review.get("trade_admission_open"))
         quote_age = quote_status.get("quote_age_seconds")
         quote_fresh = bool(running and quote_age is not None
@@ -339,11 +425,15 @@ class ScalperPaperHost:
             "recovery": recovery, "quote": quote_status, "paper_only": True,
             "recovery_capability": {
                 "exact_restore_available": False,
+                "replay_verification_available": bool(recovery and all(
+                    item.get("replay_verification_available") for item in recovery)),
                 "confirmed_action": "KEEP_PAPER_BOOK_BLOCKED",
-                "action_effect": "review is recorded; positions, ledgers and blockers remain unchanged",
+                "action_effect": ("Start can verify and resume the same strategy-free observation ledger" if resume_exact_allowed
+                                  else "review is recorded; unverified or legacy ledgers remain unchanged and blocked"),
             },
             "strategy_review": review,
             "observation_start_allowed": observation_start_allowed,
+            "resume_exact_allowed": resume_exact_allowed,
             "start_allowed": trading_start_allowed,
             "quote_fresh": quote_fresh,
             "trading_ready": bool(review.get("trade_admission_open") and running and not recovery
@@ -366,13 +456,44 @@ class ScalperPaperHost:
             if not self.session.connected:
                 return self._refuse("terminal_not_connected", "Press Connect on Setup; AX-SCALPER never connects in the background.")
             recovery = self._unresolved_ledgers()
-            if recovery:
-                return self._refuse("recovery_required", "A prior ledger has open paper positions, an unresolved fill, or failed integrity validation. Exact manager/risk restoration is unavailable; positions remain untouched and new entries are blocked.", recovery=recovery)
+            replay_candidates = [item for item in recovery
+                                 if item.get("replay_verification_available")]
+            if recovery and (len(recovery) != 1 or len(replay_candidates) != 1):
+                return self._refuse("recovery_required", "A prior PAPER ledger cannot be safely resumed. Its stored positions and ledger remain untouched and new runs are blocked.", recovery=recovery)
             try:
                 config, capital, currency = load_live_paper_config(
                     session=self.session, settings_path=self.config_path, paper_root=self.paper_root)
             except LiveScalperConfigError as exc:
                 return self._refuse(exc.reason, exc.remediation)
+            if replay_candidates:
+                ledger_path = Path(str(replay_candidates[0]["path"]))
+                with self._ledger_lock:
+                    integrity, rows = self._verify_ledger(ledger_path)
+                if not integrity.get("ok"):
+                    return self._refuse("recovery_required", "The PAPER ledger changed or failed integrity verification; it was left untouched.")
+                try:
+                    desk = self._replay_observation_ledger(
+                        rows, config=config, capital=capital, currency=currency)
+                except Exception as exc:
+                    return self._refuse("exact_replay_refused",
+                        f"Exact PAPER recovery could not be proven ({exc}). The ledger was left unchanged and Start remains blocked.")
+                desk.scribe.record(STATE, at_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+                                   actor="workstation", state="paper_resumed_exactly",
+                                   replayed_entries=len(rows), replay_head=integrity.get("head"))
+                self._persist_run(desk, ledger_path)
+                source = MT5LiveQuoteSource(self.session, max_quote_age_ms=config.max_quote_age_ms)
+                pump = LivePaperPump(source=source, desk=desk,
+                                     symbol=config.instruments[0].symbol,
+                                     persist=lambda: self._persist_run(desk, ledger_path))
+                outcome = pump.start()
+                if not outcome.get("ok"):
+                    return self._refuse(str(outcome.get("reason") or "runner_start_refused"),
+                        "The exact ledger was restored, but the quote pump did not start. No broker order was sent.")
+                self.desk, self.pump, self.ledger_path = desk, pump, ledger_path
+                self._observation_only = True
+                self._last_result = {"ok": True, "reason": "exact_recovery_resumed",
+                    "message": "Every stored PAPER input and event replayed exactly. The same strategy-free observation run resumed; no order was sent."}
+                return {**self.status(), **self._last_result}
             review = self._strategy_review(currency=currency, instrument=config.instruments[0].audit_view(),
                                            expected_costs={"currency": currency, **config.cost.audit_view()},
                                            config=config)
@@ -416,7 +537,13 @@ class ScalperPaperHost:
                                actor="workstation", state="live_quote_paper_started",
                                config_fingerprint=fingerprint, strategy_versions=[
                                    {"strategy": item.name, "version": item.rule_version, "fingerprint": item.fingerprint}
-                                   for item in desk.strategies])
+                                   for item in desk.strategies],
+                               recovery_manifest={
+                                   "schema": "axiom-scalper-replay-v1",
+                                   "observation_only": bool(observation_only and not desk.strategies),
+                                   "strategies": [item.fingerprint for item in desk.strategies],
+                                   "config_fingerprint": self._config_fingerprint(config, capital, currency),
+                               })
             self._persist_run(desk, ledger_path)
             source = MT5LiveQuoteSource(self.session, max_quote_age_ms=config.max_quote_age_ms)
             pump = LivePaperPump(source=source, desk=desk,

@@ -104,19 +104,21 @@ questions with lists, never with a boolean alone:
 
 ## 6. Restart and recovery
 
-A restart is a fresh desk. Nothing is inherited because it was true five minutes ago:
+The workstation records each live quote input as a hash-chained `raw_tick_input`
+event before the PAPER desk processes it. For a **new strategy-free observation
+run**, an explicit Start after restart rebuilds the desk, replays all stored quote
+inputs, and compares the entire resulting event stream with the existing ledger.
+Only an exact match resumes the same run and ledger. A config fingerprint binds the
+replay to the same validated PAPER settings and declared capital. The original
+JSONL and checkpoint are never rewritten to make a mismatch pass.
 
-1. A new `ScalperDesk` starts with **no positions, no fills and an empty ledger**
-   (a test asserts this, because "it remembered" is the bug).
-2. The previous run's state is read from its **sealed ledger** and from the venue —
-   both, compared, and any disagreement reported as an integrity warning.
-3. Every recovered position is **re-verified for protection** before anything else.
-   A position whose stop cannot be confirmed suspends entries until an operator
-   resolves it.
-4. Open positions are never closed by a restart, a mode change or a runner stop. They
-   stay visible with their tickets, stops and provenance.
-5. A state file that cannot be parsed or whose chain does not verify is a **blocker**:
-   the desk refuses to resume rather than trading on a book it cannot explain.
+This restore contract is intentionally narrower than the desk's full state. Legacy
+ledgers, strategy-bearing runs, open positions, unresolved orders, missing raw
+inputs, unsupported events, config drift, and any replay mismatch remain blocked.
+No position is flattened or attached to another strategy. Exact restore for
+strategy decision runs and open paper positions remains unimplemented and must not
+be presented as available. PAPER replay uses only the local `PaperVenue`; it does
+not connect to or mutate MT5.
 
 The ledger is append-only and hash-chained, and it is **sealed** at the end of a run.
 A forward chain cannot detect truncation of its own tail, so a seal entry writes the

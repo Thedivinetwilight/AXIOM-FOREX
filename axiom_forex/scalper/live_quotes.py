@@ -153,6 +153,22 @@ class LivePaperPump:
             try:
                 quote = self.source.read(self.symbol)
                 with self._lock:
+                    # Persist the complete input before the desk mutates its
+                    # state. The host checkpoints the combined event batch after
+                    # processing; a crash mid-batch is detected by the ledger
+                    # head and remains blocked rather than guessed through.
+                    self.desk.scribe.record(
+                        "raw_tick_input",
+                        at_ms=int(quote.received_at.timestamp() * 1000),
+                        actor="live_quote_source",
+                        symbol=quote.symbol,
+                        bid=str(quote.bid),
+                        ask=str(quote.ask),
+                        source_time=quote.source_time.isoformat(),
+                        received_at=quote.received_at.isoformat(),
+                        source=quote.source,
+                        volume=None,
+                    )
                     outcome = self.desk.on_tick(symbol=quote.symbol, bid=quote.bid, ask=quote.ask,
                                                 source_time=quote.source_time, received_at=quote.received_at,
                                                 source=quote.source, volume=None)

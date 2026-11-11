@@ -10,7 +10,7 @@ import pytest
 from axiom_forex.paper_runner.accounting import write_capital
 from axiom_forex.scalper.live_config import LiveScalperConfigError, load_live_paper_config
 from axiom_forex.scalper.live_host import ScalperPaperHost
-from axiom_forex.scalper.scribe import POSITION_OPENED, STATE, Scribe, verify_jsonl
+from axiom_forex.scalper.scribe import POSITION_OPENED, RAW_TICK, STATE, Scribe, verify_jsonl
 
 UTC = timezone.utc
 NOW = datetime.now(UTC)
@@ -218,6 +218,59 @@ def test_restart_with_flat_but_unrestored_ledger_stays_blocked_and_unchanged(tmp
     assert ledger.read_bytes() == before_ledger
     assert checkpoint.read_bytes() == before_checkpoint
     assert host.start()["reason"] == "recovery_required"
+
+
+def test_strategy_free_observer_replays_exactly_and_resumes_same_ledger(tmp_path):
+    session, config_path, capital_root, ledger_dir = setup(tmp_path)
+    host = ScalperPaperHost(session=session, config_path=config_path,
+                            paper_root=capital_root, ledger_dir=ledger_dir)
+    assert host.start(observation_only=True)["ok"]
+    deadline = time.monotonic() + 2
+    while session.terminal.reads == 0 and time.monotonic() < deadline:
+        time.sleep(.005)
+    stopped = host.stop()
+    original_path = Path(stopped["ledger"])
+    original_rows = [json.loads(line) for line in original_path.read_text(encoding="utf-8").splitlines()]
+    assert any(row["kind"] == RAW_TICK for row in original_rows)
+
+    restarted = ScalperPaperHost(session=session, config_path=config_path,
+                                 paper_root=capital_root, ledger_dir=ledger_dir)
+    status = restarted.status()
+    assert status["recovery_capability"]["replay_verification_available"] is True
+    resumed = restarted.start(observation_only=True)
+    assert resumed["ok"] and resumed["reason"] == "exact_recovery_resumed"
+    assert Path(resumed["ledger"]) == original_path
+    assert restarted.desk is not None and restarted.desk.strategies == ()
+    assert session.terminal.mutations == []
+    restarted.stop()
+    assert len(list(ledger_dir.glob("*.jsonl"))) == 1
+    assert verify_jsonl(original_path)["ok"]
+    final_rows = [json.loads(line) for line in original_path.read_text(encoding="utf-8").splitlines()]
+    assert len(final_rows) > len(original_rows)
+    assert sum(row["kind"] == RAW_TICK for row in final_rows) > 0
+
+
+def test_observer_recovery_refuses_configuration_drift_without_touching_ledger(tmp_path):
+    session, config_path, capital_root, ledger_dir = setup(tmp_path)
+    host = ScalperPaperHost(session=session, config_path=config_path,
+                            paper_root=capital_root, ledger_dir=ledger_dir)
+    assert host.start(observation_only=True)["ok"]
+    deadline = time.monotonic() + 2
+    while session.terminal.reads == 0 and time.monotonic() < deadline:
+        time.sleep(.005)
+    ledger_path = Path(host.stop()["ledger"])
+    before_ledger = ledger_path.read_bytes()
+    before_head = ScalperPaperHost._checkpoint_path(ledger_path).read_bytes()
+    changed = settings()
+    changed["risk"]["risk_fraction"] = "0.003"
+    config_path.write_text(json.dumps(changed), encoding="utf-8")
+    restarted = ScalperPaperHost(session=session, config_path=config_path,
+                                 paper_root=capital_root, ledger_dir=ledger_dir)
+    result = restarted.start(observation_only=True)
+    assert not result["ok"] and result["reason"] == "exact_replay_refused"
+    assert ledger_path.read_bytes() == before_ledger
+    assert ScalperPaperHost._checkpoint_path(ledger_path).read_bytes() == before_head
+    assert session.terminal.mutations == []
 
 
 def test_restart_with_open_position_is_blocked_without_flatten_or_reassignment(tmp_path):

@@ -44,6 +44,7 @@ SYSTEM_ERROR = "system_error"
 LIMIT_CHANGE_REQUEST = "limit_change_request"
 APPROVAL = "approval"
 STATE = "state_change"
+RAW_TICK = "raw_tick_input"
 
 KINDS = (
     OPPORTUNITY,
@@ -63,6 +64,7 @@ KINDS = (
     LIMIT_CHANGE_REQUEST,
     APPROVAL,
     STATE,
+    RAW_TICK,
 )
 
 
@@ -230,6 +232,12 @@ class Scribe:
         if kind is None:
             return tuple(self._entries)
         return tuple(entry for entry in self._entries if entry.kind == kind)
+
+    def mark_persisted_prefix(self, count: int) -> None:
+        """Adopt a ledger prefix already verified and reproduced by exact replay."""
+        if count != len(self._entries):
+            raise ValueError("persisted_prefix_must_match_replayed_entries")
+        self._written = count
 
     def count(self, kind: str) -> int:
         return sum(1 for entry in self._entries if entry.kind == kind)
@@ -405,6 +413,7 @@ __all__ = [
     "QUALITY",
     "REJECTION",
     "RISK_DECISION",
+    "RAW_TICK",
     "SIGNAL",
     "STATE",
     "SYSTEM_ERROR",

@@ -137,9 +137,10 @@ extra keys block Start with a reason and remediation.
    and portfolio-correlation cutoffs remain undecided. **No PAPER orders/fills or
    LIVE intents are produced.** Start currently means quote monitoring and refusal
    auditing only. Stop ends that monitoring and leaves any local positions open.
-5. Check status, accepted ticks and freshness. If a recovery blocker appears, keep
-   the ledger and sidecar unchanged; the acknowledgement records review only and
-   does not unlock Start.
+5. Check status, accepted ticks and freshness. A newly created strategy-free
+   observation ledger can be verified and resumed by replaying every stored quote
+   and comparing the complete event stream. If any input/configuration differs,
+   replay fails closed and leaves the ledger and sidecar unchanged.
 
 LIVE is separate and is not started from the AX-SCALPER PAPER controls. The existing
 `/live` workflow is the sole broker-order path; its exact operator steps and guards
@@ -150,17 +151,15 @@ LIVE authorization.
 ## Recovery boundary
 
 Each run has its own append-only, hash-verified JSONL ledger under
-`scalper_paper_ledgers` beside the local settings. A failed integrity check or
-unclosed local paper position from an earlier run blocks a new run. The current
-AX-SCALPER desk does not yet reconstruct the full strategy/guardian/position
-manager state exactly; therefore this host does not auto-resume or auto-flatten an
-open position. It shows stored identity, fill, quote and risk fields when present,
-and missing fields; the run remains blocked after the review acknowledgement.
-Preserve the JSONL ledger and `.head.json` checkpoint unchanged, reconcile read-only,
-and do not edit/delete them or attempt another run. There is no safe in-app
-operation to clear this blocker yet. Exact recovery tooling is an open
-implementation item; acknowledgement is not recovery or resume. This is a
-fail-closed limitation, not a license to ignore a position.
+`scalper_paper_ledgers` beside the local settings. New strategy-free observation
+runs record every quote input; on explicit Start after a restart, AXIOM reconstructs
+the same desk and compares every generated event before resuming the same ledger.
+Configuration drift, missing inputs, event mismatches, damaged checkpoints, and
+legacy ledgers remain blocked. Strategy-bearing decision runs and any run with
+positions or unresolved orders do not yet have an exact restore contract. They are
+never flattened or attached to another strategy; preserve the JSONL and
+`.head.json` unchanged and reconcile read-only. The review acknowledgement does not
+unlock those books.
 
 ## Important admission limitation
 
