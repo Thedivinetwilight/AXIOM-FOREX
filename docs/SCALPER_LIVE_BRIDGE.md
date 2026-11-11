@@ -87,6 +87,14 @@ the verified evidence digest. Every later step re-checks signed evidence,
 approval, runtime identity, plan bindings, quote freshness, expiry, account,
 mode, connection, armed state, unresolved orders and broker protections.
 
+**Implementation boundary:** the shared planner still stamps its
+`OrderRequest.target_mode` as `PAPER`; the pre-trade gate deliberately rejects a
+request that declares a LIVE target mode. Deployment authority is the separately
+confirmed `LIVE` process mode, the armed adapter and one
+`ExecutionRouter.route_live` call — not changing the planner's request field.
+The operator must not treat that field as a switch or change it to bypass the
+gate.
+
 ## What happens after submission
 
 - The one-shot plan is **disarmed** after a broker outcome, a refusal, an

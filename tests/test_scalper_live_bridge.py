@@ -438,6 +438,22 @@ def test_scalper_host_policy_loader_and_paper_evidence_gate_fail_closed(tmp_path
         status=lambda: {"config": {"currency": "USD"}},
     )
     assert scalper_host_policy(host)() is None
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    policy_path = tmp_path / "scalper_admission.local.json"
+    policy_path.write_text(json.dumps(policy_payload(public)), encoding="utf-8")
+    matching = SimpleNamespace(
+        admission_policy_path=policy_path,
+        status=lambda: {"config": {"currency": "USD"}},
+    )
+    assert scalper_host_policy(matching)() is not None
+    currency_mismatch = SimpleNamespace(
+        admission_policy_path=policy_path,
+        status=lambda: {"config": {"currency": "EUR"}},
+    )
+    assert scalper_host_policy(currency_mismatch)() is None
     gate = paper_host_evidence_gate(SimpleNamespace(status=lambda: {}))
     assert gate("candidate") .eligible is False
     eligible_host = SimpleNamespace(status=lambda: {
@@ -560,6 +576,8 @@ class FakeBridge:
 
     def reconcile(self, intent_id):
         self.calls.append(("reconcile", intent_id))
+        if self.result.get("ok") is False:
+            return dict(self.result)
         return {"status": "RECONCILED", "intent": {"intent_id": intent_id},
                 "reconciliation": {"request_id": intent_id}}
 
@@ -645,3 +663,294 @@ def test_guarded_live_actions_dispatch_to_bridge_and_live_page_renders_card():
     })
     assert int(status) == 303
     assert bridge.calls[-1] == ("reconcile", "intent-1")
+
+
+def test_view_is_read_only_and_never_starts_arms_or_sends(world):
+    raw = bound_payload(world)
+    full_workflow(world, raw)
+    bridge = world["bridge"]
+    live = world["live"]
+    harness = world["harness"]
+    intent_id = raw["intent_id"]
+
+    before = json.dumps(bridge._load(intent_id), sort_keys=True, default=str)
+    plan_before = json.dumps(dict(live.plan), sort_keys=True, default=str)
+    audit_before = len(harness.audit.find(proposal_id=intent_id))
+    armed_before = bool(live.armed)
+    session_before = live.session
+    sends_before = list(harness.fake.send_requests)
+    leg_orders_before = len(world["leg"].history)
+
+    page = live.view()
+    direct = bridge.view(live_view=live.scalper_live_facts())
+    assert page["scalper_live"]["selected"]["status"] == "ARMED"
+    assert direct["selected"]["status"] == "ARMED"
+    assert isinstance(direct["one_shot_submission_available"], bool)
+    assert direct["session_running"] is False
+    assert direct["continuous_session_sending"] is False
+
+    assert json.dumps(bridge._load(intent_id), sort_keys=True, default=str) == before
+    assert json.dumps(dict(live.plan), sort_keys=True, default=str) == plan_before
+    assert len(harness.audit.find(proposal_id=intent_id)) == audit_before
+    assert bool(live.armed) == armed_before
+    assert live.session is session_before
+    assert list(harness.fake.send_requests) == sends_before
+    assert len(world["leg"].history) == leg_orders_before
+
+
+class RecordingOneShotLeg:
+    """A terminal leg stub that proves close/query paths never gain a second send."""
+
+    one_shot_ready = True
+
+    def __init__(self, request_id):
+        self.request_id = request_id
+        self.executes = 0
+        self.closes = 0
+
+    def status(self):
+        return {"configured": True, "ready": True, "active": False, "blockers": []}
+
+    def execute(self, _plan):
+        self.executes += 1
+        return {
+            "submitted": True, "state": "FILLED", "unknown": False,
+            "request_id": self.request_id, "volume_requested": "0.10",
+            "volume_filled": "0.10", "booked": True, "classification": "FILLED",
+        }
+
+    def reconcile(self):
+        return {"available": True, "reconciled": True, "recovered": []}
+
+    def close(self):
+        self.closes += 1
+
+
+class RecordingStackLoader:
+    def __init__(self, platform, leg):
+        self.platform = platform
+        self.leg = leg
+        self.calls = []
+        self.releases = 0
+
+    def __call__(self, state, intent, *, prepare=False):
+        self.calls.append((str(state.get("plan_fingerprint") or ""), bool(prepare)))
+        return self.platform, self.leg
+
+    def release(self):
+        self.releases += 1
+
+
+def test_owner_stack_is_required_before_arming_and_terminal_paths_close_it(world):
+    from axiom_forex.scalper.live_bridge import _ClosedOneShotLeg
+
+    raw = bound_payload(world)
+    bridge = world["bridge"]
+    registered = bridge.register(raw)
+    assert registered["ok"], registered
+    write_exact_approval(world, raw, registered["plan_fingerprint"])
+    account = world["account"]
+    assert bridge.review(raw["intent_id"], reviewed=True, phrase=REVIEW_PHRASE,
+                         account_confirmation=account)["ok"]
+    assert bridge.approve(raw["intent_id"],
+                          plan_fingerprint_value=registered["plan_fingerprint"],
+                          phrase=APPROVAL_PHRASE, account_confirmation=account)["ok"]
+
+    unavailable = SimpleNamespace(
+        one_shot_ready=False,
+        status=lambda: {"blockers": [{"reason": "one_shot_stack_unavailable"}]},
+        execute=lambda _plan: (_ for _ in ()).throw(RuntimeError("must_not_execute")),
+        reconcile=lambda: {"available": False, "reconciled": False},
+        close=lambda: None,
+    )
+
+    class RefusingStackLoader:
+        def __init__(self):
+            self.releases = 0
+
+        def __call__(self, state, intent, *, prepare=False):
+            return world["platform"], unavailable
+
+        def release(self):
+            self.releases += 1
+
+    refusing = RefusingStackLoader()
+    bridge.stack_loader = refusing
+    refused = bridge.arm(raw["intent_id"], confirmation=ARM_CONFIRMATION_PHRASE,
+                         account_confirmation=account)
+    assert not refused["ok"]
+    assert refused["reason"] == "one_shot_stack_unavailable"
+    assert refusing.releases == 1
+    assert bridge._stack_prepared is False
+    assert world["live"].armed is False
+    assert world["harness"].fake.send_requests == []
+
+    # A fresh exact proposal can be armed with a genuinely ready owner leg. The
+    # terminal broker outcome and a later duplicate query both close the stack,
+    # and neither call can reach the broker a second time.
+    second = bound_payload(world, intent_id="scalper-live-intent-terminal")
+    bridge.stack_loader = None
+    bridge.leg = world["leg"]
+    bridge._stack_prepared = False
+    bridge._stack_key = ""
+    second_registered = bridge.register(second)
+    assert second_registered["ok"], second_registered
+    write_exact_approval(world, second, second_registered["plan_fingerprint"])
+    assert bridge.review(second["intent_id"], reviewed=True, phrase=REVIEW_PHRASE,
+                         account_confirmation=account)["ok"]
+    assert bridge.approve(second["intent_id"],
+                          plan_fingerprint_value=second_registered["plan_fingerprint"],
+                          phrase=APPROVAL_PHRASE, account_confirmation=account)["ok"]
+    assert bridge.arm(second["intent_id"], confirmation=ARM_CONFIRMATION_PHRASE,
+                      account_confirmation=account)["ok"]
+
+    leg = RecordingOneShotLeg(second["intent_id"])
+    loader = RecordingStackLoader(world["platform"], leg)
+    bridge.stack_loader = loader
+    outcome = bridge.submit(second["intent_id"])
+    assert outcome["reason"] == "FILLED", outcome
+    assert leg.executes == 1
+    assert leg.closes == 1
+    assert loader.releases == 1
+    assert isinstance(bridge.leg, _ClosedOneShotLeg)
+    assert bridge._stack_prepared is False
+    assert world["live"].armed is False
+
+    duplicate = bridge.submit(second["intent_id"])
+    assert not duplicate["ok"]
+    assert duplicate["reason"] == "proposal_already_submitted"
+    assert leg.executes == 1
+    assert loader.releases == 2
+    assert isinstance(bridge.leg, _ClosedOneShotLeg)
+    assert world["harness"].fake.send_requests == []
+
+
+def test_one_shot_stack_factory_closes_owner_host_on_plan_fingerprint_change():
+    from axiom_forex.paper_runner.live_assembly import OneShotStackFactory
+
+    host = ImmediateHost()
+    created = []
+
+    def session_factory(plan):
+        created.append(dict(plan))
+        return host
+
+    live = SimpleNamespace(armed=True, session=None, plan={"scalper_live": {}}, view=lambda: {})
+    factory = OneShotStackFactory(
+        live=live,
+        platform_factory=lambda pair: SimpleNamespace(
+            repository=SimpleNamespace(close=lambda: None), pair=pair,
+        ),
+        session_factory=session_factory,
+    )
+    factory._owner_ready = lambda state, intent: True
+    intent = SimpleNamespace(symbol="EURUSD", as_payload=lambda: {})
+    first = {"plan_fingerprint": "fingerprint-1", "evidence": {}, "values": {}}
+    factory(first, intent, prepare=True)
+    assert factory._owner_key == "fingerprint-1"
+    assert host.closed is False
+
+    second = {"plan_fingerprint": "fingerprint-2", "evidence": {}, "values": {}}
+    factory(second, intent, prepare=False)
+    assert host.closed is True
+    assert factory._owner_host is None
+    assert factory._owner_stack is None
+    assert factory._owner_key == ""
+
+
+def test_all_guarded_post_actions_require_nonces_refuse_credentials_and_report_refusals():
+    from tests.test_workstation_ui import app_for, live_wizard
+
+    app = app_for(live_wizard())
+    bridge = FakeBridge()
+    app.live = FakeLiveWithBridge(bridge)
+    forms = {
+        "scalper-live-register": {"intent_json": ["{}"]},
+        "scalper-live-review": {
+            "intent_id": ["intent-1"], "reviewed": ["yes"],
+            "phrase": [REVIEW_PHRASE], "account_confirmation": ["account-1"],
+        },
+        "scalper-live-approve": {
+            "intent_id": ["intent-1"], "plan_fingerprint": ["fingerprint-1"],
+            "phrase": [APPROVAL_PHRASE], "account_confirmation": ["account-1"],
+        },
+        "scalper-live-arm": {
+            "intent_id": ["intent-1"], "confirmation": [ARM_CONFIRMATION_PHRASE],
+            "account_confirmation": ["account-1"],
+        },
+        "scalper-live-submit": {"intent_id": ["intent-1"]},
+        "scalper-live-reconcile": {"intent_id": ["intent-1"]},
+    }
+    expected_calls = {
+        "scalper-live-register": ("register", "{}"),
+        "scalper-live-review": ("review", "intent-1"),
+        "scalper-live-approve": ("approve", "intent-1"),
+        "scalper-live-arm": ("arm", "intent-1"),
+        "scalper-live-submit": ("submit", "intent-1"),
+        "scalper-live-reconcile": ("reconcile", "intent-1"),
+    }
+
+    for action, fields in forms.items():
+        before = list(bridge.calls)
+        status, _, message = app.act(action, dict(fields))
+        assert int(status) == 403, (action, message)
+        assert "stale" in message
+        assert bridge.calls == before
+
+        status, _, message = app.act(action, {**fields, "nonce": [app.nonce],
+                                              "password": ["must-not-be-read"]})
+        assert int(status) == 400, (action, message)
+        assert "credential" in message
+        assert bridge.calls == before
+
+        status, path, _ = app.act(action, {**fields, "nonce": [app.nonce]})
+        assert int(status) == 303, action
+        assert path == "/live"
+        assert bridge.calls[-1] == expected_calls[action], action
+
+    bridge.result = {"ok": False, "reason": "guard_refused",
+                     "message": "The exact guard refused this action.", "blockers": []}
+    for action, fields in forms.items():
+        status, _, message = app.act(action, {**fields, "nonce": [app.nonce]})
+        expected = 303 if action == "scalper-live-submit" else 409
+        assert int(status) == expected, (action, message)
+        assert "guard_refused" in message or "reconciled" not in message
+
+
+def test_view_never_prepares_or_releases_an_owner_thread_stack(world):
+    raw = bound_payload(world)
+    full_workflow(world, raw)
+    bridge = world["bridge"]
+    live = world["live"]
+
+    unavailable = SimpleNamespace(
+        one_shot_ready=False,
+        status=lambda: {"blockers": [{"reason": "planning_stack_only"}]},
+        reconcile=lambda: {"available": False, "reconciled": False},
+        close=lambda: None,
+    )
+
+    class PlanningOnlyLoader:
+        def __init__(self):
+            self.calls = []
+            self.releases = 0
+
+        def __call__(self, state, intent, *, prepare=False):
+            self.calls.append((str(state.get("plan_fingerprint") or ""), bool(prepare)))
+            if prepare:
+                raise AssertionError("view must never prepare an owner-thread stack")
+            return world["platform"], unavailable
+
+        def release(self):
+            self.releases += 1
+
+    loader = PlanningOnlyLoader()
+    bridge.stack_loader = loader
+    session_before = live.session
+    view = bridge.view(live_view=live.scalper_live_facts())
+    assert loader.calls == [(raw["intent_id"] and bridge._load(raw["intent_id"])["plan_fingerprint"], False)]
+    assert loader.releases == 0
+    assert bridge._stack_prepared is False
+    assert live.session is session_before
+    assert view["session_running"] is False
+    assert any(item["reason"] == "planning_stack_only" for item in view["blockers"])

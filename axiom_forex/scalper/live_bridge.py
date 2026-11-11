@@ -193,8 +193,11 @@ def scalper_host_policy(host: Any) -> Callable[[], AdmissionPolicy | None]:
     """Load the PAPER host's admitted reviewer policy on each exact check.
 
     The host, not the bridge, defines the trusted independent reviewers and the
-    local PAPER currency. An unreadable or inconsistent policy yields ``None``,
-    so a stale key or missing document can only close the LIVE gate.
+    local PAPER currency. ``status()["config"]["currency"]`` is the connected
+    account currency that ``load_live_paper_config`` has already checked against
+    local simulated capital; it is not the account balance's currency field.
+    An unreadable or inconsistent policy yields ``None``, so a stale key or
+    missing document can only close the LIVE gate.
     """
     def loader() -> AdmissionPolicy | None:
         try:
@@ -342,7 +345,15 @@ class ScalperLiveIntentBridge:
             return "one_shot_stack_unavailable"
         self.platform = platform
         self.leg = leg
-        self._stack_prepared = bool(prepare and getattr(leg, "one_shot_ready", False))
+        ready = bool(getattr(leg, "one_shot_ready", False))
+        # Arming is the one place the owner-thread stack must actually exist.
+        # A read-only planning stack is enough for a view/review check, but it
+        # must never be reported as a prepared one-shot submission surface.
+        if prepare and not ready:
+            self._stack_prepared = False
+            self._stack_key = ""
+            return "one_shot_stack_unavailable"
+        self._stack_prepared = bool(prepare and ready)
         self._stack_key = key if self._stack_prepared else ""
         return ""
 
@@ -903,6 +914,8 @@ class ScalperLiveIntentBridge:
         blockers: list[dict[str, str]] = []
         if live_view.get("error"):
             blockers.append(_blocker("live_view_unreadable", str(live_view["error"])))
+        if leg_status.get("error"):
+            blockers.append(_blocker("leg_status_unreadable", str(leg_status["error"])))
         if live_view.get("session_running") or live_view.get("next_signal_sends_real_order"):
             blockers.append(_blocker("continuous_live_session_running",
                                      "Stop the continuous /live session before any one-shot typed intent."))
@@ -952,7 +965,10 @@ class ScalperLiveIntentBridge:
             return [_blocker(reason, "An exact evidence, approval, identity or plan check failed.")], {}
         intent: ScalperLiveIntent = exact["intent"]
         view = dict(live_view) if live_view is not None else self._authoritative_live_view()
-        status = dict(leg_status) if leg_status is not None else dict(self.leg.status() or {})
+        try:
+            status = dict(leg_status) if leg_status is not None else dict(self.leg.status() or {})
+        except Exception as exc:
+            status = {"error": type(exc).__name__}
         blockers = self._live_blockers(intent_id=intent.intent_id, live_view=view, leg_status=status)
         try:
             armed_plan = dict(getattr(self.live, "plan", {}) or {})
@@ -980,7 +996,13 @@ class ScalperLiveIntentBridge:
                 blockers.append(_blocker("feed_latency_exceeded", "The declared quote receive latency is unavailable or too large."))
         if intent.expires_at <= now:
             blockers.append(_blocker("intent_expired", "The typed proposal has expired."))
-        return blockers, {"intent": intent, "evidence": exact["evidence"], "exact": exact}
+        return blockers, {
+            "intent": intent,
+            "evidence": exact["evidence"],
+            "exact": exact,
+            # Read after _exact_checks may have resolved a different exact stack.
+            "leg_status": status,
+        }
 
     def _execution_plan(self, intent: ScalperLiveIntent) -> tuple[ExecutionPlan | None, str]:
         spec = getattr(self.platform, "spec", None)
@@ -1183,24 +1205,45 @@ class ScalperLiveIntentBridge:
         if selected is None and states:
             selected = states[0]
         facts: dict[str, Any] = dict(live_view) if live_view is not None else self._authoritative_live_view()
-        leg_status: dict[str, Any] = {}
-        try:
-            leg_status = dict(self.leg.status() or {})
-        except Exception as exc:
-            leg_status = {"error": type(exc).__name__}
+
+        def read_leg_status() -> dict[str, Any]:
+            try:
+                return dict(self.leg.status() or {})
+            except Exception as exc:
+                return {"error": type(exc).__name__}
+
         blockers: list[dict[str, str]] = []
-        if facts.get("error"):
-            blockers.append(_blocker("live_view_unreadable", str(facts["error"])))
-        if leg_status.get("error"):
-            blockers.append(_blocker("leg_status_unreadable", str(leg_status["error"])))
+        leg_status: dict[str, Any] = {}
+        selected_id = str((selected or {}).get("intent", {}).get("intent_id") or "")
         if selected is not None:
-            found, _ = self._submission_blockers(
-                selected, now=self.clock(), live_view=facts, leg_status=leg_status,
+            # Do not pass a pre-read leg status: an exact read-only check may
+            # resolve a different planning stack. Use the status that was read
+            # *after* that resolution, so the card never reports a stale leg.
+            found, exact = self._submission_blockers(
+                selected, now=self.clock(), live_view=facts, leg_status=None,
                 stage="view",
             )
             blockers.extend(found)
+            fresh_status = exact.get("leg_status") if isinstance(exact, Mapping) else None
+            leg_status = dict(fresh_status) if isinstance(fresh_status, Mapping) else read_leg_status()
+            if not exact:
+                # The proposal was terminal, in doubt, or not armed, so the
+                # live/leg blockers were not evaluated by the submission path.
+                blockers.extend(self._live_blockers(
+                    intent_id=selected_id, live_view=facts, leg_status=leg_status,
+                ))
+                if leg_status.get("error"):
+                    blockers.append(_blocker("leg_status_unreadable", str(leg_status["error"])))
         else:
+            leg_status = read_leg_status()
+            blockers.extend(self._live_blockers(
+                intent_id="", live_view=facts, leg_status=leg_status,
+            ))
+            if leg_status.get("error"):
+                blockers.append(_blocker("leg_status_unreadable", str(leg_status["error"])))
             blockers.append(_blocker("proposal_missing", "No exact typed proposal has been recorded for /live."))
+        if facts.get("error") and not any(item["reason"] == "live_view_unreadable" for item in blockers):
+            blockers.append(_blocker("live_view_unreadable", str(facts["error"])))
         positions = [dict(item) for item in facts.get("positions") or ()
                      if isinstance(item, Mapping)]
         account = facts.get("account") if isinstance(facts.get("account"), Mapping) else {}
