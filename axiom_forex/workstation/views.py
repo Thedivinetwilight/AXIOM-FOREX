@@ -8587,8 +8587,20 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
         ("PAPER session", "observation-only — entries disabled" if view.get("observation_only") else
          "running PAPER decisions" if state == "RUNNING" else "not running"),
         ("Stored-book recovery", "blocked — exact restore unavailable" if view.get("recovery") else "no unresolved stored book detected"),
+        ("LIVE proposal schema", escape(str(handoff.get("intent_schema") or "not wired"))),
         ("LIVE handoff", escape(str(handoff.get("reason") or "blocked / unavailable"))),
     )))
+    if handoff.get("status") == "BLOCKED":
+        reason = str(handoff.get("reason") or "live_handoff_unavailable")
+        explanation = (
+            "No AX-SCALPER signal is sent to LIVE. This PAPER controller cannot approve or execute it. "
+            "Independent replay admission and separate LIVE review, account confirmation and arming are required; "
+            "the typed intent contract is not an execution route."
+            if reason == "independent_replay_admission_required"
+            else "No AX-SCALPER signal is sent to LIVE. Resolve the named blocker before any proposal can enter the separate /live workflow."
+        )
+        body.append(notice("warn", "AX-SCALPER → LIVE is blocked", explanation))
+        body.append("<p class='small'><a href='/live'>Open the separate LIVE review page</a>; this does not transfer, approve, or arm an AX-SCALPER intent.</p>")
     if result.get("message"):
         body.append(notice("ok" if result.get("ok") else "warn", "Last AX-SCALPER action", str(result["message"])))
     risk_names = {

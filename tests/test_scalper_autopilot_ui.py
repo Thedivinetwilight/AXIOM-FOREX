@@ -12,7 +12,9 @@ class FakeScalper:
         return {"available": True, "state": "STOPPED", "mode": "PAPER",
                 "source": "MT5_LIVE_PAPER", "connected": False, "start_allowed": False,
                 "observation_start_allowed": False, "trading_ready": False,
-                "observation_only": False, "live_handoff": {"reason": "blocked"},
+                "observation_only": False, "live_handoff": {"available": False, "status": "BLOCKED",
+                "reason": "independent_replay_admission_required",
+                "intent_schema": "axiom-scalper-live-intent-v1"},
                 "account_type": "UNKNOWN", "config": {"reason": "terminal_not_connected",
                 "remediation": "Press Connect on Setup."}, "symbols": [],
                 "symbol_exclusions": [], "recovery": [], "quote": {}, "paper_only": True,
@@ -70,6 +72,10 @@ def test_autopilot_card_has_explicit_paper_label_and_handled_actions():
     assert "Start blocked — no PAPER session launched" in html
     assert "action='/actions/scalper-paper-start'" not in html
     assert "cannot send or close broker orders" in html
+    assert "AX-SCALPER → LIVE is blocked" in html
+    assert "typed intent contract is not an execution route" in html
+    assert "does not transfer, approve, or arm" in html
+    assert "href='/live'" in html
 
 
 def test_connected_without_admission_offers_observation_only_not_paper_decisions():
