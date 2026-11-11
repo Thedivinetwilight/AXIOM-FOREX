@@ -1,4 +1,5 @@
 import base64
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from axiom_forex.scalper.admission import (
     EVALUATION_METHOD, EVIDENCE_SCHEMA, AdmissionError, canonical_payload,
-    evaluate_artifact, load_policy,
+    evaluate_artifact, evidence_digest, load_policy,
 )
 from axiom_forex.scalper.signals import default_strategies
 
@@ -240,3 +241,23 @@ def test_missing_and_malformed_policy_are_named_no_trade(tmp_path):
     path.write_text(json.dumps(mismatch))
     with pytest.raises(AdmissionError, match="admission_policy_currency_mismatch"):
         load_policy(path, expected_currency="INR")
+
+
+def test_verified_evidence_digest_binds_the_signed_artifact_and_exact_policy(tmp_path):
+    key = Ed25519PrivateKey.generate()
+    strategy = default_strategies()[0]
+    policy = setup_policy(tmp_path, key)
+    artifact = signed_artifact(tmp_path, strategy, key)
+    result = evaluate_artifact(
+        artifact, policy=policy, strategy=strategy.spec(), instrument=INSTRUMENT,
+        expected_costs={"currency": "USD", "commission_per_lot": "7",
+                        "commission_state": "OBSERVED", "slippage_points": "1",
+                        "slippage_state": "OBSERVED"},
+        replay_verifier=lambda _path, doc: {"verified": True, **doc["replay"]}, now=NOW,
+    )
+    assert result.eligible, result.reason
+    assert len(result.evidence_digest) == 64
+    document = json.loads(artifact.read_text(encoding="utf-8"))
+    assert evidence_digest(document, policy) == result.evidence_digest
+    changed_policy = replace(policy, min_total_trades=policy.min_total_trades + 1)
+    assert evidence_digest(document, changed_policy) != result.evidence_digest

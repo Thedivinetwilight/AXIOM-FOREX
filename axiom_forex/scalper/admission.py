@@ -53,6 +53,17 @@ def _canonical(value: Any) -> bytes:
                       allow_nan=False, default=str).encode("utf-8")
 
 
+def evidence_digest(document: Mapping[str, Any], policy: AdmissionPolicy) -> str:
+    """Content identity of signed evidence *and* the exact policy that judged it.
+
+    The signature is excluded because it is the attestation, not the claim. The
+    policy is included so a changed threshold cannot reuse the same identity.
+    This is an identity, not an approval and not a profitability claim.
+    """
+    signed = {key: value for key, value in document.items() if key != "signature"}
+    return hashlib.sha256(_canonical({"artifact": signed, "policy": policy.audit_view()})).hexdigest()
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -201,11 +212,13 @@ class AdmissionResult:
     fingerprint: str = ""
     reviewer: str = ""
     artifact_path: str = ""
+    evidence_digest: str = ""
 
     def audit_view(self) -> dict[str, Any]:
         return {"eligible": self.eligible, "reason": self.reason,
                 "metrics": dict(self.metrics), "fingerprint": self.fingerprint,
-                "reviewer": self.reviewer, "artifact_path": self.artifact_path}
+                "reviewer": self.reviewer, "artifact_path": self.artifact_path,
+                "evidence_digest": self.evidence_digest}
 
 
 def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
@@ -214,9 +227,11 @@ def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
                       replay_verifier: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] | None = None,
                       now: datetime | None = None) -> AdmissionResult:
     target = Path(path)
+    digest = ""
     def refuse(reason: str, detail: str = "", metrics: Mapping[str, Any] | None = None) -> AdmissionResult:
         return AdmissionResult(False, reason if not detail else f"{reason}:{detail}", metrics or {},
-                               str(strategy.get("fingerprint") or ""), artifact_path=str(target))
+                               str(strategy.get("fingerprint") or ""), artifact_path=str(target),
+                               evidence_digest=digest)
     try:
         document = json.loads(target.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -242,6 +257,7 @@ def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
         return refuse("evidence_signature_verifier_unavailable", "Install the evidence extra; no artifact is trusted without signature verification.")
     except (ValueError, TypeError, InvalidSignature):
         return refuse("evidence_signature_invalid")
+    digest = evidence_digest(document, policy)
     fingerprint = str(strategy.get("fingerprint") or "")
     expected_identity = {"strategy_id": str(strategy.get("name") or ""),
                          "rule_version": str(strategy.get("rule_version") or ""),
@@ -461,7 +477,8 @@ def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
         if max_corr > float(policy.maximum_absolute_correlation): fails.append("portfolio_correlation_above_policy")
         if peak > policy.maximum_overlapping_exposure_fraction: fails.append("overlapping_exposure_above_policy")
         if fails:
-            return AdmissionResult(False, ",".join(fails), metrics, fingerprint, reviewer, str(target))
+            return AdmissionResult(False, ",".join(fails), metrics, fingerprint, reviewer, str(target),
+                                   evidence_digest=digest)
         replay_manifest = document.get("replay")
         if not isinstance(replay_manifest, dict) or not all(
                 replay_manifest.get(key) for key in ("replay_version", "engine_digest", "input_digest", "output_digest")):
@@ -499,7 +516,7 @@ def evaluate_artifact(path: str | Path, *, policy: AdmissionPolicy,
             except (KeyError, TypeError, ValueError, AdmissionError, OverflowError):
                 return refuse("evidence_replayed_test_trade_claim_invalid", metrics=metrics)
         return AdmissionResult(True, "eligible_under_signed_policy_and_reproduced_replay", metrics,
-                               fingerprint, reviewer, str(target))
+                               fingerprint, reviewer, str(target), evidence_digest=digest)
     except (AdmissionError, KeyError, TypeError, ValueError, OverflowError) as exc:
         return refuse("evidence_metrics_invalid", str(exc))
 
