@@ -319,6 +319,11 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .command-risk{max-height:260px;overflow:auto;border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:var(--s3);background:rgba(0,0,0,.12)}
 .command-links{display:flex;flex-wrap:wrap;gap:var(--s2);margin:var(--s3) 0}
 .command-center h3{margin:var(--s5) 0 var(--s2);font-size:14px}
+.lifecycle{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:var(--s2)}
+.lifecycle li{border:1px solid var(--line);border-radius:var(--radius-sm);padding:var(--s3);background:var(--panel-2);font-size:12.5px}
+.lifecycle li[aria-current='step']{border-color:rgba(94,200,255,.5);background:rgba(94,200,255,.08)}
+.lifecycle .stage{display:block;font-weight:700;color:var(--text)}
+.lifecycle .state{display:block;color:var(--text-3);margin-top:2px}
 .summary .label{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-3)}
 .summary .value{margin-top:3px;font-size:13.5px;font-weight:540;color:var(--text);word-break:break-word;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .split{display:grid;gap:var(--s5);grid-template-columns:minmax(0,1.4fr) minmax(280px,1fr);align-items:start}
@@ -572,7 +577,7 @@ select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;
   .topbar{padding:var(--s3);gap:var(--s2);flex-wrap:wrap}
   .card{padding:var(--s4)}
   .grid--kpi,.grid--two,.grid--even,.data-grid,.metric-grid,.summary-grid,
-  .command-grid,.tile-grid,.split-callout,.mode-grid{grid-template-columns:minmax(0,1fr)}
+  .command-grid,.lifecycle,.tile-grid,.split-callout,.mode-grid{grid-template-columns:minmax(0,1fr)}
   .command-risk{max-height:none}
   .chart-row{grid-template-columns:64px minmax(0,1fr) 76px}
   .dl,.dl--wide{grid-template-columns:1fr;gap:2px var(--s3)}
@@ -5262,6 +5267,284 @@ def _render_scalper_live_card(view: Mapping[str, Any], nonce: str) -> str:
     )
 
 
+def _live_candidate_table(view: Mapping[str, Any]) -> str:
+    """The exact candidate and what (if anything) measured it."""
+
+    candidates = [dict(item) for item in (view.get("candidates") or ())]
+    return table(
+        "Strategy candidates and their evidence",
+        (("Candidate", "mono"), ("Evidence state", "text"), ("Evidence note", "text"), ("Rationale", "text")),
+        (
+            (
+                escape(str(item.get("candidate_id") or "")),
+                escape(str(item.get("evidence_state") or "UNVALIDATED")),
+                escape(str(item.get("evidence_note") or "not reported")),
+                escape(str(item.get("rationale") or "not reported")),
+            )
+            for item in candidates
+        ),
+        empty=empty_state(
+            "No strategy candidate is wired into this LIVE path",
+            "The operator must type an exact candidate on the arming form. Nothing is "
+            "selected here by a PAPER result or by AXIOM itself.",
+        ),
+    )
+
+
+def _live_lifecycle(scalper: Mapping[str, Any]) -> str:
+    """One exact typed intent, through every guarded stage, on /live only."""
+
+    selected = dict(scalper.get("selected") or {})
+    if not selected.get("intent_id"):
+        return notice(
+            "muted",
+            "No exact typed intent is recorded",
+            "Registration, review, approval, arming, one submission and reconciliation are "
+            "separate decisions below. A PAPER result cannot enter this lifecycle.",
+        )
+    status = str(selected.get("status") or "not recorded")
+    terminal = {
+        "FILLED", "PARTIAL", "REJECTED", "REFUSED", "UNRESOLVED",
+        "BOOKING_FAILED", "RECONCILED",
+    }
+    submitted = status in terminal or status == "SUBMITTING" or bool(selected.get("broker"))
+    reconciled = status == "RECONCILED" or bool(selected.get("reconciliation"))
+    done = (
+        True,
+        bool(selected.get("reviewed")),
+        bool(selected.get("approved")),
+        bool(selected.get("armed")),
+        submitted,
+        reconciled,
+    )
+    labels = ("Recorded", "Reviewed", "Approved", "Armed", "Submitted", "Reconciled")
+    current = next((index for index, value in enumerate(done) if not value), len(done) - 1)
+    items = []
+    for index, (label, complete) in enumerate(zip(labels, done)):
+        state = "done" if complete else ("current step" if index == current else "not reached")
+        attrs = " aria-current='step'" if index == current and not complete else ""
+        items.append(
+            f"<li{attrs}><span class='stage'>{escape(label)}</span>"
+            f"<span class='state'>{escape(state)}</span></li>"
+        )
+    return (
+        "<ol class='lifecycle' aria-label='One-shot LIVE intent lifecycle'>"
+        + "".join(items)
+        + "</ol>"
+        + "<p class='small muted'>Current status: "
+        + escape(status)
+        + ". An ambiguous request is reconciled by the same durable id; it is never re-sent.</p>"
+    )
+
+
+def _live_broker_response(view: Mapping[str, Any], scalper: Mapping[str, Any]) -> str:
+    """The broker's own answer and every unresolved request, or an empty state."""
+
+    selected = dict(scalper.get("selected") or {})
+    broker = dict(selected.get("broker") or {})
+    reconciliation = dict(selected.get("reconciliation") or {})
+    reconcile_result = dict(reconciliation.get("result") or {})
+    order_record = dict(reconciliation.get("order_record") or {})
+    last_event = dict(selected.get("last_event") or {})
+    unresolved = [
+        str(item)
+        for item in (scalper.get("unresolved_orders") or view.get("unresolved") or ())
+    ]
+    if broker or reconciliation or last_event:
+        filled = broker.get("volume_filled")
+        # An empty string means the broker did not report a fill; it is not a
+        # zero. A reported Decimal("0") is shown as the zero it is.
+        filled_text = (
+            escape(str(filled)) if filled is not None and str(filled).strip() else "not reported"
+        )
+        reconciliation_text = "not recorded"
+        if reconciliation:
+            reconciliation_text = (
+                "reconciled" if reconcile_result.get("reconciled") else "not reconciled"
+            ) + " · broker order state: " + str(order_record.get("state") or "not recorded")
+            if reconcile_result.get("reason"):
+                reconciliation_text += " · " + str(reconcile_result["reason"])
+        facts = dl(
+            (
+                ("Broker state", escape(str(
+                    broker.get("state") or broker.get("status") or "not reported"
+                ))),
+                ("Broker request id", escape(str(
+                    broker.get("request_id")
+                    or reconciliation.get("request_id")
+                    or selected.get("intent_id")
+                    or "not reported"
+                ))),
+                ("Broker retcode", escape(str(
+                    broker.get("retcode_name") or broker.get("retcode")
+                    or broker.get("classification") or "not reported"
+                ))),
+                ("Filled volume", filled_text),
+                ("Reconciliation", escape(reconciliation_text)),
+                ("Last durable event", escape(str(
+                    last_event.get("event_type") or last_event.get("kind") or "not recorded"
+                ))),
+            )
+        )
+    else:
+        facts = empty_state(
+            "No broker response is recorded",
+            "No broker order has been answered for this exact intent. An unresolved "
+            "request is never silently retried.",
+        )
+    if unresolved:
+        unresolved_html = (
+            "<p class='small'><strong>Unresolved broker requests:</strong> "
+            + escape(", ".join(unresolved[:20]))
+            + (" …" if len(unresolved) > 20 else "")
+            + "</p>"
+        )
+    else:
+        unresolved_html = empty_state(
+            "No unresolved broker requests",
+            "The durable request ledger reports no open ambiguity to reconcile.",
+        )
+    return facts + unresolved_html
+
+
+def _live_positions_and_pnl(view: Mapping[str, Any], scalper: Mapping[str, Any]) -> str:
+    """Broker-reported positions and P&L availability, never a PAPER number."""
+
+    positions = [dict(item) for item in (view.get("positions") or ())]
+    pnl = dict(scalper.get("pnl") or {})
+    if pnl.get("available"):
+        pnl_text = (
+            str(pnl.get("total") or "")
+            + " "
+            + str(pnl.get("currency") or "")
+            + " · "
+            + str(pnl.get("basis") or "broker-reported open position profit only")
+        )
+    else:
+        pnl_text = "unavailable — " + str(
+            pnl.get("reason")
+            or "the broker did not report complete open-position profit; balance, equity "
+               "and closed P&L are not read"
+        )
+    header = notice("muted", "Broker-reported P&L availability", pnl_text)
+    if not positions:
+        return header + empty_state(
+            "No broker position is open",
+            "Broker-reported positions only. Local PAPER positions are on /autopilot.",
+        )
+    return header + table(
+        "Broker-reported open positions (not PAPER positions)",
+        (("Symbol", "mono"), ("Side", "text"), ("Volume", "num"), ("Open price", "num"), ("Broker profit", "num")),
+        (
+            (
+                escape(str(item.get("symbol") or "")),
+                escape(str(item.get("side") or "")),
+                escape(str(item.get("volume") or "")),
+                escape(str(item.get("price_open") or "")),
+                escape(str(item.get("profit"))) if item.get("profit") is not None else "unavailable",
+            )
+            for item in positions
+        ),
+    )
+
+
+def _live_arm_result(view: Mapping[str, Any]) -> str:
+    """The one-shot arming decision, consumed from the app's one-shot state."""
+
+    last_arm = dict(view.get("last_arm") or {})
+    if not last_arm:
+        return ""
+    armed = bool(last_arm.get("armed"))
+    blockers = [dict(item) for item in (last_arm.get("blockers") or ())]
+    return card(
+        "Last arming decision",
+        notice(
+            "danger" if armed else "warn",
+            "Armed" if armed else "Not armed",
+            str(last_arm.get("message") or last_arm.get("reason") or "No reason was reported."),
+        )
+        + (_blocker_list(blockers) if blockers else ""),
+        hint="A record of the arming click only. It does not imply that an order was sent.",
+    )
+
+
+def _live_refusal_card(view: Mapping[str, Any]) -> str:
+    """A recorded refusal used to be computed and then silently dropped."""
+
+    refusal = dict(view.get("last_refusal") or {})
+    if not refusal:
+        return ""
+    blockers = [dict(item) for item in (refusal.get("blockers") or ())]
+    return card(
+        "Last LIVE refusal",
+        notice(
+            "warn",
+            "Arming or an order was refused",
+            "Recorded at " + str(refusal.get("at") or "an unreported time") + ".",
+        )
+        + (
+            _blocker_list(blockers)
+            if blockers
+            else empty_state("No blocker detail", "The refusal did not carry a reason.")
+        ),
+        hint="Every blocker is checked again before each order, not only on this page.",
+    )
+
+
+def _live_workflow_overview(ctx: PageContext, view: Mapping[str, Any]) -> str:
+    """The distinct LIVE lane: exact plan, evidence, gates and broker facts."""
+
+    scalper = dict(view.get("scalper_live") or {})
+    plan = dict(view.get("plan") or {})
+    selected = dict(scalper.get("selected") or {})
+    review = dict(view.get("review") or {})
+    configured = bool(view.get("configured"))
+    blockers = [dict(item) for item in (view.get("blockers") or ())]
+    facts = (
+        ("Trading adapter", chip("wired", "danger", dot=True) if configured else chip("not wired", "muted")),
+        ("Execution mode", execution_mode_chip(ctx)),
+        ("Account state", chip("connected", "live") if view.get("connected") else chip("not connected", "muted")),
+        ("Plan on disk", chip("present", "warn") if plan.get("present") else chip("none", "muted")),
+        ("Exact candidate", f"<span class='mono'>{escape(str(selected.get('intent_id') or plan.get('candidate_id') or 'none'))}</span>"),
+        ("Plan fingerprint", f"<span class='mono'>{escape(str(selected.get('plan_fingerprint') or 'none'))}</span>"),
+        ("Review", chip("recorded", "ok") if review else chip("not recorded", "muted")),
+        ("Approval file", f"<span class='mono'>{escape(str(scalper.get('approval_file') or 'not wired'))}</span>"),
+        ("Arming", chip("armed", "danger", dot=True) if view.get("armed") else chip("not armed", "muted")),
+        ("Continuous session", chip("running", "danger", dot=True) if view.get("session_running") else chip("stopped", "muted")),
+        ("Broker positions", escape(str(len(view.get("positions") or ())))),
+        ("Unresolved requests", escape(str(len(scalper.get("unresolved_orders") or view.get("unresolved") or ())))),
+        ("Preflight blockers", escape(str(len(blockers))) + " listed below"),
+    )
+    return card(
+        "LIVE workflow at a glance",
+        "<div class='summary-grid'>" + "".join(
+            f"<div class='summary'><div class='label'>{escape(label)}</div>"
+            f"<div class='value'>{value}</div></div>"
+            for label, value in facts
+        ) + "</div>"
+        + "<h3>Exact plan, candidate and evidence</h3>"
+        + _live_candidate_table(view)
+        + "<h3>One-shot intent lifecycle</h3>"
+        + _live_lifecycle(scalper)
+        + "<h3>Broker response and unresolved requests</h3>"
+        + _live_broker_response(view, scalper)
+        + "<h3>Broker-reported P&amp;L and positions</h3>"
+        + "<p class='small'><a href='#broker-positions'>Jump to the broker position table</a> "
+        + "below. The table and this page read the broker only; PAPER positions and P&amp;L "
+        + "are on <a href='/autopilot'>/autopilot</a>.</p>"
+        + notice(
+            "muted",
+            "LIVE and PAPER stay separate",
+            "Evidence, review, approval, arming, account confirmation and broker positions "
+            "belong to /live. The PAPER command center cannot arm, submit, or close a "
+            "broker order.",
+        ),
+        hint="Real MetaTrader 5 account only. An unavailable value is named; no capital, "
+             "cost, contract term or risk limit is guessed.",
+        right=chip("LIVE · REAL BROKER", "danger", dot=True),
+    )
+
+
 def render_live(ctx: PageContext) -> str:
     view = _live_view(ctx)
     configured = bool(view.get("configured"))
@@ -5286,9 +5569,13 @@ def render_live(ctx: PageContext) -> str:
         "authorises the adapter without sending anything; starting a session can send a real "
         "order on the next strategy signal. No button here connects, signs in, switches "
         "account, or edits your broker settings, and none of these settings is changed by "
-        "anything on the paper pages.</p></div>",
+        "anything on the paper pages. The PAPER command center is on "
+        "<a href='/autopilot'>/autopilot</a>; this page never promotes its results."
+        "</p></div>",
     ]
 
+    body.append(_live_workflow_overview(ctx, view))
+    body.append(_live_arm_result(view))
     if not configured:
         body.append(
             notice(
@@ -5461,29 +5748,22 @@ def render_live(ctx: PageContext) -> str:
     )
     body.append(account_card)
 
-    if positions:
-        body.append(
-            card(
-                "Broker positions",
-                table(
-                    "Open positions at the terminal",
-                    [("Symbol", "mono"), ("Side", ""), ("Volume", "num"), ("Open price", "num")],
-                    [
-                        [
-                            escape(str(item.get("symbol", ""))),
-                            escape(str(item.get("side", ""))),
-                            escape(str(item.get("volume", ""))),
-                            escape(str(item.get("price_open", ""))),
-                        ]
-                        for item in positions
-                    ],
-                ),
-                hint="Read from the terminal. The broker is authoritative; AXIOM books its fills.",
-            )
+    scalper_live = dict(view.get("scalper_live") or {})
+    body.append(
+        "<div id='broker-positions'>"
+        + card(
+            "Broker positions",
+            _live_positions_and_pnl(view, scalper_live),
+            hint="Read from the terminal. The broker is authoritative for these positions; "
+                 "PAPER positions and P&L stay on /autopilot.",
         )
+        + "</div>"
+    )
 
     last = dict(view.get("last_outcome") or {})
     refusal = dict(view.get("last_refusal") or {})
+    if refusal:
+        body.append(_live_refusal_card(view))
     if last or refusal:
         rows = []
         if last:
@@ -5497,6 +5777,12 @@ def render_live(ctx: PageContext) -> str:
                     chip("booked", "ok") if last.get("booked") else chip("not booked", "warn"),
                 ]
             )
+        empty = empty_state(
+            "No order attempt yet",
+            "Nothing has been sent in this session."
+            if not refusal
+            else "No order was sent; the refusal above is the last recorded outcome.",
+        )
         body.append(
             card(
                 "The last order path",
@@ -5506,7 +5792,7 @@ def render_live(ctx: PageContext) -> str:
                     rows,
                 )
                 if rows
-                else empty_state("No order attempt yet", "Nothing has been sent in this session."),
+                else empty,
                 hint="An unknown outcome stops the session and is never re-sent.",
             )
         )

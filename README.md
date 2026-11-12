@@ -390,6 +390,18 @@ in one line whether the next strategy signal would send one. Enabling LIVE, armi
 the plan, and starting the session are three separate clicks; none of them sends
 an order, and **Stop and disarm** always works.
 
+The page opens with a **LIVE workflow at a glance** panel: adapter, execution
+mode, account state, the exact candidate and its evidence, plan fingerprint,
+review, approval file, arming, continuous session, broker positions and unresolved
+requests, each read from the live view rather than restated. A six-stage
+**Recorded → Reviewed → Approved → Armed → Submitted → Reconciled** lifecycle
+marks the current step, and the broker's own answer, its request id, retcode and
+reconciliation are shown beside the unresolved requests. The **Last arming
+decision** and **Last LIVE refusal** cards keep a one-shot click's outcome on the
+page instead of dropping it. Broker-reported positions and P&L are labelled as the
+broker's numbers; an unavailable P&L is named, never shown as a zero, and the
+PAPER book stays on `/autopilot`.
+
 You choose the strategy, symbol, order size, maximum open positions, and daily
 loss limit, then read a review of exactly what arming authorises before typing the
 confirmation phrase. A strategy without measured results is labelled

@@ -21,7 +21,13 @@ list (or an empty state), quote freshness and local paper P&L. It links directly
 Start/Stop, blockers and their fixes, and each monitoring section. Unavailable values
 are named; they are never replaced with zero. AX-SCALPER PAPER is shown here as a
 separate local simulated book; LIVE review, approval, arming and broker positions
-remain on `/live`.
+remain on `/live`. That page opens with its own **LIVE workflow at a glance** panel
+(adapter, account, exact candidate and evidence, fingerprint, review, approval file,
+arming, session, broker positions, unresolved requests), a six-stage one-shot
+lifecycle that marks the current step, the broker's own response and reconciliation,
+broker-reported positions and P&L (unavailable values are named, never zeroed), and
+the last arming decision and last LIVE refusal. Nothing on `/autopilot` promotes a
+PAPER result into any of it.
 
 Once a selection is running, a separate bridge (`live_autopilot.py`) can offer the
 **same** strategy to the live workflow that the Live execution page already owns.

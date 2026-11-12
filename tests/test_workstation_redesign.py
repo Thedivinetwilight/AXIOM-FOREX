@@ -128,7 +128,10 @@ def _audit(html: str) -> _ControlAudit:
 
 
 def _app_states(tmp_path: Path) -> dict[str, WorkstationApp]:
-    """Bare, wired-catalog and wired-autopilot render states."""
+    """Bare, wired, observed, catalog, autopilot and LIVE render states."""
+
+    from tests.test_workstation_live_overview import _wired_app
+    from tests.test_workstation_ui import live_wizard
 
     states = dict(_chrome_apps())
     states["catalog"] = _catalog_app(_panel(tmp_path / "catalog"))
@@ -136,6 +139,15 @@ def _app_states(tmp_path: Path) -> dict[str, WorkstationApp]:
     states["scalper"] = WorkstationApp(
         wizard=simulated_wizard(), scalper_paper=FakeScalper()
     )
+    # A live terminal whose account has been observed but not yet confirmed: the
+    # one state in which the confirmation form is on the page.
+    observed = app_for(live_wizard())
+    observed.act("connect", {"nonce": [observed.nonce]})
+    observed.act("symbols", {"nonce": [observed.nonce], "symbol": ["EURUSD", "GBPUSD"]})
+    states["observed"] = observed
+    # A wired LIVE adapter and typed-intent bridge, rendered only. Nothing here
+    # connects, arms or sends anything.
+    states["wired-live"] = _wired_app()
     return states
 
 
@@ -205,6 +217,85 @@ def test_all_literal_and_builder_form_targets_are_registered_actions():
     assert {key for key, _href, _label in views.NAV} == set(PAGE_PATHS)
     assert len(views.PAGES) == len(GET_ROUTES) == 16
     assert set(views.PAGE_SCOPES) == set(PAGE_PATHS)
+
+
+# Every declared action that no render state above can show, with the state that
+# reveals it. A control that is neither rendered nor named here would be a dead
+# button, so this table is pinned rather than described.
+_STATE_GATED: dict[str, str] = {
+    "autopilot-flat": "autopilot book holds a PAPER position to flatten",
+    "autopilot-live-start": "LIVE plan present and armed",
+    "autopilot-live-stop": "a LIVE session is running",
+    "autopilot-stop": "the PAPER autopilot is running",
+    "catalog-paper-close-all": "catalog PAPER book holds a position",
+    "catalog-paper-flat": "catalog PAPER position exists",
+    "catalog-paper-stop": "catalog PAPER runner is running",
+    "dataset-evaluate": "an imported dataset is selected",
+    "imports-refresh": "a data folder is configured",
+    "kronos-benchmark": "the Kronos panel is wired in",
+    "kronos-forecast": "the Kronos panel is wired in",
+    "kronos-inspect-weights": "the Kronos panel is wired in",
+    "kronos-install": "the Kronos panel is wired in",
+    "kronos-install-cancel": "the Kronos panel is wired in",
+    "kronos-install-check": "the Kronos panel is wired in",
+    "kronos-install-cleanup": "the Kronos panel is wired in",
+    "kronos-load": "the Kronos panel is wired in",
+    "kronos-preset-load": "the Kronos panel is wired in",
+    "kronos-preset-save": "the Kronos panel is wired in",
+    "kronos-reconcile": "the Kronos panel is wired in",
+    "kronos-save": "the Kronos panel is wired in",
+    "kronos-schedule-start": "the Kronos panel is wired in",
+    "kronos-schedule-stop": "the Kronos panel is wired in",
+    "kronos-stop": "a Kronos job is running",
+    "live-disarm": "LIVE is armed",
+    "live-start": "LIVE plan present and armed",
+    "live-stop": "a LIVE session is running",
+    "live-stop-settings": "a LIVE session has run",
+    "mode-paper": "the effective execution mode is LIVE",
+    "research-cancel": "a research job is running",
+    "runner-stop": "a strategy runner is running",
+    "scalper-paper-acknowledge-recovery": "the scalper PAPER loop reported recovery",
+    "scalper-paper-observe": "a scalper symbol is selected",
+    "scalper-paper-select-symbol": "the scalper symbol picker is drawn",
+    "scalper-paper-start": "a scalper symbol is selected",
+    "scalper-paper-stop": "the scalper PAPER loop is running",
+    "strategy-deselect": "a strategy is enabled in the library",
+    "strategy-evaluate": "a strategy is selected in the library",
+    "strategy-monitor": "a strategy is enabled in the library",
+    "strategy-screen": "the strategy library is wired in",
+    "strategy-select": "the strategy library is wired in",
+    "ticks-convert": "a tick source is configured",
+}
+
+
+def test_every_declared_action_is_visible_or_names_the_state_that_reveals_it(tmp_path):
+    states = _app_states(tmp_path)
+    rendered: dict[str, set[str]] = {}
+    for state, app in states.items():
+        for path in sorted(GET_ROUTES):
+            status, html = app.page(path)
+            assert int(status) == HTTPStatus.OK, (state, path, status)
+            for action in set(re.findall(r"action='/actions/([a-z0-9-]+)'", html)):
+                rendered.setdefault(action, set()).add(f"{state} {path}")
+    assert set(rendered) <= POST_ACTIONS, set(rendered) - POST_ACTIONS
+    assert set(rendered) | set(_STATE_GATED) == POST_ACTIONS, (
+        POST_ACTIONS - set(rendered) - set(_STATE_GATED),
+        (set(rendered) | set(_STATE_GATED)) - POST_ACTIONS,
+    )
+    assert not set(rendered) & set(_STATE_GATED), set(rendered) & set(_STATE_GATED)
+    assert set(_STATE_GATED) <= POST_ACTIONS
+    assert all(reason.strip() for reason in _STATE_GATED.values())
+    # The LIVE lane's own controls are on /live and nowhere else.
+    live_only = {
+        "scalper-live-register", "scalper-live-review", "scalper-live-approve",
+        "scalper-live-arm", "scalper-live-submit", "scalper-live-reconcile",
+    }
+    for action in live_only:
+        assert rendered[action] == {"wired-live /live"}, (action, rendered[action])
+    # And PAPER's command-center controls are on /autopilot, never on /live.
+    for action in ("autopilot-start", "autopilot-kronos"):
+        assert all(path.startswith("autopilot /autopilot") for path in rendered[action])
+    assert "/live" not in " ".join(rendered["autopilot-start"])
 
 
 def test_every_registered_action_has_a_dispatcher_and_a_specific_outcome():
@@ -317,9 +408,15 @@ def test_the_shared_chrome_names_the_paper_live_and_sample_lanes():
     assert "data-scope='live-execution'" in live
     assert "PAPER COMMAND CENTER" not in live
     assert "EXECUTION MODE" in mode
-    for html in (autopilot, live, mode):
+    for html, scope, tone in (
+        (autopilot, "paper-command", "paper"),
+        (live, "live-execution", "danger"),
+        (mode, "execution-mode", "warn"),
+    ):
         assert "SIMULATED / SAMPLE DATA" in html
-        assert "notice--danger" in html or "page-scope--danger" in html or True
+        assert "id='page-scope'" in html
+        assert f"data-scope='{scope}'" in html
+        assert f"page-scope--{tone}" in html
 
 
 def test_the_stylesheet_has_one_design_system_and_three_narrow_breakpoints():
