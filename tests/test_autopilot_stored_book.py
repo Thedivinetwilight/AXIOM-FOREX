@@ -399,7 +399,7 @@ def test_the_symbol_table_names_its_columns(tmp_path):
 # -- and the paper path still cannot send ----------------------------------
 
 
-def test_the_autopilot_page_still_posts_only_its_own_six_actions(tmp_path):
+def test_the_autopilot_page_posts_only_paper_and_observation_actions(tmp_path):
     _seed_book(tmp_path)
     panel = _panel(tmp_path)
     app = _app(panel)
@@ -407,6 +407,9 @@ def test_the_autopilot_page_still_posts_only_its_own_six_actions(tmp_path):
     html = _page(app)
     posted = set(re.findall(r"action='/actions/([a-z-]+)'", html))
     assert posted <= {
+        # Explicit observation controls in the PAPER command center.
+        "connect",
+        "disconnect",
         "autopilot-start",
         "autopilot-stop",
         "autopilot-flat",

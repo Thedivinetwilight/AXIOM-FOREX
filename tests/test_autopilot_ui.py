@@ -73,9 +73,13 @@ def test_the_page_offers_one_start_and_one_stop_and_a_blocked_live_card(tmp_path
     assert "LIVE is never automatic" in text
     # No bridge is wired in this fixture, and the card says so instead of guessing.
     assert "The live bridge is not wired into this workstation" in text
-    # The only actions the page can post are the autopilot's own six.
+    # The PAPER command center adds its own explicit observation Connect; the
+    # remaining actions are the autopilot's own six.  Connect/disconnect are
+    # read-only session actions and cannot arm, submit or switch mode.
     posted = set(re.findall(r"action='/actions/([a-z-]+)'", _page(app)))
     assert posted <= {
+        "connect",
+        "disconnect",
         "autopilot-start",
         "autopilot-stop",
         "autopilot-flat",

@@ -313,6 +313,12 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .dl--wide{grid-template-columns:minmax(180px,auto) 1fr}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--s3) var(--s4);margin-top:var(--s3)}
 .summary{min-width:0}
+.command-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--s3);margin-top:var(--s3)}
+.command-grid .summary{border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:var(--s3);background:rgba(255,255,255,.015)}
+.command-grid .value{word-break:break-word}
+.command-risk{max-height:260px;overflow:auto;border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:var(--s3);background:rgba(0,0,0,.12)}
+.command-links{display:flex;flex-wrap:wrap;gap:var(--s2);margin:var(--s3) 0}
+.command-center h3{margin:var(--s5) 0 var(--s2);font-size:14px}
 .summary .label{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-3)}
 .summary .value{margin-top:3px;font-size:13.5px;font-weight:540;color:var(--text);word-break:break-word;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .split{display:grid;gap:var(--s5);grid-template-columns:minmax(0,1.4fr) minmax(280px,1fr);align-items:start}
@@ -566,7 +572,8 @@ select:focus,input[type="number"]:focus{border-color:var(--accent);outline:none;
   .topbar{padding:var(--s3);gap:var(--s2);flex-wrap:wrap}
   .card{padding:var(--s4)}
   .grid--kpi,.grid--two,.grid--even,.data-grid,.metric-grid,.summary-grid,
-  .tile-grid,.split-callout,.mode-grid{grid-template-columns:minmax(0,1fr)}
+  .command-grid,.tile-grid,.split-callout,.mode-grid{grid-template-columns:minmax(0,1fr)}
+  .command-risk{max-height:none}
   .chart-row{grid-template-columns:64px minmax(0,1fr) 76px}
   .dl,.dl--wide{grid-template-columns:1fr;gap:2px var(--s3)}
 }
@@ -8827,6 +8834,128 @@ def _stored_positions_table(stored: Mapping[str, Any]) -> str:
     )
 
 
+#: Units for the local AX-SCALPER PAPER risk document.  A value without its unit
+#: is not a risk setting an operator can check; nothing here invents a limit.
+_RISK_LABELS: dict[str, str] = {
+    "risk_fraction": "Per-trade equity risk (fraction of equity)",
+    "max_loss_per_trade_account": "Max loss per trade (account currency)",
+    "max_aggregate_risk_fraction": "Aggregate open risk (fraction of equity)",
+    "max_leverage": "Max leverage (×)",
+    "max_currency_exposure_fraction": "Per-currency exposure (fraction of equity)",
+    "max_correlated_positions": "Max correlated positions (positions)",
+    "max_daily_loss_fraction": "Daily loss stop (fraction of equity per day)",
+    "max_drawdown_fraction": "Drawdown stop (fraction of equity)",
+    "max_loss_streak": "Loss-streak stop (losses)",
+    "max_spread_points_hard": "Hard spread cap (broker points)",
+    "max_slippage_points": "Slippage cap (broker points)",
+    "max_fill_latency_ms": "Fill-latency cap (ms)",
+    "max_open_positions": "Open-position cap (positions)",
+    "max_quote_age_ms": "Max quote age (ms)",
+    "max_spread_points": "Soft spread cap (broker points)",
+    "max_hold_ms": "Max holding time (ms)",
+    "break_even_trigger_points": "Break-even trigger (broker points)",
+    "trail_after_points": "Trail activation (broker points)",
+    "trail_distance_points": "Trail distance (broker points)",
+}
+
+
+def _scalper_risk_rows(config: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    """The configured risk values, every one with the unit its key declares."""
+
+    risk = dict(config.get("risk") or {})
+    return tuple(
+        (
+            _RISK_LABELS.get(str(key), str(key).replace("_", " ").capitalize()),
+            escape(str(value)),
+        )
+        for key, value in risk.items()
+    )
+
+
+def _quote_metric(
+    quote: Mapping[str, Any],
+    key: str,
+    *,
+    suffix: str = "",
+    not_started: str = "unavailable — no PAPER quote session has started",
+) -> str:
+    """A measured value, or an explicit unavailable state.  Never a false zero."""
+
+    if not quote or key not in quote:
+        return not_started
+    value = quote.get(key)
+    if value is None or value == "":
+        return "unavailable — not reported by this session"
+    return escape(str(value)) + suffix
+
+
+def _command_quote_freshness(
+    paper: Mapping[str, Any], quote: Mapping[str, Any], config: Mapping[str, Any]
+) -> str:
+    """The newest PAPER quote, with its unit, or an honest unavailable state."""
+
+    quotes = [dict(item) for item in (paper.get("quotes") or ())]
+    if quotes:
+        newest = max((str(item.get("quote_time") or "") for item in quotes), default="")
+        ages = [
+            str(item.get("age_text") or "age not reported")
+            for item in quotes
+            if item.get("age_text")
+        ]
+        return (
+            f"{len(quotes)} row(s) · newest {escape(newest or 'time not reported')}"
+            + (f" · {escape(', '.join(ages))}" if ages else "")
+        )
+    age = quote.get("quote_age_seconds")
+    if age is None or not quote:
+        return "not measured — no PAPER quote session has started"
+    limit = dict(config.get("risk") or {}).get("max_quote_age_ms")
+    if limit in (None, ""):
+        return f"{float(age):.3f} s · configured age limit unavailable"
+    fresh = float(age) * 1000 <= float(limit)
+    return f"{float(age):.3f} s · {escape(str(limit))} ms limit · {'within limit' if fresh else 'stale'}"
+
+
+#: Blocker reasons that name the route carrying the control which clears them.
+_AUTOPILOT_BLOCKER_FIXES: dict[str, tuple[str, str]] = {
+    "no_terminal": ("Connect the terminal", "/setup"),
+    "no_symbols_selected": ("Choose symbols", "/account"),
+    "unsupported_timeframe": ("Choose a timeframe", "/quick-setup"),
+    "no_usable_history": ("Check the market data", "/quick-setup"),
+    "evaluation_failed": ("Re-run the evaluation", "/quick-setup"),
+    "evaluation_record_not_written": ("Re-run the evaluation", "/quick-setup"),
+    "no_candidate_met_the_selection_rules": ("See what was evaluated", "/quick-setup"),
+    "no_usable_watch": ("See the symbol offer", "/account"),
+    "paper_test_refused": ("See the paper test", "/quick-setup"),
+    "catalog_panel_missing": ("Open Quick setup", "/quick-setup"),
+}
+
+
+def _autopilot_blocker_fixes(blockers: Sequence[Mapping[str, Any]]) -> str:
+    """The refusal sentence and a direct link to the control that clears it."""
+
+    items = [dict(item) for item in blockers or ()]
+    if not items:
+        return ""
+    fixes: list[tuple[str, str]] = []
+    for item in items:
+        route = _AUTOPILOT_BLOCKER_FIXES.get(str(item.get("reason") or ""))
+        if route and route not in fixes:
+            fixes.append(route)
+    return _blocker_list(
+        [{"reason": item.get("reason", ""), "message": item.get("detail", "")} for item in items]
+    ) + (
+        "<div class='step-actions'>"
+        + "".join(
+            f"<a class='btn btn-sm' href='{escape(href)}'>{escape(label)}</a>"
+            for label, href in fixes
+        )
+        + "</div>"
+        if fixes
+        else ""
+    )
+
+
 def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     """AX-SCALPER's distinct PAPER-only live-quote controller on Autopilot."""
     if not view.get("available"):
@@ -8844,8 +8973,7 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     handoff = dict(view.get("live_handoff") or {})
     body.append(dl((
         ("Quote observation", "connected" if view.get("connected") else "disconnected"),
-        ("Quote freshness", "not measured" if quote.get("quote_age_seconds") is None else
-         ("stale" if float(quote.get("quote_age_seconds") or 0) * 1000 > int(dict(config.get("risk") or {}).get("max_quote_age_ms", 0)) else "within configured age")),
+        ("Quote freshness", _command_quote_freshness({}, quote, config)),
         ("Admitted strategy readiness", "admitted" if review_state.get("trade_admission_open") else "blocked — no admitted candidate"),
         ("PAPER session", "observation-only — entries disabled" if view.get("observation_only") else
          "running PAPER decisions" if state == "RUNNING" else "not running"),
@@ -8866,29 +8994,7 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
         body.append("<p class='small'><a href='/live'>Open the separate LIVE review page</a>; this does not transfer, approve, or arm an AX-SCALPER intent.</p>")
     if result.get("message"):
         body.append(notice("ok" if result.get("ok") else "warn", "Last AX-SCALPER action", str(result["message"])))
-    risk_names = {
-        "risk_fraction": "Per-trade equity risk fraction",
-        "max_loss_per_trade_account": "Max loss per trade (account currency)",
-        "max_aggregate_risk_fraction": "Aggregate open-risk fraction",
-        "max_leverage": "Max leverage (x)",
-        "max_currency_exposure_fraction": "Per-currency exposure fraction",
-        "max_correlated_positions": "Max correlated positions (count)",
-        "max_daily_loss_fraction": "Daily loss stop (fraction)",
-        "max_drawdown_fraction": "Drawdown stop (fraction)",
-        "max_loss_streak": "Loss-streak stop (count)",
-        "max_spread_points_hard": "Hard spread cap (broker points)",
-        "max_slippage_points": "Slippage cap (broker points)",
-        "max_fill_latency_ms": "Fill-latency cap (ms)",
-        "max_open_positions": "Open-position cap (count)",
-        "max_quote_age_ms": "Max quote age (ms)",
-        "max_spread_points": "Soft spread cap (broker points)",
-        "max_hold_ms": "Max holding time (ms)",
-        "break_even_trigger_points": "Break-even trigger (broker points)",
-        "trail_after_points": "Trail activation (broker points)",
-        "trail_distance_points": "Trail distance (broker points)",
-    }
-    risk_rows = tuple((risk_names.get(str(k), str(k).replace("_", " ")), escape(str(v)))
-                      for k, v in dict(config.get("risk") or {}).items())
+    risk_rows = _scalper_risk_rows(config)
     strategy_review = review_state
     policy = dict(strategy_review.get("effective_policy") or {})
     body.append(dl((
@@ -8963,20 +9069,44 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
                           ((escape(str(x.get("broker_symbol", ""))), escape(str(x.get("kind", ""))), escape(str(x.get("reason", "")))) for x in exclusions),
                           empty="No exclusions reported."))
     body.append(dl((
-        ("Last broker tick", escape(str(quote.get("quote_time") or "—"))),
-        ("Quote age", "unavailable" if quote.get("quote_age_seconds") is None else f"{float(quote['quote_age_seconds']):.3f} s"),
-        ("Last decision / refusal", escape(str(quote.get("last_decision") or view.get("reason") or "none"))),
-        ("Accepted ticks / symbol", escape(str(quote.get("accepted_ticks_by_symbol") or "not started"))),
-        ("Quality / freshness by symbol", escape(str(quote.get("quality_by_symbol") or "not started"))),
-        ("Paper orders / fills", f"{quote.get('paper_orders', 0)} / {quote.get('paper_fills', 0)}"),
-        ("Open paper positions", str(quote.get("open_positions", 0))),
-        ("Paper equity", escape(str(quote.get("paper_equity") or "unavailable"))),
-        ("Realized P&L", escape(str(quote.get("realized_pnl") or "unavailable"))),
-        ("Unrealized P&L", escape(str(quote.get("unrealized_pnl") or "unavailable"))),
-        ("P&L basis", escape(str(quote.get("pnl_availability") or "not started"))),
-        ("Ledger integrity", escape(str((quote.get("ledger_integrity") or {}).get("ok", "not started")))),
+        ("Last broker tick", _quote_metric(quote, "quote_time", not_started="unavailable — no tick received")),
+        ("Quote age", _quote_metric(quote, "quote_age_seconds", suffix=" s", not_started="unavailable — no PAPER quote session has started")),
+        ("Last decision / refusal", escape(str(quote.get("last_decision") or view.get("reason") or "none recorded"))),
+        ("Accepted ticks / symbol", _quote_metric(quote, "accepted_ticks_by_symbol", not_started="unavailable — no ticks accepted")),
+        ("Quality / freshness by symbol", _quote_metric(quote, "quality_by_symbol", not_started="unavailable — no quality report")),
+        ("Paper orders / fills", _quote_metric(quote, "paper_orders") + " / " + _quote_metric(quote, "paper_fills")),
+        ("Open paper positions", _quote_metric(quote, "open_positions")),
+        ("Paper equity", _quote_metric(quote, "paper_equity")),
+        ("Realized P&L", _quote_metric(quote, "realized_pnl")),
+        ("Unrealized P&L", _quote_metric(quote, "unrealized_pnl")),
+        ("P&L basis", _quote_metric(quote, "pnl_availability", not_started="unavailable — no PAPER session has started")),
+        ("Ledger integrity", "unavailable — no ledger has been opened" if not quote or "ledger_integrity" not in quote
+         else escape(str(dict(quote.get("ledger_integrity") or {}).get("ok", "not reported")))),
         ("Paper ledger", escape(str(view.get("ledger") or "created on Start"))),
     )))
+    # The exact list of strategies this PAPER observer actually enabled.  An
+    # empty list is an empty state, never an implied "all strategies".
+    enabled = [dict(item) for item in (quote.get("strategy_versions") or ())]
+    body.append(table(
+        "Exactly the strategies enabled in this PAPER observer",
+        (("Strategy", "text"), ("Rule version", "text"), ("Fingerprint", "mono")),
+        ((escape(str(x.get("strategy") or "")),
+          escape(str(x.get("version") or "")),
+          escape(str(x.get("fingerprint") or ""))) for x in enabled),
+        empty=empty_state(
+            "No strategy is enabled",
+            "No independently admitted strategy is attached to this PAPER observer; "
+            "entries remain blocked until exact signed evidence and policy pass.",
+        ),
+    ))
+    if state in {"PAUSED", "BLOCKED", "RECOVERY_REQUIRED", "DISCONNECTED"}:
+        body.append(notice(
+            "warn",
+            "PAPER decisions are paused or refused",
+            "State: " + state + ". Cause: "
+            + escape(str(view.get("reason") or quote.get("last_decision") or "not reported by the observer"))
+            + ". No broker order is sent and no local position is changed by this refusal.",
+        ))
     positions = [dict(item) for item in quote.get("positions", ())]
     if positions:
         body.append(table("Open AX-SCALPER local paper positions (not broker positions)",
@@ -9031,6 +9161,216 @@ def _render_scalper_paper_card(view: Mapping[str, Any], nonce: str) -> str:
     return card("AX-SCALPER PAPER · live MT5 quotes", "".join(body), hint="No LIVE controls are provided here. The existing /live workflow remains separate and unchanged.")
 
 
+def _autopilot_command_center(
+    ctx: PageContext,
+    view: Mapping[str, Any],
+    nonce: str,
+    *,
+    sections: set[str],
+) -> str:
+    """The PAPER command center: one authoritative status strip and the fixes."""
+
+    state = str(view.get("state") or "IDLE")
+    choices = dict(view.get("choices") or {})
+    paper = dict(view.get("paper") or {})
+    selection = dict(view.get("selection") or {})
+    scalper = dict(view.get("scalper_paper") or {})
+    scalper_config = dict(scalper.get("config") or {})
+    review = dict(scalper.get("strategy_review") or {})
+    quote = dict(scalper.get("quote") or {})
+    runner = dict(ctx.runner or {})
+    account = _account(ctx)
+    net = _account_metric(account, "net_pnl")
+
+    if ctx.terminal.connected:
+        connection_control = action_form(
+            "disconnect", nonce, "Disconnect observation", tone="danger"
+        )
+    else:
+        connection_control = action_form(
+            "connect", nonce, connect_label(ctx), tone="primary"
+        )
+
+    verified: dict[str, dict[str, Any]] = {}
+    for item in list(choices.get("pairs") or ()) + list(scalper.get("symbols") or ()):
+        record = dict(item)
+        name = str(record.get("broker_symbol") or "")
+        if name and name not in verified:
+            verified[name] = record
+    tradable = [
+        name
+        for name, record in verified.items()
+        if record.get("tradable") is not False and record.get("usable") is not False
+    ]
+    symbol_text = (
+        f"{len(verified)} verified forex symbol(s) reported · {len(tradable)} tradable"
+        if verified
+        else "not reported — connect a terminal to verify tradable symbols"
+    )
+    frames = [str(item) for item in (choices.get("timeframes") or ())]
+    frame_text = (
+        ", ".join(frames) + " (catalog evaluation)"
+        if frames
+        else "not reported — no catalog autopilot is wired in this process"
+    )
+    scalper_frame = str(scalper_config.get("timeframe") or "not reported")
+    risk_rows = _scalper_risk_rows(scalper_config)
+    risk_html = (
+        dl(risk_rows, wide=True)
+        if risk_rows
+        else "<p class='small muted'>Not validated: the local scalper_paper.local.json "
+             "risk document is not configured or could not be read. No limit is guessed.</p>"
+    )
+    counts = dict(selection.get("counts") or {})
+    evidence_text = (
+        f"{escape(str(counts.get('selected', 0)))} selected · "
+        f"{escape(str(counts.get('eligible_not_chosen', 0)))} eligible not chosen · "
+        f"{escape(str(counts.get('rejected', 0)))} rejected"
+        if selection
+        else "not run in this process — no selection evidence yet"
+    )
+    admission_text = escape(
+        str(review.get("decision") or "unavailable — no independently admitted strategy")
+    )
+
+    enabled_catalog = [dict(item) for item in (paper.get("watches") or ())]
+    enabled_scalper = [dict(item) for item in (quote.get("strategy_versions") or ())]
+    if enabled_catalog or enabled_scalper:
+        enabled_rows = tuple(
+            (
+                "catalog PAPER",
+                escape(str(item.get("candidate_id") or item.get("symbol") or "")),
+                escape(f"{item.get('symbol', '')} / {item.get('timeframe', '')}"),
+                escape(str(item.get("candidate_id") or "")),
+            )
+            for item in enabled_catalog
+        ) + tuple(
+            (
+                "AX-SCALPER PAPER",
+                escape(str(item.get("strategy") or "")),
+                escape(str(item.get("version") or "")),
+                escape(str(item.get("fingerprint") or "")),
+            )
+            for item in enabled_scalper
+        )
+        enabled_html = table(
+            "Exactly the strategy rows this PAPER page has enabled",
+            (("Source", "text"), ("Strategy / row", "mono"), ("Rule / timeframe", "text"), ("Fingerprint", "mono")),
+            enabled_rows,
+        )
+    else:
+        enabled_html = empty_state(
+            "No strategy is enabled",
+            "No PAPER loop is following a strategy in this process. Start one only after "
+            "the terminal, verified symbol, timeframe, evidence and admission facts above are clear.",
+        )
+
+    if not runner:
+        runner_text = "not configured — no separate paper runner is wired"
+    elif runner.get("available") is False:
+        runner_text = "unavailable — " + escape(str(runner.get("error") or "runner read failed"))
+    else:
+        runner_text = (
+            "running · " if ctx.runner_running else "stopped · "
+        ) + escape(str(runner.get("state") or "state not reported"))
+    freshness_text = _command_quote_freshness(paper, quote, scalper_config)
+    if net.get("available"):
+        pnl_text = escape(str(net.get("value") or "—")) + " · " + escape(
+            str(net.get("note") or "local simulated paper ledger")
+        )
+    else:
+        pnl_text = "Unavailable — " + escape(
+            str(net.get("note") or "the local paper ledger cannot be read")
+        )
+
+    links: list[str] = []
+    for anchor, label, key in (
+        ("start-stop", "Start / Stop", "start-stop"),
+        ("pnl", "Paper P&L", "pnl"),
+        ("positions", "Open positions", "positions"),
+        ("fills", "Simulated fills", "fills"),
+        ("feed", "Quote freshness", "feed"),
+        ("stopped", "Blockers", "stopped"),
+        ("scalper-paper", "AX-SCALPER PAPER", "scalper-paper"),
+    ):
+        if key in sections:
+            links.append(f"<a class='btn btn-sm' href='#{anchor}'>{escape(label)}</a>")
+    if not links:
+        links.append(
+            "<span class='small muted'>Detailed monitoring sections appear once a PAPER "
+            "loop or observer is wired.</span>"
+        )
+
+    blockers = [dict(item) for item in (view.get("blockers") or ())]
+    # A disconnected or invalid local PAPER document reports its reason inside
+    # ``config``; a running observer reports it at the top level.  Both are the
+    # host's own words and both must reach the blocker list.
+    scalper_reason = str(scalper.get("reason") or scalper_config.get("reason") or "")
+    if scalper_reason:
+        blockers.append(
+            {
+                "reason": scalper_reason,
+                "detail": str(
+                    scalper_config.get("remediation")
+                    or "Correct the named local PAPER prerequisite on this page."
+                ),
+            }
+        )
+    blockers_html = (
+        _autopilot_blocker_fixes(blockers)
+        if blockers
+        else notice(
+            "ok",
+            "No PAPER blocker is reported right now",
+            "The start controls below still re-check every prerequisite when pressed.",
+        )
+    )
+
+    facts = (
+        ("Observation", f"{connection_chip(ctx)} {connection_control}"),
+        ("Terminal data class", data_chip(ctx.terminal_label)),
+        ("Execution mode", execution_mode_chip(ctx)),
+        ("Catalog PAPER loop", _autopilot_state_chip(state)),
+        ("Separate paper runner", escape(runner_text)),
+        ("Verified symbols", escape(symbol_text)),
+        ("Supported timeframes", escape(frame_text)),
+        ("AX-SCALPER timeframe", escape(scalper_frame)),
+        ("Simulated fill size", escape(str(choices.get("lot") or "not configured")) + " lots"
+         if choices.get("lot") else "not configured — no catalog PAPER loop is wired"),
+        ("Strategy evidence", evidence_text),
+        ("Strategy admission", admission_text),
+        ("Quote freshness", freshness_text),
+        ("Paper net P&L", pnl_text),
+    )
+    return card(
+        "PAPER command center",
+        "<div class='command-center'><div class='command-grid'>" + "".join(
+            f"<div class='summary'><div class='label'>{escape(label)}</div>"
+            f"<div class='value'>{value}</div></div>"
+            for label, value in facts
+        ) + "</div>"
+        + "<h3>Risk settings, with the unit each value uses</h3>"
+        + "<div class='command-risk'>" + risk_html + "</div>"
+        + "<h3>Exactly the enabled strategies</h3>"
+        + enabled_html
+        + "<h3>Blockers and their direct fixes</h3>"
+        + blockers_html
+        + "<h3>Monitoring and the LIVE boundary</h3>"
+        + "<div class='command-links'>" + "".join(links) + "</div>"
+        + notice(
+            "muted",
+            "LIVE is a separate page",
+            "Review, evidence, approval, arming, account confirmation and broker positions "
+            "belong to /live. This PAPER page cannot arm, submit, or close a broker order.",
+        )
+        + "<p class='small'><a class='btn btn-sm' href='/live'>Open the separate LIVE review</a></p>"
+        + "</div>",
+        hint="One authoritative reading per status. PAPER fills are local simulations, "
+             "sample data is labelled, and an unavailable value is never shown as zero.",
+        right=chip("PAPER · SIMULATED FILLS", "paper", dot=True),
+    )
+
+
 def render_autopilot(ctx: PageContext) -> str:
     """One start, one stop, and every reason written down.
 
@@ -9044,11 +9384,20 @@ def render_autopilot(ctx: PageContext) -> str:
     """
 
     view = _autopilot_view(ctx)
+    nonce = escape(ctx.action_nonce)
     if not view.get("available"):
         scalper = dict(view.get("scalper_paper") or {})
+        sections = {"scalper-paper"} if scalper.get("available") else set()
         return render_shell(
             ctx,
-            _render_scalper_paper_card(scalper, escape(ctx.action_nonce))
+            _autopilot_command_center(ctx, view, nonce, sections=sections)
+            + (
+                "<div id='scalper-paper'>"
+                + _render_scalper_paper_card(scalper, nonce)
+                + "</div>"
+                if scalper.get("available")
+                else ""
+            )
             + notice(
                 "warn",
                 "The catalog autopilot is not wired into this workstation",
@@ -9056,7 +9405,6 @@ def render_autopilot(ctx: PageContext) -> str:
             ),
         )
 
-    nonce = escape(ctx.action_nonce)
     state = str(view.get("state") or "IDLE")
     paper = dict(view.get("paper") or {})
     selection = dict(view.get("selection") or {})
@@ -9070,7 +9418,26 @@ def render_autopilot(ctx: PageContext) -> str:
     inner = dict(latency.get("decision") or {})
     positions = [dict(item) for item in (view.get("positions") or [])]
     stored = dict(view.get("stored_book") or {})
+    scalper_view = dict(view.get("scalper_paper") or {})
+    sections: set[str] = {"start-stop", "kronos", "latency", "live"}
+    if scalper_view.get("available"):
+        sections.add("scalper-paper")
+    if paper:
+        sections.update({"pnl", "positions", "fills", "active", "feed"})
+    # Only advertise #stored when the stored-book card itself is drawn: its
+    # unreadable and suppressed states render a notice or nothing at all.
+    stored_card_drawn = bool(
+        stored
+        and stored.get("available") is not False
+        and (stored.get("open") or stored.get("blocked"))
+        and not (positions and not stored.get("blocked"))
+    )
+    if stored_card_drawn:
+        sections.add("stored")
+    if view.get("blockers"):
+        sections.add("stopped")
     body: list[str] = []
+    body.append(_autopilot_command_center(ctx, view, nonce, sections=sections))
 
     result = dict(view.get("result") or {})
     if result.get("message"):
@@ -9263,6 +9630,10 @@ def render_autopilot(ctx: PageContext) -> str:
             "place an order, arm live trading, or change the execution mode.",
         )
     )
+    # AX-SCALPER PAPER used to disappear as soon as the catalog autopilot was
+    # wired.  The PAPER command center shows both, from the same page reading.
+    if scalper_view.get("available"):
+        body.append(_render_scalper_paper_card(scalper_view, nonce))
 
     # -- what is on disk, which the in-memory snapshot cannot show -----------
     stored_card = _autopilot_stored_book_card(ctx, stored, positions)
@@ -9384,50 +9755,12 @@ def render_autopilot(ctx: PageContext) -> str:
 
     blockers = [dict(item) for item in (view.get("blockers") or [])]
     if blockers:
-        # A refusal that names the page where it is fixed is a next step; one that
-        # only explains itself leaves the operator to hunt for the control.  Each
-        # route below exists, and each one carries the thing that clears it.
-        routes = {
-            "no_terminal": ("Connect the terminal", "/setup"),
-            "no_symbols_selected": ("Choose symbols", "/account"),
-            "unsupported_timeframe": ("Choose a timeframe", "/quick-setup"),
-            "no_usable_history": ("Check the market data", "/quick-setup"),
-            "evaluation_failed": ("Re-run the evaluation", "/quick-setup"),
-            "evaluation_record_not_written": ("Re-run the evaluation", "/quick-setup"),
-            "no_candidate_met_the_selection_rules": ("See what was evaluated", "/quick-setup"),
-            "no_usable_watch": ("See the symbol offer", "/account"),
-            "paper_test_refused": ("See the paper test", "/quick-setup"),
-            "catalog_panel_missing": ("Open Quick setup", "/quick-setup"),
-        }
-        next_steps = []
-        for item in blockers:
-            route = routes.get(str(item.get("reason") or ""))
-            if route and route not in next_steps:
-                next_steps.append(route)
         body.append(
             card(
                 "What stopped it",
-                _blocker_list(
-                    [
-                        {
-                            "reason": item.get("reason", ""),
-                            "message": item.get("detail", ""),
-                        }
-                        for item in blockers
-                    ]
-                )
-                + (
-                    "<div class='step-actions'>"
-                    + "".join(
-                        f"<a class='btn btn-sm' href='{escape(href)}'>{escape(label)}</a>"
-                        for label, href in next_steps
-                    )
-                    + "</div>"
-                    if next_steps
-                    else ""
-                ),
-                hint="A blocker is a refusal with a reason, never a silent fallback to "
-                "something else.",
+                _autopilot_blocker_fixes(blockers),
+                hint="A blocker is a refusal with a reason and a direct link to the "
+                "control that clears it, never a silent fallback to something else.",
             )
         )
 
@@ -9780,6 +10113,8 @@ def render_autopilot(ctx: PageContext) -> str:
                 ("active", "Active strategies", "Active strategies"),
                 ("feed", "Feed health", "Feed health"),
                 ("stopped", "What stopped it", "What stopped it"),
+                ("pnl", "Paper P&L", "Paper P&L"),
+                ("stored", "Open simulated positions, as stored on disk", "Stored book"),
                 ("kronos", "Kronos, if you turn it on", "Kronos"),
                 ("latency", "Observed latency", "Observed latency"),
                 ("live", "Taking this to LIVE: what is missing", "Taking this to LIVE"),

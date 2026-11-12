@@ -110,28 +110,43 @@ Both files are `*.local.json`, so they are git-ignored and travel only with your
 
 ### Starting a paper test: the Autopilot page
 
-**Autopilot** (`/autopilot`, first entry in the navigation) is the one page that runs the whole
-paper workflow end to end. It needs nothing from Quick setup, and it sends no order.
+**Autopilot** (`/autopilot`, first entry in the navigation and the launcher's landing page) is
+the **PAPER command center**. It runs the whole paper workflow end to end, needs nothing from
+Quick setup, and sends no broker order. The launcher opens it directly; the five-step guided
+flow remains at `/`.
 
-1. Start the workstation against your terminal (`.venv\Scripts\python.exe -m
-   axiom_forex.workstation.launch`) and open **Autopilot**.
-2. The start form lists the **forex pairs your terminal reports**, each with its pair name and
-   whether it is a major; the pairs it recommends are already ticked. Names the terminal does
-   not classify as a pair — metals, share CFDs, indices — are listed underneath with the reason,
-   and ticking none uses the recommended pairs.
-3. Choose a timeframe, then press **Start paper autopilot**. It reads the terminal's own history,
-   evaluates the catalog, selects on train and validation evidence only, and then follows the
-   selection as a locally simulated paper test. Every simulated fill uses the lot size printed
-   under the button.
-4. Watch it on the same page: state, the rows it follows, quote freshness, decisions and their
-   reasons, simulated entries and closes, open positions and the stored book. The short contents
-   list at the top jumps to any of those sections.
-5. **Stop the paper loop** ends the loop and closes nothing: open positions stay open and stay
-   listed. Closing them is a separate, explicit click, offered only when it can work.
+The **PAPER command center** card is one authoritative status strip: an explicit **Connect**
+(observation only) or **Disconnect**, the terminal data class and execution mode, the catalog
+paper loop and separate runner state, the terminal-verified tradable symbols and supported
+timeframes with their units, the simulated fill size, strategy evidence and admission, quote
+freshness, and local paper net P&L. It also lists the exact enabled strategy rows (or an empty
+state), the configured risk settings with their units, blockers with direct links to the page
+that clears them, and links to the monitoring sections. A value the process cannot measure is
+labelled unavailable, never shown as zero.
 
-Blocks and refusals are named on the page with the reason code, a sentence, and a link to the
-page that clears them. The research sweep, the short setup and the strategy-library runner live
-on **Quick setup**; they are a different path to the same paper platform, not a prerequisite for
+1. Press **Connect** on the command center if the terminal is not attached. The simulator
+   preview is labelled sample data and cannot reach observation mode.
+2. Review the verified symbols, timeframe, risk units, evidence and admission. The start form
+   offers the **forex pairs your terminal reports**, with the recommended pairs ticked; names
+   the terminal does not classify as a pair are listed underneath with the reason.
+3. Press **Start paper autopilot**. It evaluates the catalog on the terminal's own history,
+   selects on train and validation evidence only, and follows the selection as locally
+   simulated fills. The lot size actually used is printed on the form.
+4. Monitor the same page: runner status, quote freshness, decisions and reasons, simulated
+   entries and closes, open local PAPER positions, the stored book, calculable P&L, pause and
+   refusal causes, and safe recovery. The contents list jumps only to sections that were drawn.
+5. **Stop the paper loop** ends decisions and closes nothing. Closing simulated positions is a
+   separate, explicit click, offered only when it can work.
+
+AX-SCALPER PAPER remains a distinct local simulated book using live terminal quotes, shown on
+this page even when the catalog autopilot is wired. Its LIVE handoff is blocked by default.
+**LIVE is a separate workflow on `/live`**: exact plan and candidate, evidence, review,
+approval, arming, account confirmation, one-shot intent lifecycle, broker response and
+broker-reported positions stay there. No PAPER control arms, submits, or closes a broker order.
+
+Blocks and refusals are named with the reason code, a sentence, and a link to the page that
+clears them. The research sweep, the short setup and the strategy-library runner live on **Quick
+setup**; they are a different path to the same paper platform, not a prerequisite for
 Autopilot. See [the autopilot document](docs/AUTOPILOT.md) for the rules, the recovery behaviour
 and what each blocker means.
 

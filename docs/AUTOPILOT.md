@@ -13,6 +13,16 @@ cannot do anything else:
 There is no fourth step inside the autopilot. It holds no adapter, no order object
 and no credentials, cannot change the execution mode, and cannot arm live trading.
 
+`/autopilot` is the **PAPER command center** and the launcher's landing page. Its
+top card gives one authoritative reading of Connect/Disconnect, terminal data class,
+execution mode, both paper runner states, verified tradable symbols and timeframes,
+risk settings with units, strategy evidence and admission, the exact enabled strategy
+list (or an empty state), quote freshness and local paper P&L. It links directly to
+Start/Stop, blockers and their fixes, and each monitoring section. Unavailable values
+are named; they are never replaced with zero. AX-SCALPER PAPER is shown here as a
+separate local simulated book; LIVE review, approval, arming and broker positions
+remain on `/live`.
+
 Once a selection is running, a separate bridge (`live_autopilot.py`) can offer the
 **same** strategy to the live workflow that the Live execution page already owns.
 That bridge adds a start and a stop button and nothing else: it cannot arm, cannot
