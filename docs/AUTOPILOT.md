@@ -29,6 +29,19 @@ broker-reported positions and P&L (unavailable values are named, never zeroed), 
 the last arming decision and last LIVE refusal. Nothing on `/autopilot` promotes a
 PAPER result into any of it.
 
+The four monitoring pages read the same ledger and platform, and each opens with a
+glance panel of labelled facts above its detail: `/performance` (session, counts,
+equity, realised/unrealised/net P&L, mark coverage, quote freshness, ledger update),
+`/positions` (open count, symbols, positions marked from a fresh quote, positions that
+could not be marked, unrealised P&L, state-only records, stored-book resumability),
+`/activity` (events in the ledger, events on the page, older events not paged, newest
+event, attention events in view) and `/health` (the platform's own status, passing and
+failing checks with their detail, unresolved orders, live bridge, data class). Every
+stored instant is shown in UTC with its age, a provenance card names the files and the
+read, unavailable figures keep the word *Unavailable* and the accounting module's
+reason, and a zero that exists only because nothing has traded says so. PAPER figures
+stay local; broker-reported positions and P&L remain on `/live`.
+
 Once a selection is running, a separate bridge (`live_autopilot.py`) can offer the
 **same** strategy to the live workflow that the Live execution page already owns.
 That bridge adds a start and a stop button and nothing else: it cannot arm, cannot

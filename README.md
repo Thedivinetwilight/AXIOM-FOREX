@@ -150,6 +150,30 @@ setup**; they are a different path to the same paper platform, not a prerequisit
 Autopilot. See [the autopilot document](docs/AUTOPILOT.md) for the rules, the recovery behaviour
 and what each blocker means.
 
+### Monitoring: performance, positions, activity and health
+
+The four monitoring pages share one shape: a **glance** panel of labelled facts at the
+top, then the exact detail underneath it. **Paper performance** (`/performance`) opens
+with session, open and closed counts, paper equity, realised, unrealised and net P&L,
+mark coverage, quote freshness and the ledger's update instant, before the metrics,
+equity curve, costs, position table, trade history and definitions. **Paper positions**
+(`/positions`) opens with the open count, the symbols, how many positions were marked
+from a fresh quote, how many could not be marked at all, unrealised P&L, state-only
+records and the stored book's resumability. **Activity** (`/activity`) opens with the
+ledger's event count, the events on this page, how many older ones are on disk but not
+paged, the newest event, and how many attention events (a stale quote, a closed market,
+a skipped signal, a refused resume) are in view. **System health** (`/health`) opens
+with the platform's own status, how many checks pass, each failing check with its
+detail, the unresolved-order and live-bridge checks, and the paper platform's data
+class.
+
+Each page names its data source, the instant it was read and the age of every stored
+instant it shows, all in UTC, and repeats that in a provenance card at the bottom.
+Unavailable figures keep the word *Unavailable* and the accounting module's own reason;
+a zero that exists only because nothing has traded yet says so. PAPER figures stay
+local and simulated; broker-reported positions and P&L are only on `/live`, and each
+monitoring page links there instead of restating a number.
+
 ### Why an order may still be refused
 
 Every check is listed on the page with the step that clears it, and none of them touches the

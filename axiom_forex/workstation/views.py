@@ -20,6 +20,7 @@ Choices that matter for safety and for how it feels:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from html import escape
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -1020,6 +1021,206 @@ def _freshness_row(account: Mapping[str, Any]) -> str:
         "<p class='small muted' style='margin:6px 0 0'>"
         f"{lead}{parts}. Newest quote {escape(_utc(newest))} · allowed age "
         f"{escape(str(allowance if allowance is not None else '—'))} s.</p>"
+    )
+
+
+def _instant(value: Any) -> datetime | None:
+    """One stored UTC instant, parsed; ``None`` when absent or unreadable."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _age_seconds(value: Any, read_at: Any) -> float | None:
+    """How long before the page was read a stored instant was written."""
+
+    stamp, now = _instant(value), _instant(read_at)
+    if stamp is None or now is None:
+        return None
+    return max(0.0, (now - stamp).total_seconds())
+
+
+def _age(value: Any, read_at: Any) -> str:
+    return age_text(_age_seconds(value, read_at))
+
+
+def _mark_counts(account: Mapping[str, Any]) -> tuple[int, int, int]:
+    """(priced, unpriced, total) open positions, from the accounting's own rows."""
+
+    positions = [dict(item) for item in (account.get("positions") or ())]
+    unpriced = sum(1 for item in positions if item.get("unrealized_gross") is None)
+    return len(positions) - unpriced, unpriced, len(positions)
+
+
+def _quotes_chip(account: Mapping[str, Any]) -> str:
+    """Freshness of the newest quotes, as one chip and never an invented state."""
+
+    quotes = [dict(item) for item in (account.get("quotes") or ())]
+    if not quotes:
+        return chip("no quote yet", "muted")
+    fresh = sum(1 for item in quotes if item.get("fresh"))
+    if fresh == len(quotes):
+        return chip(f"quotes fresh · {fresh} of {len(quotes)}", "ok", dot=True)
+    return chip(f"stale quotes · {len(quotes) - fresh} of {len(quotes)}", "warn", dot=True)
+
+
+def _metric_value(account: Mapping[str, Any], key: str) -> tuple[str, bool, str]:
+    """(value, available, note) exactly as the accounting module worded it.
+
+    An unavailable figure is never turned into a zero here: it keeps the word
+    "Unavailable" and the reason the accounting module recorded for it.
+    """
+
+    metric = dict((account.get("metric_by_key") or {}).get(key) or {})
+    if not metric:
+        return "Unavailable", False, "not read from the ledger"
+    value = str(metric.get("value") or "Unavailable")
+    available = bool(metric.get("available", True))
+    note = str(metric.get("note") or "")
+    return (value if available else "Unavailable"), available, note
+
+
+def _monitor_summary(
+    title: str,
+    facts: Sequence[tuple[str, str]],
+    *,
+    hint: str = "",
+    right: str = "",
+    footnote: str = "",
+) -> str:
+    """The monitoring pages' shared opener: labelled facts, then the detail below."""
+
+    return card(title, summary_grid(facts) + footnote, hint=hint, right=right)
+
+
+def _ledger_provenance(
+    account: Mapping[str, Any],
+    *,
+    title: str = "Data source, timestamps and staleness",
+    extra: Sequence[tuple[str, str]] = (),
+    show_paths: bool = True,
+) -> str:
+    """Where every figure came from, when it was written, and how old it is."""
+
+    if not account or not account.get("available", False):
+        return card(
+            title,
+            notice(
+                "warn",
+                "No paper ledger could be read",
+                str(
+                    account.get("error")
+                    or "No paper account is wired into this process, so no paper figure is "
+                    "shown on this page and no zero was substituted."
+                ),
+            ),
+        )
+    session = dict(account.get("session") or {})
+    read_at = account.get("read_at")
+    update = account.get("latest_update")
+    quote = account.get("latest_quote_at")
+    allowance = session.get("max_quote_age_seconds")
+    rows: list[tuple[str, str]] = [
+        (
+            "Data source",
+            f"{escape(str(account.get('source') or 'durable paper ledger'))} "
+            f"{chip('PAPER', 'paper', dot=True)}",
+        ),
+    ]
+    if show_paths:
+        rows.extend(
+            [
+                ("Ledger file", f"<span class='mono'>{escape(str(account.get('ledger_path') or 'not found'))}</span>"),
+                ("State file", f"<span class='mono'>{escape(str(account.get('state_path') or 'not found'))}</span>"),
+            ]
+        )
+    rows.extend(
+        [
+            ("Read at", f"{escape(_utc(read_at))} <span class='small muted'>· this page</span>"),
+            (
+                "Latest ledger update",
+                f"{escape(_utc(update))} <span class='small muted'>· {escape(_age(update, read_at))}</span>",
+            ),
+            (
+                "Latest event in the ledger",
+                (
+                    f"{escape(_utc(account.get('latest_event_at')))} "
+                    f"<span class='small muted'>· {escape(_age(account.get('latest_event_at'), read_at))}</span>"
+                    if account.get("latest_event_at")
+                    else "No event is recorded in the ledger yet."
+                ),
+            ),
+            (
+                "Latest quote",
+                (
+                    f"{escape(_utc(quote))} <span class='small muted'>· {escape(_age(quote, read_at))}</span>"
+                    if quote
+                    else "No quote has been recorded yet, so no mark can be judged."
+                ),
+            ),
+            (
+                "Allowed quote age",
+                escape(f"{allowance:,.0f} s" if isinstance(allowance, (int, float)) else "—"),
+            ),
+            (
+                "Paper session",
+                (
+                    f"{chip('RUNNING', 'paper', dot=True)} "
+                    f"<span class='small muted'>{escape(str(session.get('status') or 'running'))}</span>"
+                    if session.get("running")
+                    else f"{chip('NOT RUNNING', 'muted')} "
+                    f"<span class='small muted'>{escape(str(session.get('reason') or session.get('status') or 'no paper session has run'))}</span>"
+                ),
+            ),
+            ("Broker account", "Not read, not used, and never mixed into a paper figure."),
+        ]
+    )
+    rows.extend((label, value) for label, value in extra)
+    return card(
+        title,
+        dl(rows)
+        + "<p class='small muted' style='margin:10px 0 0'>"
+        + escape(
+            str(
+                account.get("claim")
+                or "Paper only: every figure is read from the paper ledger on this machine."
+            )
+        )
+        + "</p>",
+        hint="Every instant is UTC. An age is measured against the read above, not the clock "
+        "on the screen.",
+    )
+
+
+def _stale_mark_notice(account: Mapping[str, Any]) -> str:
+    """Name every open position the page refused to mark with a stale quote."""
+
+    positions = [dict(item) for item in (account.get("positions") or ())]
+    stale = [
+        item
+        for item in positions
+        if not item.get("mark_fresh") and item.get("unavailable_reason")
+    ]
+    if not stale:
+        return ""
+    listed = ", ".join(
+        f"{str(item.get('symbol') or 'a position')} ({str(item.get('mark_age_text') or 'age unknown')})"
+        for item in stale[:6]
+    )
+    more = "" if len(stale) <= 6 else f", and {len(stale) - 6} more"
+    return notice(
+        "warn",
+        f"{len(stale)} open position(s) cannot be priced from a fresh quote",
+        f"{listed}{more}. No unrealised figure is shown for them, and no zero was "
+        "substituted; the allowance and the newest quote are on this page.",
     )
 
 
@@ -3465,9 +3666,87 @@ def render_performance(ctx: PageContext) -> str:
 
     trade_body, trade_total = _trade_table(account, trade_page)
 
+    equity_value, equity_ok, equity_note = _metric_value(account, "equity")
+    net_value, net_ok, net_note = _metric_value(account, "net_pnl")
+    realized_value, realized_ok, realized_note = _metric_value(account, "realized_gross")
+    unrealized_value, unrealized_ok, unrealized_note = _metric_value(account, "unrealized_gross")
+    priced, unpriced, _ = _mark_counts(account)
+    read_at = account.get("read_at")
+    open_count = int(counts.get("open_positions") or 0)
+    closed_count = int(counts.get("closed_trades") or 0)
+
+    untouched = not open_count and not closed_count
+
+    def _or_reason(value: str, available: bool, note: str) -> str:
+        if not available:
+            return f"Unavailable <span class='small muted'>· {escape(note)}</span>"
+        if untouched:
+            return (
+                f"{escape(value)} <span class='small muted'>· nothing has traded yet, so this "
+                "is zero rather than a result</span>"
+            )
+        return escape(value)
+
+    glance = _monitor_summary(
+        "Performance at a glance",
+        (
+            (
+                "Scope",
+                f"{chip('PAPER', 'paper', dot=True)} "
+                "<span class='small muted'>local simulated ledger</span>",
+            ),
+            (
+                "Session",
+                (
+                    f"{chip('RUNNING', 'paper', dot=True)} "
+                    f"<span class='small muted'>{escape(str(session.get('status') or 'paper session'))}</span>"
+                    if session.get("running")
+                    else f"{chip('NOT RUNNING', 'muted')} "
+                    f"<span class='small muted'>{escape(str(session.get('reason') or session.get('status') or 'no paper session has run'))}</span>"
+                ),
+            ),
+            ("Open positions", f"{open_count:,} <span class='small muted'>· {priced:,} priced</span>"),
+            ("Closed trades", f"{closed_count:,}"),
+            ("Paper equity", _or_reason(equity_value, equity_ok, equity_note)),
+            ("Net P&L after costs", _or_reason(net_value, net_ok, net_note)),
+            ("Realised P&L (price)", _or_reason(realized_value, realized_ok, realized_note)),
+            ("Unrealised P&L (price)", _or_reason(unrealized_value, unrealized_ok, unrealized_note)),
+            (
+                "Marks",
+                (
+                    f"{chip(f'{priced}/{open_count} priced', 'ok', dot=True)}"
+                    if open_count and not unpriced
+                    else f"{chip(f'{unpriced} unpriced', 'warn', dot=True)}"
+                    if unpriced
+                    else chip("nothing open", "muted")
+                ),
+            ),
+            ("Quotes", _quotes_chip(account)),
+            (
+                "Ledger updated",
+                (
+                    f"{escape(_utc(account.get('latest_update')))} "
+                    f"<span class='small muted'>· {escape(_age(account.get('latest_update'), read_at))}</span>"
+                    if account.get("latest_update")
+                    else "No ledger update yet."
+                ),
+            ),
+            ("Read at", escape(_utc(read_at))),
+        ),
+        hint="Every figure is read from the durable paper ledger on this machine. Broker "
+        "capital is never read, and an unavailable figure says so instead of becoming zero.",
+        right=chip("PAPER · LOCAL", "paper", dot=True),
+        footnote=_freshness_row(account)
+        + _stale_mark_notice(account)
+        + "<p class='small muted' style='margin:8px 0 0'>Broker-reported positions and "
+        "P&amp;L are on <a href='/live'>/live</a>; PAPER workflows and the paper book are on "
+        "<a href='/autopilot'>/autopilot</a>.</p>",
+    )
+
     body = (
         header
         + _account_alerts(account)
+        + glance
         + _paper_vs_live_strip(ctx)
         + _capital_setup_card(ctx, account)
         + card(
@@ -3525,34 +3804,21 @@ def render_performance(ctx: PageContext) -> str:
             right=chip(f"{trade_total} trade(s)", "paper"),
         )
         + _definitions_card(account)
-        + card(
-            "Where these numbers come from",
-            dl(
-                [
-                    ("Data source", escape(str(account.get("source") or "durable paper ledger"))),
-                    ("Ledger file", f"<span class='mono'>{escape(str(account.get('ledger_path') or 'not found'))}</span>"),
-                    ("State file", f"<span class='mono'>{escape(str(account.get('state_path') or 'not found'))}</span>"),
-                    ("Latest ledger update", escape(_utc(account.get("latest_update")))),
-                    ("Latest quote", escape(_utc(account.get("latest_quote_at")))),
+        + _ledger_provenance(
+            account,
+            title="Where these numbers come from",
+            extra=(
+                (
+                    "Trading decisions",
                     (
-                        "Trading decisions",
-                        (
-                            f"{chip('PAUSED', 'warn', dot=True)} "
-                            f"<span class='small muted'>{escape(str(trading.get('reason') or ''))}</span>"
-                        )
-                        if trading.get("paused")
-                        else chip("CAN TAKE DECISIONS", "ok", dot=True),
-                    ),
-                    ("Allowed quote age", escape(f"{session.get('max_quote_age_seconds', '—')} s")),
-                    (
-                        "Broker account",
-                        "Not read, not used, and never mixed into a paper figure.",
-                    ),
-                ]
-            )
-            + "<p class='small muted' style='margin:10px 0 0'>"
-            + escape(str(account.get("claim") or ""))
-            + "</p>",
+                        f"{chip('PAUSED', 'warn', dot=True)} "
+                        f"<span class='small muted'>{escape(str(trading.get('reason') or ''))}</span>"
+                    )
+                    if trading.get("paused")
+                    else chip("CAN TAKE DECISIONS", "ok", dot=True),
+                ),
+                ("Paper positions in the ledger", escape(f"{open_count:,}")),
+            ),
         )
     )
     return render_shell(ctx, body)
@@ -3770,11 +4036,106 @@ def render_positions(ctx: PageContext) -> str:
     )
     trade_body, trade_total = _trade_table(account, trade_page)
 
+    priced, unpriced, _ = _mark_counts(account)
+    integrity = dict(account.get("integrity") or {})
+    state_only = int(integrity.get("unreconciled_positions") or 0)
+    unrealized_value, unrealized_ok, unrealized_note = _metric_value(account, "unrealized_gross")
+    read_at = account.get("read_at")
+    session = dict(account.get("session") or {})
+    recovery = dict(session.get("recovery") or {})
+    glance = _monitor_summary(
+        "Positions at a glance",
+        (
+            (
+                "Scope",
+                f"{chip('PAPER', 'paper', dot=True)} "
+                "<span class='small muted'>simulated fills, local ledger</span>",
+            ),
+            ("Open positions", f"{len(positions):,}"),
+            (
+                "Symbols",
+                escape(grouped_text) if grouped_text else chip("nothing open", "muted"),
+            ),
+            (
+                "Marked from a fresh quote",
+                (
+                    f"{chip(f'{priced} of {len(positions)}', 'ok', dot=True)}"
+                    if not unpriced
+                    else f"{chip(f'{priced} of {len(positions)}', 'warn', dot=True)}"
+                ),
+            ),
+            ("Unavailable marks", f"{unpriced:,}"),
+            (
+                "Unrealised P&L (price)",
+                (
+                    f"{escape(unrealized_value)} "
+                    "<span class='small muted'>· nothing is open, so this is zero rather "
+                    "than a result</span>"
+                    if not positions
+                    else escape(unrealized_value)
+                )
+                if unrealized_ok
+                else f"Unavailable <span class='small muted'>· {escape(unrealized_note)}</span>",
+            ),
+            (
+                "State-only positions",
+                (
+                    f"{chip(f'{state_only} unreconciled', 'warn', dot=True)} "
+                    "<span class='small muted'>not paired with a ledger entry fill</span>"
+                    if state_only
+                    else chip("0", "ok")
+                ),
+            ),
+            (
+                "Stored book",
+                (
+                    f"{chip('RESUME BLOCKED', 'warn', dot=True)} "
+                    "<span class='small muted'>see the card above</span>"
+                    if recovery.get("ok") is False
+                    else f"{chip('RESUME ALLOWED', 'ok', dot=True)}"
+                    if recovery.get("ok") is True
+                    else chip("no recovery report", "muted")
+                ),
+            ),
+            ("Closed trades", f"{trade_total:,}"),
+            ("Quotes", _quotes_chip(account)),
+            (
+                "Ledger updated",
+                (
+                    f"{escape(_utc(account.get('latest_update')))} "
+                    f"<span class='small muted'>· {escape(_age(account.get('latest_update'), read_at))}</span>"
+                    if account.get("latest_update")
+                    else "No ledger update yet."
+                ),
+            ),
+            ("Read at", escape(_utc(read_at))),
+        ),
+        hint="Open positions are priced at the side they would close on. A position with no "
+        "fresh quote keeps an unavailable figure and its reason; nothing is zeroed.",
+        right=chip("PAPER · LOCAL", "paper", dot=True),
+        footnote=_freshness_row(account)
+        + _stale_mark_notice(account)
+        + (
+            notice(
+                "warn",
+                "Positions restored from the state file without a ledger entry fill",
+                f"{state_only} open record(s) exist only in the state file, so their entry "
+                "price and P&L cannot be checked against the ledger. They are listed below "
+                "and counted separately; no figure is invented for them.",
+            )
+            if state_only
+            else ""
+        )
+        + "<p class='small muted' style='margin:8px 0 0'>Broker-reported positions are on "
+        "<a href='/live'>/live</a>. Nothing on this page can open, change or close a broker "
+        "position.</p>",
+    )
+
     body = (
         _account_alerts(account)
+        + glance
         + _paper_book_recovery_card(ctx, account=account, positions=positions)
         + _paper_vs_live_strip(ctx)
-        + _freshness_row(account)
         + card(
             "Open paper positions",
             positions_body,
@@ -3804,6 +4165,14 @@ def render_positions(ctx: PageContext) -> str:
             "with their data class throughout. The paper strategy runner's card on this page "
             "keeps its own separate book; it is labelled as such, and its counters are not "
             "mixed into the figures above.</p>",
+        )
+        + _ledger_provenance(
+            account,
+            extra=(
+                ("Open positions priced", escape(f"{priced:,} of {len(positions):,}")),
+                ("Open positions unpriced", escape(f"{unpriced:,}")),
+                ("State-only positions", escape(f"{state_only:,}")),
+            ),
         )
     )
     return render_shell(ctx, body)
@@ -3856,10 +4225,104 @@ def render_activity(ctx: PageContext) -> str:
         for event in audit
     ]
     truncated = int(account.get("events_truncated") or 0)
+    events_total = int(account.get("events_total") or 0)
+    read_at = account.get("read_at")
+    newest = str(account.get("latest_event_at") or "")
+    shown_events = _page_of(events, page)
+    attention = [
+        dict(event)
+        for event in shown_events
+        if _EVENT_LABELS.get(str(event.get("kind") or ""), ("", "muted"))[1] == "warn"
+    ]
+    newest_attention = sorted(
+        attention, key=lambda item: str(item.get("at") or ""), reverse=True
+    )[:5]
+    attention_list = "".join(
+        f"<li>{escape(_utc(item.get('at')))} · {escape(_EVENT_LABELS.get(str(item.get('kind') or ''), (str(item.get('kind') or ''), 'muted'))[0])}"
+        + (f" · {escape(str(item.get('symbol') or ''))}" if item.get("symbol") else "")
+        + (f" · {escape(str(item.get('reason') or ''))}" if item.get("reason") else "")
+        + "</li>"
+        for item in newest_attention
+    )
+    glance = _monitor_summary(
+        "Activity at a glance",
+        (
+            (
+                "Scope",
+                f"{chip('PAPER', 'paper', dot=True)} "
+                "<span class='small muted'>ledger events, local machine</span>",
+            ),
+            ("Events in the ledger", f"{events_total:,}"),
+            ("Events on this page", f"{len(shown_events):,}"),
+            (
+                "Older events not paged here",
+                (
+                    f"{chip(f'{truncated:,} on disk', 'warn', dot=True)}"
+                    if truncated
+                    else chip("0", "ok")
+                ),
+            ),
+            (
+                "Newest event",
+                (
+                    f"{escape(_utc(newest))} <span class='small muted'>· {escape(_age(newest, read_at))}</span>"
+                    if newest
+                    else "No event is recorded yet."
+                ),
+            ),
+            (
+                "Attention events in view",
+                (
+                    f"{chip(f'{len(attention)} in view', 'warn', dot=True)}"
+                    if attention
+                    else chip("none in view", "ok")
+                ),
+            ),
+            ("Platform audit events", f"{len(audit):,}"),
+            (
+                "Paper session",
+                (
+                    chip("RUNNING", "paper", dot=True)
+                    if dict(account.get("session") or {}).get("running")
+                    else chip("NOT RUNNING", "muted")
+                ),
+            ),
+            ("Quotes", _quotes_chip(account)),
+            ("Ledger read at", escape(_utc(read_at))),
+            ("Platform read at", escape(_utc(ctx.paper.read_at))),
+        ),
+        hint="Newest first. Event kinds that skipped a decision or refused a resume are "
+        "attention events and are counted separately; the timestamps are UTC.",
+        right=chip("PAPER · LOCAL", "paper", dot=True),
+        footnote=_freshness_row(account)
+        + (
+            notice(
+                "warn",
+                f"{truncated:,} older ledger event(s) are on disk but not paged here",
+                f"This page keeps the most recent {len(events):,} of {events_total:,} events. "
+                "The ledger file itself still holds all of them; nothing was deleted.",
+            )
+            if truncated
+            else ""
+        )
+        + (
+            f"<div class='notice notice--warn'><div><strong>{len(attention)} attention "
+            "event(s) in the events shown</strong>"
+            f"<ul class='list'>{attention_list}</ul>"
+            "<p class='small' style='margin:6px 0 0'>A stale quote, a closed market, a "
+            "skipped signal or a refused resume is why a decision did not happen. Each is "
+            "listed in the timeline below with its own reason.</p></div></div>"
+            if attention
+            else ""
+        )
+        + "<p class='small muted' style='margin:8px 0 0'>Broker and LIVE decisions are on "
+        "<a href='/live'>/live</a>; this timeline is the paper ledger on this machine.</p>",
+    )
+
     body = (
         _account_alerts(account, include_capital=False)
+        + glance
         + _paper_vs_live_strip(ctx)
-        + _freshness_row(account)
         + card(
             "Paper ledger timeline",
             table(
@@ -3894,13 +4357,36 @@ def render_activity(ctx: PageContext) -> str:
             "Platform audit trail",
             table(
                 "Audit events, newest first",
-                (("When", "text"), ("Event", "text"), ("Mode", "text"), ("Outcome", "text")),
+                (
+                    ("When (UTC)", "text"),
+                    ("Event", "text"),
+                    ("Mode", "text"),
+                    ("Outcome", "text"),
+                ),
                 audit_rows,
                 empty=empty_state("No audit events yet", "Run the offline paper workflow to create some."),
-            ),
+            )
+            + f"<p class='small muted' style='margin:8px 0 0'>Read from the paper platform at "
+            f"{escape(_utc(ctx.paper.read_at))}; the ledger above was read at "
+            f"{escape(_utc(read_at))}. Source: "
+            f"{escape(str(ctx.paper.source or 'the paper platform').strip() or 'the paper platform')}.</p>",
             right=data_chip(ctx.paper_label),
             flush=True,
             hint="Sanitized; credential-shaped fields are redacted before they reach this page.",
+        )
+        + _ledger_provenance(
+            account,
+            title="Where this timeline comes from",
+            extra=(
+                (
+                    "Events retained for this page",
+                    escape(f"{len(events):,} of {events_total:,}"),
+                ),
+                (
+                    "Attention events in this page",
+                    escape(f"{len(attention):,}"),
+                ),
+            ),
         )
         + _runner_card(ctx)
     )
@@ -3933,8 +4419,110 @@ def render_health(ctx: PageContext) -> str:
         )
         for name, ok, detail in checks
     ]
+    failing = [
+        (str(name), str(detail))
+        for name, ok, detail in checks
+        if not ok
+    ]
+    passing = len(checks) - len(failing)
+    by_name = {str(name): (bool(ok), str(detail)) for name, ok, detail in checks}
+    account = _account(ctx)
+    read_at = account.get("read_at") if account.get("available") else ""
+    failing_names = ", ".join(
+        labels.get(name, name.replace("_", " ").capitalize()) for name, _detail in failing[:6]
+    ) or "none"
+    failing_list = "".join(
+        f"<li><strong>{escape(labels.get(name, name.replace('_', ' ').capitalize()))}</strong>"
+        f" <span class='mono small muted'>{escape(name)}</span>"
+        f"<br><span class='small muted'>{escape(detail)}</span></li>"
+        for name, detail in failing
+    )
+    unresolved_ok = by_name.get("unresolved_orders", (None, ""))[0]
+    bridge_ok = by_name.get("live_bridge_disabled", (None, ""))[0]
+    glance = _monitor_summary(
+        "Health at a glance",
+        (
+            (
+                "Overall status",
+                (
+                    f"{chip(str(ctx.paper.health_status or 'UNKNOWN'), 'ok' if ctx.paper.health_status == 'HEALTHY' else 'warn', dot=True)} "
+                    + (
+                        f"<span class='small muted'>{passing} of {len(checks)} checks pass</span>"
+                        if checks
+                        else "<span class='small muted'>the platform reported no checks</span>"
+                    )
+                ),
+            ),
+            (
+                "Checks needing attention",
+                (
+                    f"{chip(f'{len(failing)} failing', 'warn', dot=True)} "
+                    f"<span class='small muted'>{escape(failing_names)}</span>"
+                    if failing
+                    else chip("none", "ok", dot=True)
+                ),
+            ),
+            (
+                "Unresolved orders",
+                (
+                    chip("none unresolved", "ok", dot=True)
+                    if unresolved_ok is True
+                    else chip("attention", "warn", dot=True)
+                    if unresolved_ok is False
+                    else chip("not reported", "muted")
+                ),
+            ),
+            (
+                "LIVE bridge",
+                (
+                    chip("off", "ok", dot=True)
+                    if bridge_ok is True
+                    else chip("check failing", "warn", dot=True)
+                    if bridge_ok is False
+                    else chip("not reported", "muted")
+                ),
+            ),
+            (
+                "Paper platform data class",
+                f"{data_chip(ctx.paper_label)} "
+                f"<span class='small muted'>{escape(str(ctx.paper.source or 'no source reported'))}</span>",
+            ),
+            ("Platform read at", escape(_utc(ctx.paper.read_at))),
+            (
+                "Paper ledger read at",
+                (
+                    escape(_utc(read_at))
+                    + (
+                        f" <span class='small muted'>· updated {escape(_age(account.get('latest_update'), read_at))}</span>"
+                        if account.get("latest_update")
+                        else " <span class='small muted'>· no ledger update yet</span>"
+                    )
+                    if account.get("available")
+                    else " <span class='small muted'>· no ledger could be read</span>"
+                ),
+            ),
+            ("Quotes", _quotes_chip(account) if account.get("available") else chip("no ledger read", "muted")),
+        ),
+        hint="Read from the paper platform's own status. A check that cannot be read is "
+        "reported as not reported, never as passing.",
+        right=chip("PAPER · READ-ONLY", "paper", dot=True),
+        footnote=(
+            f"<div class='notice notice--warn' role='alert'><div><strong>{len(failing)} health "
+            "check(s) need attention</strong>"
+            f"<ul class='list'>{failing_list}</ul>"
+            "<p class='small' style='margin:6px 0 0'>Nothing on this page changes a check or "
+            "clears one: fixes are made where the check points, and this page reads the "
+            "result again.</p></div></div>"
+            if failing
+            else ""
+        )
+        + "<p class='small muted' style='margin:8px 0 0'>Broker-reported positions, LIVE "
+        "arming and the broker's own answers are on <a href='/live'>/live</a>. This page "
+        "reads the paper platform and never connects to a broker.</p>",
+    )
     body = (
-        "<div class='grid grid--two'>"
+        glance
+        + "<div class='grid grid--two'>"
         + card(
             "Platform health",
             table(
@@ -3963,6 +4551,25 @@ def render_health(ctx: PageContext) -> str:
         )
         + _safety_card()
         + "</div></div>"
+        + _ledger_provenance(
+            account,
+            title="Where these checks and timestamps come from",
+            extra=(
+                (
+                    "Paper platform",
+                    f"{data_chip(ctx.paper_label)} "
+                    f"<span class='small muted'>read at {escape(_utc(ctx.paper.read_at))}</span>",
+                ),
+                (
+                    "Paper platform data source",
+                    escape(str(ctx.paper.source or "not reported")),
+                ),
+                (
+                    "Checks reported",
+                    escape(f"{len(checks)} ({passing} OK, {len(failing)} attention)"),
+                ),
+            ),
+        )
     )
     return render_shell(ctx, body)
 

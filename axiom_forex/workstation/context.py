@@ -74,6 +74,9 @@ class PaperSnapshot:
     orders: tuple[Mapping[str, Any], ...]
     activity: tuple[Mapping[str, Any], ...]
     error: str = ""
+    #: When this snapshot was read, so a page can say how old its facts are.  The
+    #: platform reports state, not timestamps, for most of these checks.
+    read_at: str = ""
 
     @staticmethod
     def unavailable(reason: str) -> "PaperSnapshot":
@@ -97,6 +100,7 @@ class PaperSnapshot:
             orders=(),
             activity=(),
             error=reason,
+            read_at=_utc_now().isoformat(),
         )
 
 
@@ -166,6 +170,7 @@ def read_paper_snapshot(platform: Any, *, activity_limit: int = 8) -> PaperSnaps
         ),
         orders=orders,
         activity=activity,
+        read_at=_utc_now().isoformat(),
     )
 
 
