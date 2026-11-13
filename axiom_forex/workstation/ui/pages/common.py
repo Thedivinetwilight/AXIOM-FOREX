@@ -173,6 +173,20 @@ def no_quote_notice(account: Mapping[str, Any]) -> str:
     )
 
 
+def quote_chip(account: Mapping[str, Any]) -> str:
+    """Freshness of the newest quotes, as one chip and never an invented state."""
+
+    from ..components import chip
+
+    quotes = [dict(item) for item in (account.get("quotes") or ())]
+    if not quotes:
+        return chip("no quote yet", "muted")
+    fresh = sum(1 for item in quotes if item.get("fresh"))
+    if fresh == len(quotes):
+        return chip(f"quotes fresh · {fresh} of {len(quotes)}", "ok", dot=True)
+    return chip(f"stale quotes · {len(quotes) - fresh} of {len(quotes)}", "warn", dot=True)
+
+
 def paused_notice(account: Mapping[str, Any]) -> str:
     """Why decisions are not being taken, in the ledger's own sentence."""
 

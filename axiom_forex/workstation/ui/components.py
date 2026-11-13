@@ -80,9 +80,9 @@ def section(
 ) -> str:
     """A titled region.  The heading is what the page's outline and jumps use."""
 
-    ident = f" id='{attr(id)}'" if id else ""
-    labelled = f" aria-labelledby='{attr(id)}-h'" if id else ""
-    title_id = f" id='{attr(id)}-h'" if id else ""
+    ident = ""
+    labelled = f" aria-labelledby='{attr(id)}'" if id else ""
+    title_id = f" id='{attr(id)}'" if id else ""
     kick = f"<span class='kicker'>{escape(kicker)}</span>" if kicker else ""
     note_html = f"<p class='section-note'>{note}</p>" if note else ""
     heading = (
@@ -443,6 +443,20 @@ def pager(page: int, pages: int, href_for: Any, *, noun: str = "rows") -> str:
     if page < pages:
         parts.append(button_link(href_for(page + 1), "Next →", small=True))
     return f"<nav class='pager' aria-label='Pagination'>{parts[0]}<span class='spacer'></span>{''.join(parts[1:])}</nav>"
+
+
+def jump_nav(targets: Sequence[tuple[str, str]]) -> str:
+    """A contents list for a long page.  Only sections actually drawn are listed."""
+
+    if len(targets) < 3:
+        return ""
+    items = "".join(
+        f"<li><a href='#{attr(slug)}'>{escape(label)}</a></li>" for slug, label in targets
+    )
+    return (
+        "<nav class='page-jump' aria-label='On this page'>"
+        f"<ol class='stack--sm' style='margin:0;padding-left:18px'>{items}</ol></nav>"
+    )
 
 
 def key_values(pairs: Sequence[tuple[str, str]]) -> str:

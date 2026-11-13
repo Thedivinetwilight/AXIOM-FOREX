@@ -331,13 +331,7 @@ def render_health(ctx: Any) -> str:
 
 
 def common_quote_chip(account: Mapping[str, Any]) -> str:
-    quotes = [dict(item) for item in (account.get("quotes") or ())]
-    if not quotes:
-        return chip("no quote yet", "muted")
-    fresh = sum(1 for item in quotes if item.get("fresh"))
-    if fresh == len(quotes):
-        return chip(f"quotes fresh · {fresh} of {len(quotes)}", "ok", dot=True)
-    return chip(f"stale quotes · {len(quotes) - fresh} of {len(quotes)}", "warn", dot=True)
+    return common.quote_chip(account)
 
 
 # ------------------------------------------------------------------- activity

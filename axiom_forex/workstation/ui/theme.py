@@ -305,6 +305,8 @@ legend{padding:0 6px;font-size:12.5px;font-weight:700;color:var(--ink-2);
 .meter--danger span{background:var(--live-accent)}
 .split{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
   gap:var(--s4)}
+.page-jump{font-size:13px;color:var(--ink-2);padding:var(--s3) 0}
+.page-jump a{text-decoration:none} .page-jump a:hover{text-decoration:underline}
 .pager{display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap;
   padding:var(--s3) var(--s5);border-top:1px solid var(--line);font-size:13px}
 .pager .spacer{flex:1 1 auto}
