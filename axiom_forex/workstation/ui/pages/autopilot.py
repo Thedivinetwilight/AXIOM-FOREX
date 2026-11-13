@@ -797,7 +797,7 @@ def _handoff_section(ctx: Any, view: Mapping[str, Any]) -> str:
     )
 
 
-def _kronos_section(view: Mapping[str, Any]) -> str:
+def _kronos_section(view: Mapping[str, Any], nonce: str = "") -> str:
     kronos = dict(view.get("kronos") or {})
     policy = dict(view.get("kronos_policy") or {})
     if not kronos:
@@ -823,6 +823,21 @@ def _kronos_section(view: Mapping[str, Any]) -> str:
             "A second opinion, never a signal",
             fmt.text(str(kronos.get("note") or policy.get("note") or "")),
             tone="muted",
+        )
+        + (
+            "<form method='post' action='/actions/autopilot-kronos' class='form'>"
+            f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
+            "<label class='field'><span class='label'>How a forecast may be used</span>"
+            "<select name='kronos_mode'>"
+            f"<option value='OFF'{' selected' if str(kronos.get('mode') or 'OFF') == 'OFF' else ''}>OFF — no forecast is read</option>"
+            f"<option value='VETO'{' selected' if str(kronos.get('mode')) == 'VETO' else ''}>VETO — a forecast may cancel an entry</option>"
+            "</select></label>"
+            "<label class='small'><input type='checkbox' name='kronos_required' value='1'"
+            f"{' checked' if kronos.get('required') else ''}> skip a signal when no forecast is available</label>"
+            "<div class='actions'><button class='btn' type='submit'>Set the forecast mode</button></div>"
+            "</form>"
+            if nonce
+            else ""
         ),
         note="Off by default because its forecasts have not been validated against realised "
         "outcomes here.",
@@ -1078,7 +1093,7 @@ def render_autopilot(ctx: Any) -> str:
     body_parts.append(runner_page.sections(ctx))
     sections_drawn.append(("runner", "Paper strategy runner"))
 
-    kronos_html = _kronos_section(view)
+    kronos_html = _kronos_section(view, nonce)
     if kronos_html:
         sections_drawn.append(("kronos", "Kronos"))
         body_parts.append(kronos_html)

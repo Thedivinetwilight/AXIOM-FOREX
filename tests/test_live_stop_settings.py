@@ -31,7 +31,7 @@ from axiom_forex.config.mt5 import (
     write_protective_stop,
 )
 from axiom_forex.paper_runner.live_workflow import LiveTrading
-from axiom_forex.workstation.views import _broker_stop_settings_card
+from axiom_forex.workstation.ui.pages.live import broker_stop_settings_section as _broker_stop_settings_card
 from tests.test_mt5_adapter import make_spec
 
 SPEC = make_spec()  # EUR/USD, point 0.00001, pip 0.0001, stops_level 0

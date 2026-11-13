@@ -248,7 +248,6 @@ _STATE_GATED: dict[str, str] = {
     "kronos-schedule-stop": "the Kronos panel is wired in",
     "kronos-stop": "a Kronos job is running",
     "live-disarm": "LIVE is armed",
-    "live-start": "LIVE plan present and armed",
     "live-stop": "a LIVE session is running",
     "live-stop-settings": "a LIVE session has run",
     "mode-paper": "the effective execution mode is LIVE",
