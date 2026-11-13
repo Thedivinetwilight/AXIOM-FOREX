@@ -635,7 +635,7 @@ def test_the_paper_loop_state_is_in_the_chrome_of_every_page(tmp_path):
 
     for path in sorted(GET_ROUTES):
         _status, html = app.page(path)
-        topbar = html[html.index("<header class='topbar'"):]
+        topbar = html[html.index("<header"):]
         topbar = topbar[: topbar.index("</header>")]
         assert "Paper loop:" in topbar, path
         assert "Paper loop: IDLE" in topbar, path
@@ -654,11 +654,11 @@ def test_a_running_loop_is_linked_from_the_chrome(tmp_path):
     }
 
     _status, html = app.page("/positions")
-    topbar = html[html.index("<header class='topbar'"):]
+    topbar = html[html.index("<header"):]
     topbar = topbar[: topbar.index("</header>")]
     assert "Paper loop: RUNNING · 2 open" in topbar
     # A running or blocked loop is one click from the page that owns it.
-    assert "<a class='row' href='/autopilot'" in topbar
+    assert "<a class='chip-link' href='/autopilot'" in topbar
 
 
 def test_no_page_renders_a_python_list_or_dict_repr():

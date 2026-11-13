@@ -225,26 +225,26 @@ def _state_only_app(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("path", "title", "scope"),
+    ("path", "heading", "scope"),
     (
-        ("/performance", "Performance at a glance", "PAPER · LOCAL"),
-        ("/positions", "Positions at a glance", "PAPER · LOCAL"),
-        ("/activity", "Activity at a glance", "PAPER · LOCAL"),
-        ("/health", "Health at a glance", "PAPER · READ-ONLY"),
+        ("/performance", "Paper performance", "PAPER · LOCAL"),
+        ("/positions", "Paper positions", "PAPER · LOCAL"),
+        ("/activity", "Activity", "PAPER · LOCAL"),
+        ("/health", "System health", "PAPER · READ-ONLY"),
     ),
 )
-def test_each_monitoring_page_opens_with_a_labelled_glance(tmp_path, path, title, scope):
+def test_each_monitoring_page_opens_with_a_labelled_summary(tmp_path, path, heading, scope):
     app = _health_app(tmp_path) if path == "/health" else _marked_app(tmp_path)
     html = app.page(path)[1]
     plain = _plain(html)
 
-    assert title in plain, path
+    # The redesign opens each page with its own h1 and a lane chip, then a
+    # summary ledger in the aside whose pairs are label/value, not tiles.
+    assert f"<h1>{heading}</h1>" in html, path
     assert scope in plain, path
-    # The glance is a summary grid that comes before the first detail table.
-    first_grid = html.find("class='summary-grid'")
-    assert first_grid > 0, path
+    assert "id='summary'" in html, path
+    assert "class='facts'" in html, path
     assert "<table" in html, path
-    assert first_grid < html.find("<table"), path
     # It names the lane it belongs to and points at the other one instead of
     # borrowing its numbers.
     assert "Data labels:" in plain
@@ -253,20 +253,23 @@ def test_each_monitoring_page_opens_with_a_labelled_glance(tmp_path, path, title
         assert "href='/autopilot'" in html
 
 
-def test_the_glance_carries_the_same_words_as_the_detail_below_it(tmp_path):
+def test_the_summary_carries_the_same_words_as_the_detail_below_it(tmp_path):
     app = _marked_app(tmp_path)
     account = app.paper_account()
     metrics = account["metric_by_key"]
     plain = _plain(app.page("/performance")[1])
-    glance = plain[: plain.find("Capital and P&L")]
+    summary = plain[plain.find("Summary") :]
 
-    # The glance quotes the accounting module rather than recomputing a figure.
-    assert metrics["equity"]["value"] in glance
-    assert metrics["unrealized_gross"]["value"] in glance
-    assert metrics["realized_gross"]["value"] in glance
+    # The summary quotes the accounting module rather than recomputing a figure.
+    assert metrics["equity"]["value"] in summary
+    assert metrics["unrealized_gross"]["value"] in summary
+    assert metrics["realized_gross"]["value"] in summary
     # And the counts match the ledger the rest of the page reads.
-    assert "Open positions 1 · 1 priced" in glance
-    assert "Closed trades 1" in glance
+    assert "Open positions 1 · 1 priced" in summary
+    assert "Closed trades 1" in summary
+    # The detail table repeats the same accounting values, with their basis.
+    assert metrics["equity"]["value"] in plain
+    assert "Basis" in plain
 
 
 def test_the_glance_states_its_source_and_the_instant_it_was_read(tmp_path):
@@ -480,7 +483,7 @@ def test_no_monitoring_page_mixes_a_broker_figure_into_a_paper_one(tmp_path, pat
 def _page_forms(html: str) -> set[str]:
     """Forms drawn by the page body, excluding the shared topbar's own controls."""
 
-    _head, _marker, content = html.partition("<div class='content'>")
+    _head, _marker, content = html.partition("<main")
     return _forms(content)
 
 

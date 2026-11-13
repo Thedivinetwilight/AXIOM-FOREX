@@ -70,7 +70,7 @@ from .paper_account import paper_root, read_paper_account
 from .preflight import LivePreflight, StrategyBinding, facts_from
 from .setup import SetupWizard
 from .symbols import build_catalogue
-from .views import render_message, render_page
+from .ui import render_message, render_page
 
 #: Paths that render a page. Everything else is refused.
 GET_ROUTES: dict[str, tuple[str, str]] = {
