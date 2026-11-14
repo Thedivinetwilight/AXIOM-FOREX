@@ -78,7 +78,7 @@ def blocker_items(items: Sequence[Mapping[str, Any]] | None) -> list[dict[str, A
             if text:
                 detail = text
                 break
-        hint = str(item.get("hint") or "").strip()
+        hint = str(item.get("hint") or item.get("resolution") or "").strip()
         out.append(
             {
                 "title": title,
