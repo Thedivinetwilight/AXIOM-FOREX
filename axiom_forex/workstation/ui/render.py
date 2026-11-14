@@ -23,6 +23,7 @@ from .pages import (
     mode,
     monitoring,
     overview,
+    provider_setup,
     quick_setup,
     setup,
     start,
@@ -46,6 +47,7 @@ PAGES: dict[str, Callable[[PageContext], str]] = {
     "strategies": strategies.render_strategies,
     "kronos": kronos.render_kronos,
     "quick-setup": quick_setup.render_quick_setup,
+    "provider-setup": provider_setup.render_provider_setup,
 }
 
 #: Pages whose new composition is complete.  Everything else is still the old

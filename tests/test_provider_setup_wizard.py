@@ -459,3 +459,101 @@ def test_a_second_save_needs_the_explicit_replace_flag(tmp_path, session):
     assert (tmp_path / wizard.SETUP_FILENAME).read_text(encoding="utf-8") == first
     _, _, replaced = app.act("provider-setup-save", {**form, "overwrite": ["yes"]})
     assert "Saved" in replaced
+
+
+# ---------------------------------------------------------------------------
+# 7. the page in the redesigned surface
+# ---------------------------------------------------------------------------
+
+
+def _audit(html: str):
+    from tests.test_workstation_redesign import _audit as audit_html
+
+    return audit_html(html)
+
+
+def test_the_page_is_served_in_the_redesigned_frame(tmp_path):
+    _status, html = setup_app(tmp_path).page("/provider-setup")
+    assert "data-scope='research'" in html
+    assert "BROKER TERMS" in html
+    assert html.count("<style>") == 1
+    assert "<script" not in html.lower()
+
+
+def test_the_page_has_one_heading_a_unique_outline_and_a_resolving_contents_list(tmp_path):
+    import re
+
+    _status, html = setup_app(tmp_path).page("/provider-setup")
+    audit = _audit(html)
+    assert audit.headings.count("h1") == 1
+    assert not [key for key, count in audit.ids.items() if count > 1]
+    targets = re.findall(r"href='#([^']+)'", html)
+    assert len(targets) >= 5
+    for target in targets:
+        assert target in audit.ids, target
+
+
+def test_every_control_is_labelled_and_no_terminal_value_can_be_typed(tmp_path):
+    _status, html = setup_app(tmp_path).page("/provider-setup")
+    audit = _audit(html)
+    for control in audit.controls:
+        if control["type"] == "hidden":
+            continue
+        assert (
+            control["aria_label"]
+            or control["labelled"]
+            or (control["id"] and control["id"] in audit.label_fors)
+        ), control
+    # The two facts the terminal is the authority for are read-only and carry no
+    # name, so a form submitted from this page can never set them.
+    for ident in ("f-account-currency", "f-account-leverage"):
+        assert f"id='{ident}'" in html
+    for name in ("name='account.currency'", "name='account.leverage'"):
+        assert name not in html
+    # Both are also marked readonly for assistive technology.
+    import re
+
+    assert len(re.findall(r" readonly ", html)) == 2
+    assert html.count("aria-readonly='true'") == 2
+
+
+def test_the_forms_names_are_the_terms_the_document_needs(tmp_path):
+    import re
+
+    _status, html = setup_app(tmp_path).page("/provider-setup")
+    names = set(re.findall(r"<(?:input|textarea)[^>]*name='([^']+)'", html))
+    lists = {"symbols", "swap", "calendar.windows", "calendar.holidays", "conversion_rates"}
+    assert {"nonce", "overwrite"} | lists < names
+    paths = {item.path for item in wizard.FIELDS}
+    typed = names - lists - {"nonce", "overwrite"}
+    assert typed <= paths, typed - paths
+    # Every operator term in this build is on the page.
+    terminal_only = {item.path for item in wizard.FIELDS if item.kind == wizard.TERMINAL}
+    assert paths - terminal_only <= names
+
+
+def test_no_credential_field_is_offered(tmp_path):
+    _status, html = setup_app(tmp_path).page("/provider-setup")
+    lowered = html.lower()
+    for forbidden in ("type='password'", "name='password'", "name='login'", "name='token'"):
+        assert forbidden not in lowered
+
+
+def test_an_unreadable_existing_file_is_reported_not_hidden(tmp_path):
+    (tmp_path / wizard.SETUP_FILENAME).write_text("{not json", encoding="utf-8")
+    _status, html = setup_app(tmp_path).page("/provider-setup")
+    assert "needs attention" in html
+    assert "Current setup file" in html
+    # It is refused by name, and it is never described as loading cleanly.
+    assert "provider_setup_malformed" in html
+    assert "It loads cleanly with the runner's own loader" not in html
+
+
+def test_a_refused_save_marks_the_field_it_named(tmp_path):
+    app = setup_app(tmp_path)
+    app.act("provider-setup-save", {"nonce": [app.nonce], "account.account_id": ["label"]})
+    _status, html = app.page("/provider-setup")
+    audit = _audit(html)
+    assert audit.forms and audit.forms[0]["action"] == "/actions/provider-setup-save"
+    assert "Nothing was written" in html
+    assert "account.account_id" in html

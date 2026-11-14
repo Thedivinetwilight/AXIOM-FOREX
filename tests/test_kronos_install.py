@@ -530,7 +530,9 @@ def test_advanced_settings_are_collapsed_and_hold_variants_paths_and_revisions(t
     app = app_with_kronos(tmp_path)
     html = render(app, "/kronos")
 
-    start = html.index("<details class='advanced'>")
+    # The redesigned page keeps the same rule in the theme's own disclosure: the
+    # advanced controls are collapsed behind one summary, not spread over the page.
+    start = html.index("<details class='disclosure'>")
     summary = html.index("Advanced settings", start)
     end = html.index("</details>", start)
     inside = html[summary:end]
