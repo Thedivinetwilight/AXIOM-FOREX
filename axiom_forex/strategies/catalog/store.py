@@ -174,13 +174,20 @@ class CatalogStore:
 
     # -- reading ----------------------------------------------------------
 
-    def load(self) -> StoredEvaluation | None:
-        try:
-            raw = self.path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-        except OSError:
-            return None
+    def load(self, raw: str | None = None) -> StoredEvaluation | None:
+        """Parse the stored record.
+
+        ``raw`` lets a caller that has already read the file hand its text in, so
+        one read is enough; when it is omitted the file is read here.
+        """
+
+        if raw is None:
+            try:
+                raw = self.path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return None
+            except OSError:
+                return None
         try:
             payload = json.loads(raw)
         except (ValueError, TypeError):

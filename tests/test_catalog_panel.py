@@ -301,6 +301,40 @@ def test_a_restart_picks_up_a_newer_evaluation(tmp_path):
     panel.act(ACTION_PAPER_STOP, {})
 
 
+def test_a_record_rewritten_in_the_same_timestamp_tick_is_picked_up(tmp_path):
+    """A same-length record must never be served from the parse cache.
+
+    The cache used to be keyed on ``(st_mtime_ns, st_size)``.  Two evaluation
+    records that differ only in their candidate id are the *same length*, so on a
+    filesystem with a coarse timestamp tick -- or simply when both writes land in
+    one tick -- the second start read the first record and followed the wrong
+    candidate.  The key is the content digest now, and this pins it without
+    depending on timing: the second file is given the first file's exact
+    timestamp.
+    """
+
+    import os
+
+    panel = _panel(tmp_path)
+    first = catalog()[0]
+    second = catalog()[1]
+    _write_record(panel, candidate_id=first.candidate_id)
+    path = panel.store.path
+    before = path.stat()
+
+    assert panel.act(ACTION_PAPER_START, {})["ok"] is True
+    panel.act(ACTION_PAPER_STOP, {})
+    assert panel.paper_view()["watches"][0]["candidate_id"] == first.candidate_id
+
+    _write_record(panel, candidate_id=second.candidate_id)
+    assert path.stat().st_size == before.st_size, "the fixture must keep the record the same length"
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert panel.act(ACTION_PAPER_START, {})["ok"] is True
+    assert panel.paper_view()["watches"][0]["candidate_id"] == second.candidate_id
+    panel.act(ACTION_PAPER_STOP, {})
+
+
 def test_a_running_test_does_not_show_start_as_its_own_blocker(tmp_path):
     panel = _panel(tmp_path)
     candidate = catalog()[0]

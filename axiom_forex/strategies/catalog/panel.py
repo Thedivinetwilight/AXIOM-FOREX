@@ -21,6 +21,8 @@ terminal and a bar provider; both are data.
 
 from __future__ import annotations
 
+import hashlib
+
 import math
 import threading
 from dataclasses import dataclass, replace
@@ -290,7 +292,10 @@ class CatalogPanel:
         self._data_check: tuple[tuple[tuple[str, ...], str], datetime, dict[str, Any]] | None = None
         #: The evaluation record is a few megabytes once a thousand rows are in it,
         #: and every page render asks for it twice.  One parse per file change.
-        self._record_cache: tuple[tuple[int, int], Any] | None = None
+        #: The key is a digest of the bytes, not the file's timestamp: two records
+        #: can be the same length and land inside one filesystem timestamp tick, and
+        #: a timestamp key would then serve the older one for ever.
+        self._record_cache: tuple[str, Any] | None = None
 
     # -- what the page shows ----------------------------------------------
 
@@ -484,18 +489,17 @@ class CatalogPanel:
         )
 
     def _record(self) -> Any:
-        """The stored evaluation, parsed once per file change."""
+        """The stored evaluation, parsed once per content change."""
 
-        path = self.store.path
         try:
-            stat = path.stat()
+            data = self.store.path.read_bytes()
         except OSError:
             self._record_cache = None
             return None
-        stamp = (stat.st_mtime_ns, stat.st_size)
+        stamp = hashlib.sha256(data).hexdigest()
         if self._record_cache is not None and self._record_cache[0] == stamp:
             return self._record_cache[1]
-        loaded = self.store.load()
+        loaded = self.store.load(data.decode("utf-8", errors="replace"))
         self._record_cache = (stamp, loaded)
         return loaded
 
