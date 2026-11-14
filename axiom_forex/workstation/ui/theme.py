@@ -307,6 +307,15 @@ legend{padding:0 6px;font-size:12.5px;font-weight:700;color:var(--ink-2);
   gap:var(--s4)}
 .page-jump{font-size:13px;color:var(--ink-2);padding:var(--s3) 0}
 .page-jump a{text-decoration:none} .page-jump a:hover{text-decoration:underline}
+/* ------------------------------------------------------- one file, one job */
+.job{border:1px solid var(--line);border-radius:var(--r-md);padding:var(--s3) var(--s4);
+  background:var(--surface);margin-top:var(--s3)}
+.job:first-child{margin-top:0}
+.job-head{display:flex;gap:var(--s2);align-items:center;justify-content:space-between;
+  flex-wrap:wrap;margin-bottom:var(--s3)}
+.job-head h3{margin:0;font-size:13.5px;font-weight:650}
+.job-head code{font-size:13px;overflow-wrap:anywhere}
+
 /* --------------------------------------------------------------- lifecycle */
 .lifecycle{list-style:none;margin:0;padding:0;display:grid;gap:2px;
   counter-reset:step}
