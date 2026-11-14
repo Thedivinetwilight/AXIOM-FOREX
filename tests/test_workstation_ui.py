@@ -1114,9 +1114,13 @@ def test_tables_have_captions_and_scoped_headers():
 
 
 def test_design_tokens_keep_foreground_contrast_above_aa():
+    from axiom_forex.workstation.ui import theme
+
     tokens = {
         name: value
-        for name, value in re.findall(r"(--[a-z0-9-]+):(#[0-9a-fA-F]{6})", views.STYLES)
+        for name, value in re.findall(
+            r"(--[a-z0-9-]+):(#[0-9a-fA-F]{6})", theme.STYLES
+        )
     }
 
     def luminance(hex_colour: str) -> float:
@@ -1153,8 +1157,12 @@ def test_a_single_stylesheet_is_used_by_every_page():
 
 
 def test_layout_is_responsive_and_respects_reduced_motion():
+    from axiom_forex.workstation.ui.theme import STYLES as redesign
+
+    assert "@media (max-width:860px)" in redesign
+    assert "prefers-reduced-motion" in redesign
+    # The legacy sheet, used only by the pages not yet rebuilt, stays responsive too.
     assert "@media (max-width:860px)" in views.STYLES
-    assert "prefers-reduced-motion" in views.STYLES
 
 
 # ---------------------------------------------------------------------------

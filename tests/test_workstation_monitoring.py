@@ -539,9 +539,11 @@ def test_every_monitoring_page_is_one_accessible_frame(tmp_path, path):
 
 
 def test_the_monitoring_pages_use_the_shared_narrow_layout():
+    from axiom_forex.workstation.ui.theme import STYLES
+
     from axiom_forex.workstation.ui.theme import BREAKPOINTS
 
-    css = views.STYLES
+    css = STYLES
     assert BREAKPOINTS == (620, 860, 1080)
     # Figures wrap rather than shrink: the stat strip is auto-fit, and a table
     # stays inside its own scroller at every width above the phone breakpoint.

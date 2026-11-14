@@ -429,7 +429,7 @@ def test_the_guided_start_signposts_the_autopilot_as_the_one_page_route():
 def test_the_stylesheet_shrinks_to_one_column_on_a_narrow_window():
     """No browser here, so the guard is the rule itself."""
 
-    css = views.STYLES
+    from axiom_forex.workstation.ui.theme import STYLES as css
 
     assert "@media (max-width:620px)" in css
     narrow = css[css.index("@media (max-width:620px)") : css.index("@media (prefers-reduced-motion")]

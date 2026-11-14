@@ -475,11 +475,13 @@ def test_the_live_overview_is_accessible_and_has_a_narrow_layout():
         for item in re.findall(r"href='(/[^']*)'", html)
     }:
         assert href in GET_ROUTES, href
-    assert ".lifecycle{" in views.STYLES
-    assert "@media (max-width:620px)" in views.STYLES
+    from axiom_forex.workstation.ui.theme import STYLES as redesign
+
+    assert ".lifecycle{" in redesign
+    assert "@media (max-width:620px)" in redesign
     # The lifecycle list is a grid that folds to one column with the phone rules.
-    narrow = views.STYLES[
-        views.STYLES.index("@media (max-width:620px)") : views.STYLES.index(
+    narrow = redesign[
+        redesign.index("@media (max-width:620px)") : redesign.index(
             "@media (prefers-reduced-motion"
         )
     ]

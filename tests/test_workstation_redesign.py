@@ -420,8 +420,7 @@ def test_the_shared_chrome_names_the_paper_live_and_sample_lanes():
 
 def test_the_stylesheet_has_one_design_system_and_three_narrow_breakpoints():
     from axiom_forex.workstation.ui.theme import BREAKPOINTS
-
-    styles = views.STYLES
+    from axiom_forex.workstation.ui.theme import STYLES as styles
     # One stylesheet, one token block, and the three breakpoints it is built and
     # tested against -- wide, tablet, phone.
     assert BREAKPOINTS == (620, 860, 1080)

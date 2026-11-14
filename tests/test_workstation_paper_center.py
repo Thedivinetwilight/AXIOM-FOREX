@@ -191,7 +191,9 @@ def test_the_command_center_renders_configured_risk_units_and_a_safe_live_bounda
 
 
 def test_narrow_layout_includes_the_command_center_grid():
-    css = views.STYLES
+    from axiom_forex.workstation.ui.theme import STYLES
+
+    css = STYLES
     block = css[
         css.index("@media (max-width:620px)") : css.index(
             "@media (prefers-reduced-motion"
