@@ -352,8 +352,8 @@ def _session_section(view: Mapping[str, Any], nonce: str) -> str:
     ) + "<div class='actions' style='margin-top:12px'>" + "".join(controls) + "</div>"
     body += notice(
         "The emergency stop is the only control here that acts without a confirmation",
-        "It stops sending and disarms. It does not close a broker position, and it cannot "
-        "cancel or modify an order the broker already holds.",
+        "It stops sending and disarms, and it closes nothing at the broker: it does not close "
+        "a broker position, and it cannot cancel or modify an order the broker already holds.",
         tone="muted",
     )
     return section(
@@ -665,6 +665,7 @@ def _scalper_live_section(view: Mapping[str, Any], nonce: str) -> str:
     body += (
         "<h3 class='small muted' style='margin:18px 0 6px'>"
         "Broker response and unresolved requests</h3>"
+        "<p class='small muted' style='margin:0 0 6px'>Last guarded AX-SCALPER action</p>"
     ) + facts(
         [
             ("Broker state", fmt.text(broker.get("state") or "not reported")),
@@ -780,7 +781,17 @@ def render_live(ctx: Any) -> str:
         ),
     )
 
-    banner = _live_status_banner(view)
+    banner = _live_status_banner(view) + (
+        "<div class='notice notice--warn' role='alert'>"
+        "<div><strong>Before you use this page</strong>"
+        "<p>Everything here acts on a <em>real</em> MetaTrader 5 account. Paper mode is the "
+        "default and nothing on this page changes that by itself. Arming writes a plan and "
+        "authorises the adapter without sending anything; starting a session can send a real "
+        "order on the next strategy signal. No button here connects, signs in, switches "
+        "account, or edits your broker settings, and none of these settings is changed by "
+        "anything on the paper pages. The PAPER command center is on "
+        "<a href='/autopilot'>/autopilot</a>; this page never promotes its results.</p></div></div>"
+    )
     if not configured:
         limits = [
             ("No MetaTrader 5 trading adapter is wired in", "This workstation cannot send a real order at all. Start it against your own terminal and the adapter, or keep using PAPER."),
@@ -791,7 +802,7 @@ def render_live(ctx: Any) -> str:
         return head + banner + layout(
             notice(
                 "No MetaTrader 5 trading adapter is wired in",
-                "This workstation cannot send a real order at all. Everything on the PAPER side "
+                "No live trading adapter is wired in at all. This workstation cannot send a real order. Everything on the PAPER side "
                 "keeps working, and nothing here pretends otherwise.",
                 tone="warn",
             )

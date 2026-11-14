@@ -114,15 +114,22 @@ def _ledger_section(ctx: Any, account: Mapping[str, Any], *, id: str = "provenan
 
 def _paper_vs_live_notice(ctx: Any, *, extra: str = "") -> str:
     items = []
-    if ctx.terminal.simulated:
-        items.append(
-            notice(
-                "REAL BROKER",
-                "The offline simulator is running, so even the quotes are samples. Its "
-                "balance and equity are never read into these figures.",
-                tone="muted",
-            )
+    if getattr(ctx.terminal, "simulated", False):
+        broker_note = (
+            "The offline simulator is running, so even the quotes are samples. Its balance "
+            "and equity are never read into these figures."
         )
+    elif getattr(ctx.terminal, "connected", False):
+        broker_note = (
+            "A real MetaTrader 5 account is connected for quotes only. Its balance and equity "
+            "are never read into these figures."
+        )
+    else:
+        broker_note = (
+            "No terminal is connected, so no broker figure is read at all — and none of the "
+            "figures here is a broker balance."
+        )
+    items.append(notice("REAL BROKER", broker_note, tone="muted"))
     items.append(
         notice(
             "PAPER",
@@ -441,6 +448,10 @@ def render_activity(ctx: Any) -> str:
         ),
         ("Platform audit events", f"{len(audit):,}"),
         ("Paper session", _session_chip(session)),
+        (
+            "Trailing stop",
+            "armed per position from its entry bar; the levels are listed on /positions",
+        ),
         ("Quotes", common_quote_chip(account)),
         ("Ledger read at", fmt.text(fmt.utc(read_at))),
         ("Platform read at", fmt.text(fmt.utc(ctx.paper.read_at))),
@@ -539,6 +550,27 @@ def render_positions(ctx: Any) -> str:
             cell(fmt.text(fmt.utc(item.get("entry_at"))), label="Opened (UTC)", mono=True),
             cell(fmt.text(fmt.money(price_value(item.get("entry_price")), "")), label="Entry", num=True),
             cell(
+                fmt.text(str(item.get("stop")) if item.get("stop") is not None else "—"),
+                label="Stop",
+                num=True,
+            ),
+            cell(
+                fmt.text(str(item.get("target")) if item.get("target") is not None else "—"),
+                label="Target",
+                num=True,
+            ),
+            cell(
+                fmt.text(fmt.money(price_value(item.get("trail")), ""))
+                + (
+                    f" <span class='small muted'>armed after "
+                    f"{fmt.text(fmt.utc(item.get('entry_bar_at')))}</span>"
+                    if item.get("trail") is not None and item.get("entry_bar_at")
+                    else ""
+                ),
+                label="Trailing stop",
+                num=True,
+            ),
+            cell(
                 f"{fmt.text(str(item.get('mark_side') or ''))} "
                 f"{fmt.text(fmt.money(price_value(item.get('mark')), ''))}"
                 + (
@@ -617,9 +649,15 @@ def render_positions(ctx: Any) -> str:
         actions=button_link("/autopilot", "Run this in Autopilot"),
     )
 
+    symbol_count = len({str(item.get("symbol") or "") for item in positions if item.get("symbol")})
+    open_line = (
+        f"{open_count:,} open across {symbol_count:,} symbol(s)"
+        if open_count
+        else "Nothing open"
+    )
     summary = [
         ("Scope", f"{_lane_chip('PAPER')} <span class='small muted'>simulated fills, local ledger</span>"),
-        ("Open positions", f"{open_count:,} · {priced:,} priced"),
+        ("Open positions", f"{open_line} · {priced:,} priced"),
         ("Marked from a fresh quote", f"{priced:,} of {open_count:,}"),
         ("Unavailable marks", f"{unpriced:,}"),
         (
@@ -632,6 +670,10 @@ def render_positions(ctx: Any) -> str:
         ("Unrealised P&L (price)", _metric_or_zero(account, "unrealized_gross", untouched=(not open_count and not closed_count), empty_note="nothing is open, so this is zero rather than a result")),
         ("Net P&L after costs", _metric_or_zero(account, "net_pnl", untouched=(not open_count and not closed_count))),
         ("Paper equity", _metric_or_zero(account, "equity", untouched=False)),
+        (
+            "Trailing stop",
+            "armed per position from its entry bar; the levels are listed on /positions",
+        ),
         ("Quotes", common_quote_chip(account)),
         ("Ledger updated", (
             f"{fmt.text(fmt.utc(account.get('latest_update')))} "
@@ -671,6 +713,9 @@ def render_positions(ctx: Any) -> str:
                     ("Lots", True),
                     ("Opened (UTC)", False),
                     ("Entry", True),
+                    ("Stop", True),
+                    ("Target", True),
+                    ("Trailing stop", True),
                     ("Mark (closing side)", True),
                     ("Unrealised", True),
                     ("Basis", False),
@@ -685,7 +730,7 @@ def render_positions(ctx: Any) -> str:
                 ),
             ),
             note="Every row is a simulated fill from the local ledger.",
-            tools=chip(f"{open_count:,} open", "paper"),
+            tools=chip(open_line, "paper"),
             id="open",
             flush=True,
             footer=f"All {open_count:,} open positions shown.",
@@ -718,7 +763,7 @@ def render_positions(ctx: Any) -> str:
             footer=f"All {closed_count:,} closed trades shown.",
         )
         + runner_section
-        + _close_all_section(ctx, open_count=open_count),
+        + _recovery_section(ctx, account, open_count=open_count),
         section("Summary", facts(summary), note="Positions at a glance, qualified in place.", id="summary", plain=True)
         + _paper_vs_live_notice(ctx, extra="Broker-reported positions are on /live. Nothing on this page can open, change or close a broker position.")
         + _ledger_section(ctx, account),
@@ -739,6 +784,108 @@ def common_blockers(items: Sequence[Mapping[str, Any]]) -> str:
         f"<li>{fmt.text(item.get('message') or item.get('reason') or '')}</li>"
         for item in items
     ) + "</ul>"
+
+
+def _close_all_paper_form(ctx: Any) -> str:
+    """The explicit, confirmed, simulated close of the whole paper book."""
+
+    tick = (
+        "<label class='field field--check' for='close-all-confirm'>"
+        "<input type='checkbox' id='close-all-confirm' name='confirm' "
+        "value='close-all-paper-positions' required>"
+        "<span class='label'>I understand every open paper position is closed as a "
+        "<strong>simulated</strong> fill at the current quote, that this cannot be undone, "
+        "that no order is sent to a broker, and that no MetaTrader 5 position is touched."
+        "</span></label>"
+    )
+    return (
+        "<form method='post' action='/actions/catalog-paper-close-all' class='form'>"
+        f"<input type='hidden' name='nonce' value='{fmt.attr(ctx.action_nonce)}'>"
+        "<input type='hidden' name='return_to' value='/positions'>"
+        f"{tick}"
+        "<div class='actions'><button class='btn btn--danger' type='submit'>"
+        "Simulate closing all paper positions</button></div></form>"
+    )
+
+
+def _recovery_section(ctx: Any, account: Mapping[str, Any], *, open_count: int) -> str:
+    """What can be said, and what can be done, about a stored paper book."""
+
+    if not open_count:
+        return _close_all_section(ctx, open_count=open_count)
+    integrity = dict(account.get("integrity") or {})
+    session = dict(account.get("session") or {})
+    recovery = dict(integrity.get("recovery") or session.get("recovery") or {})
+    form = _close_all_paper_form(ctx)
+    tail = (
+        "<p class='small muted' style='margin:8px 0 0'>Simulated paper accounting only: no "
+        "order is sent to a broker, no MetaTrader 5 position is touched, and the execution "
+        "mode does not change. Once the book is flat you can retry starting the paper "
+        "autopilot.</p>"
+    )
+    if recovery.get("ok") is True:
+        return section(
+            "Stored paper book",
+            notice(
+                "These positions can be resumed exactly",
+                f"{open_count:,} stored position(s) match the rows the paper test would manage "
+                "and carry every field its exit rules read, so there is nothing to close: start "
+                "the paper autopilot to carry on. Nothing needs flattening.",
+                tone="ok",
+            ),
+            note="A close is offered only when the paper test cannot prove it can resume the book.",
+            id="recovery",
+        )
+    if not recovery:
+        return section(
+            "Stored paper book",
+            notice(
+                "This page cannot prove these positions can be resumed",
+                f"{open_count:,} open position(s) are in the paper ledger, but the state file "
+                "carries no recovery report, so there is nothing here that says the paper test "
+                "could manage them again. Starting it is the honest next step: if it refuses, "
+                "the reason is shown on this page. Closing them is the other way out, and it is "
+                "all-or-nothing.",
+                tone="warn",
+            )
+            + form
+            + tail,
+            note="Nothing is closed unless every position can be priced and closed in full.",
+            id="recovery",
+        )
+    failed = [item for item in recovery.get("failed") or () if isinstance(item, Mapping)]
+    names = ", ".join(
+        f"{fmt.text(item.get('symbol') or item.get('key') or 'a position')} "
+        f"({fmt.text(item.get('reason') or 'incomplete')})"
+        for item in failed[:4]
+    )
+    if len(failed) > 4:
+        names += f", and {len(failed) - 4} more"
+    detail = "The paper test refused to resume this book"
+    if recovery.get("detail"):
+        detail += f": {fmt.text(str(recovery.get('detail')))}"
+    if names:
+        detail += f". Affected: {names}"
+    detail += (
+        ". It will not carry a position with a substituted value, and it will not attach a "
+        "stored position to a different strategy row."
+    )
+    return section(
+        "Stored paper book",
+        notice(
+            "This stored paper book has to be closed before the paper test can start",
+            f"{detail}<p class='small' style='margin:6px 0'>Closing is the documented way out: "
+            "each position is closed once, at its own closing side, from a fresh quote, and "
+            "written to the same paper ledger as any other exit. If even one quote is stale or "
+            "missing, or one position is missing a field a close needs, <strong>nothing is "
+            "closed at all</strong> and the reason is shown here.</p>",
+            tone="warn",
+        )
+        + form
+        + tail,
+        note="Nothing is closed unless every position can be priced and closed in full.",
+        id="recovery",
+    )
 
 
 def _close_all_section(ctx: Any, *, open_count: int) -> str:
@@ -878,8 +1025,9 @@ def render_performance(ctx: Any) -> str:
         )
     else:
         curve_html = empty_state(
-            "No closed paper trades yet",
-            "The curve appears after the first trade closes. Nothing is drawn for display.",
+            "No dated performance yet",
+            "The curve appears after the first trade closes. A flat line drawn before the "
+            "first trade would be a made-up result.",
         )
 
     trade_rows = [
@@ -981,6 +1129,10 @@ def render_performance(ctx: Any) -> str:
             if open_count
             else chip("nothing open", "muted"),
         ),
+        (
+            "Trailing stop",
+            "armed per position from its entry bar; the levels are listed on /positions",
+        ),
         ("Quotes", common_quote_chip(account)),
         (
             "Ledger updated",
@@ -993,8 +1145,34 @@ def render_performance(ctx: Any) -> str:
         ("Broker account", BROKER_NOT_READ),
     ]
 
+    integrity = dict(account.get("integrity") or {})
+    integrity_html = ""
+    if integrity and (integrity.get("ok") is False or integrity.get("warnings")):
+        warnings = "".join(
+            f"<li>{fmt.text(str(item))}</li>" for item in (integrity.get("warnings") or ())
+        )
+        integrity_html = notice(
+            "Data integrity warning — figures that depend on this are unavailable",
+            f"<ul class='stack--sm' style='margin:6px 0 0;padding-left:18px'>{warnings}</ul>"
+            if warnings
+            else "The ledger reported a problem; the figures it affects are shown as unavailable "
+            "rather than guessed.",
+            tone="warn",
+        )
+
+    quotes_html = section(
+        "Quote freshness",
+        facts(common.quote_facts(account)),
+        note="Freshness is a verdict about now: the same ledger reads paused once its newest "
+        "quote passes the allowance.",
+        tools=common.quotes_chip(account),
+        id="quotes",
+        plain=True,
+    )
+
     body = head + layout(
         common.paused_notice(account)
+        + integrity_html
         + stats(
             [
                 stat("Paper equity", or_reason("equity"), tone="paper", small=True),
@@ -1010,7 +1188,8 @@ def render_performance(ctx: Any) -> str:
                 caption=f"Local simulated capital in {fmt.text(currency or 'an unset currency')}. "
                 "Each basis column is the accounting layer's own note for that figure.",
             ),
-            note="The connected broker account's balance and equity are never read into these figures.",
+            note="The connected broker account's balance and equity are never read into these "
+            "figures: every number here is a local simulated figure, not a broker balance.",
             tools=chip("PAPER", "paper", dot=True),
             id="capital-metrics",
             flush=True,
@@ -1058,8 +1237,23 @@ def render_performance(ctx: Any) -> str:
             note="Entry and exit are the ledger's own prices; net includes commission and swap where they are known.",
             id="trades",
             flush=True,
-        ),
-        section("Summary", facts(summary), note="Performance at a glance, qualified in place.", id="summary", plain=True)
+        )
+        + section(
+            "Open book",
+            facts(
+                [
+                    ("Open positions", f"{open_count:,} open"),
+                    ("Closed trades", f"{closed_count:,} trade(s)"),
+                    ("Quotes", common.quotes_chip(account)),
+                ]
+            ),
+            note="The same counts the positions page renders.",
+            tools=chip(f"{open_count:,} open", "paper"),
+            id="open-book",
+            plain=True,
+        )
+        + quotes_html
+        + section("Summary", facts(summary), note="Performance at a glance, qualified in place.", id="summary", plain=True)
         + _paper_vs_live_notice(
             ctx,
             extra="Broker-reported positions and P&amp;L are on /live; PAPER workflows and the paper book are on /autopilot.",

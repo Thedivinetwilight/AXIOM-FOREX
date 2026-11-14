@@ -869,12 +869,33 @@ def _latency_section(view: Mapping[str, Any]) -> str:
     )
 
 
-def _stored_section(view: Mapping[str, Any]) -> str:
+def _close_all_book_form(nonce: str) -> str:
+    """The one confirmed write on this page: a simulated close of the stored book."""
+
+    tick = (
+        "<label class='field field--check' for='autopilot-close-confirm'>"
+        "<input type='checkbox' id='autopilot-close-confirm' name='confirm' "
+        "value='close-all-paper-positions' required>"
+        "<span class='label'>I understand every open paper position is closed as a "
+        "<strong>simulated</strong> fill at the current quote and that this cannot be undone."
+        "</span></label>"
+    )
+    return (
+        "<form method='post' action='/actions/catalog-paper-close-all' class='form'>"
+        f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
+        "<input type='hidden' name='return_to' value='/autopilot'>"
+        f"{tick}"
+        "<div class='actions'><button class='btn btn--danger' type='submit'>"
+        "Simulate closing all paper positions</button></div></form>"
+    )
+
+
+def _stored_section(view: Mapping[str, Any], nonce: str = "") -> str:
     stored = dict(view.get("stored_book") or {})
     refusals = [dict(item) for item in (view.get("watch_refusals") or ())]
     parts: list[str] = []
-    if stored and stored.get("available") is not False:
-        positions = [dict(item) for item in (stored.get("positions") or ())]
+    positions = [dict(item) for item in (stored.get("positions") or ())]
+    if stored and stored.get("available") is not False and positions:
         parts.append(
             facts(
                 [
@@ -883,6 +904,8 @@ def _stored_section(view: Mapping[str, Any]) -> str:
                     ("Ledger", f"<code>{fmt.text(stored.get('ledger') or 'not reported')}</code>"),
                 ]
             )
+            + f"<p class='small muted' style='margin:8px 0 0'>{len(positions):,} position(s) "
+            "are on disk.</p>"
             + table(
                 (("Symbol", False), ("Side", False), ("Lots", True), ("Entry", True), ("Opened", False)),
                 _rows(positions, ("symbol", "side", "lots", "entry_price", "opened_at"), ("Symbol", "Side", "Lots", "Entry", "Opened")),
@@ -890,6 +913,19 @@ def _stored_section(view: Mapping[str, Any]) -> str:
                 empty=empty_state("Nothing stored", "The stored book is empty."),
             )
         )
+        if stored.get("blocked") and nonce:
+            parts.append(
+                notice(
+                    "A stored paper book is stopping the next start",
+                    "The paper loop will not resume this book, so the next start is refused "
+                    "until it is closed. Closing is accounting, not trading: every position is "
+                    "closed once at its own closing side from a fresh quote, no broker order is "
+                    "sent and no MetaTrader 5 position is touched. The same book is listed, and "
+                    "can be closed, on <a href='/positions'>/positions</a>.",
+                    tone="warn",
+                )
+                + _close_all_book_form(nonce)
+            )
     if refusals:
         parts.append(
             table(
@@ -1101,7 +1137,7 @@ def render_autopilot(ctx: Any) -> str:
     if latency_html:
         sections_drawn.append(("latency", "Observed latency"))
         body_parts.append(latency_html)
-    stored_html = _stored_section(view)
+    stored_html = _stored_section(view, nonce)
     if stored_html:
         sections_drawn.append(("stored", "Stored book"))
         body_parts.append(stored_html)

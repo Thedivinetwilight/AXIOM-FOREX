@@ -12,7 +12,7 @@ from html import escape
 from typing import Any, Mapping, Sequence
 
 from .. import format as fmt
-from ..components import chip, facts, key_values, paragraph, section, table, cell
+from ..components import cell, chip, facts, key_values, notice, paragraph, section, table
 from ..shell import PAGE_SCOPES, page_scope
 
 
@@ -112,12 +112,29 @@ def quote_facts(account: Mapping[str, Any]) -> list[tuple[str, str]]:
     rows = []
     for quote in quotes:
         symbol = fmt.text(quote.get("symbol") or "?")
-        when = quote.get("at") or quote.get("timestamp")
+        when = quote.get("quote_time") or quote.get("at") or quote.get("timestamp")
         fresh = bool(quote.get("fresh"))
         label = chip("fresh" if fresh else "stale", "ok" if fresh else "warn")
-        age = fmt.age(when, read_at) if when else "no timestamp"
-        rows.append((f"Quote {symbol}", f"{label} {fmt.text(age)}"))
+        age = fmt.text(quote.get("age_text") or "") or (
+            fmt.age(when, read_at) if when else "no timestamp"
+        )
+        stamp = f" <span class='mono small'>{fmt.text(when)}</span>" if when else ""
+        rows.append((f"Quote {symbol}", f"{label} {age}{stamp}"))
     return rows
+
+
+def quotes_chip(account: Mapping[str, Any]) -> str:
+    """The one chip that says whether decisions may be taken right now."""
+
+    trading = dict(account.get("trading") or {})
+    if trading.get("paused"):
+        return chip("PAUSED", "warn", dot=True)
+    quotes = [dict(item) for item in (account.get("quotes") or ())]
+    if not quotes:
+        return chip("NO QUOTE YET", "muted")
+    if all(bool(item.get("fresh")) for item in quotes):
+        return chip("QUOTES FRESH", "ok", dot=True)
+    return chip("QUOTES STALE", "warn", dot=True)
 
 
 def metric_rows(metrics: Sequence[Mapping[str, Any]]) -> list[list[str]]:
@@ -197,7 +214,11 @@ def paused_notice(account: Mapping[str, Any]) -> str:
         return ""
     reasons = [str(item) for item in (trading.get("reasons") or ()) if str(item).strip()]
     detail = " · ".join(reasons) or str(trading.get("reason") or "")
-    return notice("Trading decisions are paused", escape(detail), tone="warn")
+    return notice(
+        "Trading decisions are paused",
+        f"{chip('PAUSED', 'warn', dot=True)} {escape(detail)}",
+        tone="warn",
+    )
 
 
 def scope_note_for(page: str) -> str:
