@@ -14,7 +14,18 @@ from html import escape
 from ..context import PageContext
 from . import shell
 from .components import button_link, notice, page_head
-from .pages import account, autopilot, data, live, mode, monitoring, overview, setup, start
+from .pages import (
+    account,
+    autopilot,
+    data,
+    live,
+    mode,
+    monitoring,
+    overview,
+    setup,
+    start,
+    strategies,
+)
 from .theme import STYLES  # re-exported for the tests that read it
 
 PAGES: dict[str, Callable[[PageContext], str]] = {
@@ -30,6 +41,7 @@ PAGES: dict[str, Callable[[PageContext], str]] = {
     "start": start.render_start,
     "account": account.render_account,
     "data": data.render_data,
+    "strategies": strategies.render_strategies,
 }
 
 #: Pages whose new composition is complete.  Everything else is still the old

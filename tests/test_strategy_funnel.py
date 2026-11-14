@@ -35,6 +35,7 @@ from axiom_forex.strategies.catalog.funnel import (
 )
 from axiom_forex.strategies.library.panel import StrategyLibraryPanel
 from tests.test_workstation_start import _app, _evaluate
+from tests.test_workstation_ui import _Page
 
 
 def _record(rows, *, candidates=0, symbols=("EURUSD", "GBPUSD"), timeframe="1h"):
@@ -268,8 +269,11 @@ def _page_app(tmp_path):
 
 
 def _text(html: str) -> str:
-    body = html.split("<div class='content'>", 1)[1].split("<footer", 1)[0]
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body))
+    """The page's own words: everything between the banners and the footer."""
+
+    page = _Page()
+    page.feed(html)
+    return re.sub(r"\s+", " ", page.text_content)
 
 
 def test_the_page_shows_every_count_separately(tmp_path):
