@@ -30,7 +30,8 @@ from axiom_forex.workstation import symbols as symbol_tools
 
 from . import common
 
-MAX_EXCLUDED_SHOWN = 400
+#: One cap, owned by the catalogue module, so the page and its tests agree.
+MAX_EXCLUDED_SHOWN = symbol_tools.MAX_EXCLUDED_SHOWN
 
 
 def _catalogue(ctx: Any) -> Any:

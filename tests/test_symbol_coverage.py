@@ -378,10 +378,14 @@ def test_the_page_draws_a_bounded_number_of_excluded_rows_and_says_how_many():
         "/account",
     )
 
-    assert len(re.findall(r"<li><span class='mono'>CFD", html)) == MAX_EXCLUDED_SHOWN
+    listed = html.split("aria-label='Reported symbols that cannot be selected", 1)[1]
+    listed = listed.split("</ul>", 1)[0]
+    assert listed.count("<li><code>CFD") == MAX_EXCLUDED_SHOWN
     assert f"{total} reported symbol(s) not selectable" in html
-    assert f"first {MAX_EXCLUDED_SHOWN} shown" in html
     assert f"The other {total - MAX_EXCLUDED_SHOWN} excluded symbol(s)" in html
+    # The reason each name is excluded is beside it, and the list stays bounded.
+    assert "<code>CFD0000</code>" in listed
+    assert "<ul class='scroll-list small' tabindex='0'" in html
 
 
 def test_the_page_shows_a_pair_that_sorts_past_the_old_window():

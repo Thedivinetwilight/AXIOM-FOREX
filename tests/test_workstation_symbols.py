@@ -20,6 +20,7 @@ from axiom_forex.workstation.symbols import (
     build_catalogue,
     records_from_terminal,
 )
+from axiom_forex.workstation.symbols import MAX_EXCLUDED_SHOWN
 from axiom_forex.workstation.ui.theme import BREAKPOINTS, STYLES
 from tests.test_workstation_ui import (
     app_for,
@@ -454,8 +455,10 @@ def test_the_excluded_symbols_are_listed_once_and_scroll_inside_a_bounded_box():
     # The list is capped: past the cap the page says how many rows it left out
     # and still accounts for them, rather than silently dropping them.
     assert "not listed here" not in html  # 113 rows is under the cap
-    huge = parse(render(many_excluded_app(430), "/account"))
-    assert huge.has_text("The other 30 excluded symbol(s) are counted but not listed here")
+    huge = parse(render(many_excluded_app(MAX_EXCLUDED_SHOWN + 30), "/account"))
+    assert huge.has_text(
+        f"The other 30 excluded symbol(s) are counted but not listed here"
+    )
     assert huge.has_text("Every reported symbol was classified")
 
 
