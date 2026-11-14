@@ -696,4 +696,8 @@ def test_every_navigation_link_is_grouped_rendered_and_has_an_icon():
     # A link that is not grouped would silently disappear from the sidebar.
     assert sorted(grouped) == sorted(keys)
     assert len(set(grouped)) == len(grouped)
-    assert all(key in views.ICONS and key in views.PAGES for key in keys)
+    # Every one is served: by the legacy table, or by the redesign's registry.
+    from axiom_forex.workstation.ui.render import PAGES as REDESIGNED
+
+    assert all(key in views.ICONS for key in keys)
+    assert all(key in views.PAGES or key in REDESIGNED for key in keys)

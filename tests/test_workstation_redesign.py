@@ -215,7 +215,13 @@ def test_all_literal_and_builder_form_targets_are_registered_actions():
     # The route table, page map and navigation cannot drift apart.
     assert set(PAGE_PATHS) == {key for key, _title in GET_ROUTES.values()}
     assert {key for key, _href, _label in views.NAV} == set(PAGE_PATHS)
-    assert len(views.PAGES) == len(GET_ROUTES) == 16
+    # Every route is still served: the redesign's registry first, the legacy map
+    # for whatever it has not taken over yet.
+    from axiom_forex.workstation.ui.render import PAGES as REDESIGNED
+
+    routes = {key for key, _title in GET_ROUTES.values()}
+    assert set(views.PAGES) | set(REDESIGNED) == routes
+    assert len(GET_ROUTES) == 16
     assert set(views.PAGE_SCOPES) == set(PAGE_PATHS)
 
 

@@ -322,8 +322,6 @@ legend{padding:0 6px;font-size:12.5px;font-weight:700;color:var(--ink-2);
 .disclosure[open]>summary{margin-bottom:var(--s3)}
 .progress{border-radius:99px;overflow:hidden;background:var(--surface-3);height:10px}
 .progress .meter{margin:0;border-radius:0}
-@media (max-width:620px){.chart{padding:var(--s2)}.chart svg{min-width:0}}
-
 /* ------------------------------------------------------- one file, one job */
 .job{border:1px solid var(--line);border-radius:var(--r-md);padding:var(--s3) var(--s4);
   background:var(--surface);margin-top:var(--s3)}
@@ -478,6 +476,9 @@ legend{padding:0 6px;font-size:12.5px;font-weight:700;color:var(--ink-2);
   .page-actions .btn,.actions .btn{flex:1 1 auto}
   .pick-grid{grid-template-columns:minmax(0,1fr);max-height:none}
   .split-callout{grid-template-columns:minmax(0,1fr)}
+  /* A chart scrolls in its own box until the phone breakpoint, then fits. */
+  .chart{padding:var(--s2)}
+  .chart svg{min-width:0}
   .lifecycle li[aria-current="step"]::after{content:none}
   .candidate-list{grid-template-columns:minmax(0,1fr)}
   .guide-head{flex-wrap:wrap}

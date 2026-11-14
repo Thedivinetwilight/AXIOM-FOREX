@@ -834,7 +834,8 @@ def test_the_positions_page_does_not_call_a_duplicated_book_resumable(tmp_path):
     metrics = {item["key"]: item["available"] for item in account["metrics"]}
     assert metrics["equity"] is False
 
-    html = views.render_page(app._context("positions", "Paper positions"))
+    # The page the workstation actually serves, not the superseded composition.
+    _status, html = app.page("/positions")
     text = _text(html)
 
     assert "can be resumed exactly" not in text
@@ -853,7 +854,7 @@ def test_the_confirmed_close_repairs_a_duplicated_book_and_the_loop_then_runs(tm
     # The one action the page offers, at the level the operator clicks -- with the
     # fields that page's own form carries.
     app = _panel_app(tmp_path)
-    page = views.render_page(app._context("positions", "Paper positions"))
+    _status, page = app.page("/positions")
     assert "name='return_to' value='/positions'" in page
     status, redirect, message = app.act(
         "catalog-paper-close-all",

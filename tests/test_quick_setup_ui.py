@@ -19,6 +19,7 @@ The panel here is a fake; no terminal, account, or order is involved.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -273,8 +274,11 @@ def app_with_panel(panel: Any = None) -> WorkstationApp:
 
 
 def page_html(app: WorkstationApp) -> str:
-    ctx = app._context("quick-setup", "Quick setup")
-    return views.render_page(ctx)
+    """The page the workstation actually serves on this route."""
+
+    status, html = app.page("/quick-setup")
+    assert int(status) == 200
+    return html
 
 
 # -- routes and navigation -------------------------------------------------
@@ -479,3 +483,71 @@ def test_the_panel_view_is_only_read_for_its_own_page():
     assert (overview.extra or {}).get("research") == {}
     quick = app._context("quick-setup", "Quick setup")
     assert (quick.extra or {}).get("research", {}).get("available") is True
+
+
+# -- the redesigned surface ------------------------------------------------
+
+
+def _audit(html: str):
+    from tests.test_workstation_redesign import _audit as audit_html
+
+    return audit_html(html)
+
+
+def test_the_page_is_served_in_the_redesigned_frame():
+    html = page_html(app_with_panel())
+    assert "data-scope='research'" in html
+    assert "RESEARCH SETUP" in html
+    assert html.count("<style>") == 1
+    assert "<script" not in html.lower()
+
+
+def test_the_page_has_one_heading_a_unique_outline_and_a_resolving_contents_list():
+    html = page_html(app_with_panel())
+    audit = _audit(html)
+    assert audit.headings.count("h1") == 1
+    assert not [key for key, count in audit.ids.items() if count > 1]
+    targets = re.findall(r"href='#([^']+)'", html)
+    assert len(targets) >= 5
+    # A contents list that points at a section the page did not draw is a lie.
+    for target in targets:
+        assert target in audit.ids, target
+
+
+def test_every_table_can_stack_at_a_narrow_width():
+    """Wide tables become labelled blocks below 620px, so every cell is labelled."""
+
+    html = page_html(app_with_panel())
+    assert "<table" in html
+    for row in re.findall(r"<tr>(.*?)</tr>", html):
+        for opening in re.findall(r"<td[^>]*>", row):
+            assert "data-label=" in opening, opening
+
+
+def test_every_control_is_one_the_panel_or_the_runner_accepts():
+    html = page_html(app_with_panel())
+    names = set(re.findall(r"<(?:input|select|textarea)[^>]*name='([a-z_]+)'", html))
+    allowed = {
+        "nonce",
+        "symbols",
+        "lot_size",
+        "max_open_positions",
+        "max_daily_loss_account",
+        "max_order_notional_account",
+        "max_spread_pips",
+        "window_days",
+        "commission_per_lot",
+        "slippage_pips",
+        "timeframes",
+    }
+    assert names <= allowed, names - allowed
+
+
+def test_a_running_evaluation_offers_cancel_rather_than_a_second_run():
+    panel = FakePanel()
+    panel.view_payload["running"] = True
+    panel.view_payload["progress"] = {"running": True, "fraction": 0.4, "label": "RUNNING"}
+    html = page_html(app_with_panel(panel))
+    assert "Cancel the run" in html
+    assert "Run the one-year evaluation" not in html
+    assert "aria-valuenow='40'" in html

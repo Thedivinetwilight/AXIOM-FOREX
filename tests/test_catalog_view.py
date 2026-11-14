@@ -6,7 +6,6 @@ import time
 
 from axiom_forex.facade import build_fixture_platform
 from axiom_forex.strategies.catalog.panel import ACTION_EVALUATE, CatalogPanel
-from axiom_forex.workstation import views
 from axiom_forex.workstation.app import POST_ACTIONS, WorkstationApp
 from axiom_forex.workstation.setup import SetupWizard
 
@@ -28,8 +27,11 @@ def _app(panel: CatalogPanel) -> WorkstationApp:
 
 
 def _page(app: WorkstationApp) -> str:
-    ctx = app._context("quick-setup", "Quick setup")
-    return views.render_page(ctx)
+    """The page the workstation actually serves on this route."""
+
+    status, html = app.page("/quick-setup")
+    assert int(status) == 200
+    return html
 
 
 def test_the_catalog_card_offers_only_forex_and_one_start_button(tmp_path):

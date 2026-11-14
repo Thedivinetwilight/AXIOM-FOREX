@@ -214,6 +214,19 @@ def cell(
     return f"<td{klass_attr}{label_attr}>{value}</td>"
 
 
+def _is_num(flag: Any) -> bool:
+    """Whether a column is numeric.
+
+    Callers write ``("Bars", "num")`` as often as ``("Bars", True)``; both mean the
+    same thing here, and ``("Symbol", "text")`` means the opposite.  Reading the
+    flag by truthiness alone right-aligned every column in every table.
+    """
+
+    if isinstance(flag, str):
+        return flag.strip().lower() == "num"
+    return bool(flag)
+
+
 def table(
     columns: Sequence[tuple[str, bool]],
     rows: Sequence[Sequence[str]],
@@ -232,7 +245,7 @@ def table(
     """
 
     head = "".join(
-        "<th scope='col'%s>%s</th>" % (" class='num'" if num else "", escape(str(name)))
+        "<th scope='col'%s>%s</th>" % (" class='num'" if _is_num(num) else "", escape(str(name)))
         for name, num in columns
     )
     body: list[str] = []

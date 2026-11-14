@@ -816,6 +816,16 @@ def _recovery_section(ctx: Any, account: Mapping[str, Any], *, open_count: int) 
     integrity = dict(account.get("integrity") or {})
     session = dict(account.get("session") or {})
     recovery = dict(integrity.get("recovery") or session.get("recovery") or {})
+    # The ledger's own warnings are checked first.  A recovery report can say the
+    # paper test would manage every stored position while the ledger still holds a
+    # second fill under one position key -- the one thing that test refuses to
+    # carry.  Saying "resumable" over that would be the page disagreeing with the
+    # ledger it just read.
+    ledger_warnings = [
+        str(item.get("detail") or "")
+        for item in (integrity.get("warnings") or ())
+        if isinstance(item, Mapping) and str(item.get("detail") or "")
+    ]
     form = _close_all_paper_form(ctx)
     tail = (
         "<p class='small muted' style='margin:8px 0 0'>Simulated paper accounting only: no "
@@ -823,6 +833,30 @@ def _recovery_section(ctx: Any, account: Mapping[str, Any], *, open_count: int) 
         "mode does not change. Once the book is flat you can retry starting the paper "
         "autopilot.</p>"
     )
+    if ledger_warnings and recovery.get("ok") is True:
+        rows = "".join(f"<li>{fmt.text(item)}</li>" for item in ledger_warnings[:4])
+        return section(
+            "Stored paper book",
+            notice(
+                "The ledger and the stored book do not agree, so these positions are not "
+                "called resumable",
+                f"<ul class='check-list' style='margin:0 0 8px'>{rows}</ul>"
+                "<p class='small' style='margin:6px 0'>The paper test keeps one position per "
+                "key, so a second entry fill under the same key can never be managed by it, "
+                "and its cost stays in the ledger. Until that is settled the page will not "
+                "claim the book can carry on, and the figures that depend on it are marked "
+                "unavailable above.</p>"
+                "<p class='small' style='margin:6px 0'>Closing the book is the way out, and it "
+                "is all-or-nothing: every open record is closed once at its own closing side "
+                "from a fresh quote, and the closing fills are what make the ledger pair "
+                "again.</p>",
+                tone="warn",
+            )
+            + form
+            + tail,
+            note="Nothing is closed unless every position can be priced and closed in full.",
+            id="recovery",
+        )
     if recovery.get("ok") is True:
         return section(
             "Stored paper book",
