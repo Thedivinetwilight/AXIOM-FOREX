@@ -1128,11 +1128,22 @@ def test_design_tokens_keep_foreground_contrast_above_aa():
         high, low = max(la, lb), min(la, lb)
         return (high + 0.05) / (low + 0.05)
 
-    background = tokens["--bg"]
-    for name in ("--text", "--text-2", "--text-3", "--accent", "--ok", "--warn", "--danger"):
+    # The redesign's tokens: paper is the page, surface the panel it sits on.
+    background = tokens["--paper"]
+    surface = tokens["--surface"]
+    for name in ("--ink", "--ink-2", "--ink-3"):
         assert contrast(tokens[name], background) >= 4.5, name
-    for name in ("--text", "--text-2"):
-        assert contrast(tokens[name], tokens["--panel"]) >= 4.5, name
+    for name in ("--ink", "--ink-2"):
+        assert contrast(tokens[name], surface) >= 4.5, name
+    # A tone colour is only used for text on its own tint, never on the page.
+    for tone, tint in (
+        ("--ok", "--ok-tint"),
+        ("--warn", "--warn-tint"),
+        ("--info", "--info-tint"),
+        ("--live-accent", "--live-tint"),
+        ("--paper-accent-ink", "--paper-tint"),
+    ):
+        assert contrast(tokens[tone], tokens[tint]) >= 4.5, tone
 
 
 def test_a_single_stylesheet_is_used_by_every_page():

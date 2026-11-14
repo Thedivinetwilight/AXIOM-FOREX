@@ -431,15 +431,14 @@ def test_the_stylesheet_shrinks_to_one_column_on_a_narrow_window():
 
     css = views.STYLES
 
-    assert "@media (max-width:560px)" in css
-    narrow = css[css.index("@media (max-width:560px)") :]
-    narrow = narrow[: narrow.index("}") + 1] if "}" in narrow else narrow
-    block = css[css.index("@media (max-width:560px)") : css.index("@media (prefers-reduced-motion")]
-    assert "grid-template-columns:minmax(0,1fr)" in block
-    # A phone-sized window must not have to scroll the whole page sideways.
-    assert ".content{padding:var(--s3)" in block
-    # Tables stay scrollable inside their own box, at every width.
-    assert ".table-wrap{overflow-x:auto}" in css
+    assert "@media (max-width:620px)" in css
+    narrow = css[css.index("@media (max-width:620px)") : css.index("@media (prefers-reduced-motion")]
+    # A phone-sized window must not have to scroll the whole page sideways, so the
+    # tables become labelled blocks rather than a sideways-scrolling grid.
+    assert ".shell{padding:var(--s3)" in narrow
+    assert ".table-wrap--stack{overflow:visible" in narrow
+    # Tables stay scrollable inside their own box at every wider width.
+    assert ".table-wrap{overflow-x:auto" in css
 
 
 # ---------------------------------------------------------------------------

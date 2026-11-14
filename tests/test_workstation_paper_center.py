@@ -193,13 +193,15 @@ def test_the_command_center_renders_configured_risk_units_and_a_safe_live_bounda
 def test_narrow_layout_includes_the_command_center_grid():
     css = views.STYLES
     block = css[
-        css.index("@media (max-width:560px)") : css.index(
+        css.index("@media (max-width:620px)") : css.index(
             "@media (prefers-reduced-motion"
         )
     ]
-    assert ".command-grid" in block
-    assert ".command-risk{max-height:none}" in block
-    assert "grid-template-columns:minmax(0,1fr)" in block
+    # The command center's own grids are the shared ones now: the picker and the
+    # candidate lists fold to a single column, and every field keeps the width.
+    assert ".pick-grid{grid-template-columns:minmax(0,1fr);max-height:none}" in block
+    assert ".candidate-list{grid-template-columns:minmax(0,1fr)}" in block
+    assert ".field,fieldset{max-width:none}" in block
 
 
 def test_every_command_center_form_is_registered_and_labelled(tmp_path):

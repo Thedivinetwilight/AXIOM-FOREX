@@ -539,13 +539,25 @@ def test_every_monitoring_page_is_one_accessible_frame(tmp_path, path):
 
 
 def test_the_monitoring_pages_use_the_shared_narrow_layout():
-    assert ".summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr))" in views.STYLES
-    assert ".table-wrap{overflow-x:auto}" in views.STYLES
-    narrow = views.STYLES[views.STYLES.find("@media (max-width:560px)") :][:900]
-    for selector in ("summary-grid", "grid--two", "split-callout"):
-        assert selector in narrow, selector
-    assert "@media (max-width:860px)" in views.STYLES
-    assert "@media (max-width:1120px)" in views.STYLES
+    from axiom_forex.workstation.ui.theme import BREAKPOINTS
+
+    css = views.STYLES
+    assert BREAKPOINTS == (620, 860, 1080)
+    # Figures wrap rather than shrink: the stat strip is auto-fit, and a table
+    # stays inside its own scroller at every width above the phone breakpoint.
+    assert ".stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr))" in css
+    assert ".table-wrap{overflow-x:auto" in css
+    tablet = css[css.index("@media (max-width:1080px)") : css.index("@media (max-width:860px)")]
+    middle = css[css.index("@media (max-width:860px)") : css.index("@media (max-width:620px)")]
+    phone = css[css.index("@media (max-width:620px)") : css.index("@media (prefers-reduced-motion")]
+    # The two-column layout folds to one column on a tablet, and the fact lists
+    # stack under their own labels once two columns stop fitting...
+    assert "grid-template-columns:minmax(0,1fr)" in tablet
+    assert ".facts{grid-template-columns:minmax(0,1fr)" in middle
+    # ...and on a phone the tables become labelled blocks instead of scrolling.
+    for selector in (".table-wrap--stack", ".table--stack"):
+        assert selector in phone, selector
+    assert ".table--stack tr{display:block" in phone
 
 
 def test_the_monitoring_routes_render_in_every_state(tmp_path):

@@ -419,20 +419,28 @@ def test_the_shared_chrome_names_the_paper_live_and_sample_lanes():
 
 
 def test_the_stylesheet_has_one_design_system_and_three_narrow_breakpoints():
+    from axiom_forex.workstation.ui.theme import BREAKPOINTS
+
     styles = views.STYLES
+    # One stylesheet, one token block, and the three breakpoints it is built and
+    # tested against -- wide, tablet, phone.
+    assert BREAKPOINTS == (620, 860, 1080)
     for marker in (
-        "@media (max-width:1120px)",
+        "@media (max-width:1080px)",
         "@media (max-width:860px)",
-        "@media (max-width:560px)",
+        "@media (max-width:620px)",
         "prefers-reduced-motion",
-        ".page-scope{",
+        ".skip{",
+        ":focus-visible{",
         ".notice--danger",
         ".notice--info",
-        ".notice[data-action]",
+        ".table-wrap--stack",
         "grid-template-columns:minmax(0,1fr)",
     ):
         assert marker in styles, marker
     assert styles.count(":root{") == 1
+    # Reduced motion is honoured, and print drops the chrome.
+    assert "@media print" in styles
 
 
 def test_the_launcher_opens_the_paper_command_center(monkeypatch, capsys, tmp_path):

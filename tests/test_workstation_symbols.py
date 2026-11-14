@@ -20,7 +20,7 @@ from axiom_forex.workstation.symbols import (
     build_catalogue,
     records_from_terminal,
 )
-from axiom_forex.workstation.views import STYLES
+from axiom_forex.workstation.ui.theme import BREAKPOINTS, STYLES
 from tests.test_workstation_ui import (
     app_for,
     live_session,
@@ -337,13 +337,14 @@ def test_with_symbols_never_leaves_a_changed_set_confirmed(names):
 
 
 # ---------------------------------------------------------------------------
-# 3. layout: three full-width sections, and nothing in a narrow side column
+# 3. layout: three full-width sections in the redesign's own vocabulary
 # ---------------------------------------------------------------------------
 #
-# The page used to be a two-column grid: the account card alone on the left and
-# the tall picker stacked in a narrow right column.  On a desktop that wasted most
-# of the width.  These tests hold the replacement: the account is a compact strip
-# across the top, the pair grid gets the full page, and the confirmation closes it.
+# The page is the redesign's single-column layout, top to bottom: the account as
+# a fact list, the picker on the full width, and the confirmation closing the
+# page.  These tests read the *new* theme: the section order and ids, the facts
+# list, the picker grid and its bounded refusal list, and the breakpoints the
+# layout is built against.
 
 
 def many_excluded_app(excluded: int = 113):
@@ -358,7 +359,13 @@ def many_excluded_app(excluded: int = 113):
 
 
 def _content(html: str) -> str:
-    return html.split("<div class='content'>", 1)[1]
+    """Everything inside the single-column layout wrapper."""
+
+    return html.split("<div class='layout layout--wide'>", 1)[1]
+
+
+def _section_ids(html: str) -> list[str]:
+    return re.findall(r"<h2 id='([^']+)'", html)
 
 
 def _style_block(marker: str) -> str:
@@ -378,80 +385,106 @@ def _style_block(marker: str) -> str:
 
 
 def test_the_account_page_is_three_full_width_sections_in_order():
-    body = _content(render(many_excluded_app(), "/account"))
+    html = render(many_excluded_app(), "/account")
+    body = _content(html)
 
-    titles = re.findall(r"<h2>([^<]*)</h2>", body)
+    titles = re.findall(r"<h2[^>]*>([^<]*)</h2>", body)
     assert titles == ["Detected account", "Symbols to observe", "Confirm configuration"]
-    # One card per section, each a direct child of the page: no two-column wrapper
-    # and no side column for the picker to be squeezed into.
-    assert body.count("<section class='card") == 3
-    assert "grid--two" not in body
+    assert _section_ids(body) == ["account", "symbols", "confirm"]
+    # One section per step, each a direct child of the single-column layout: no
+    # two-column wrapper and no side column for the picker to be squeezed into.
+    assert body.count("<section class='section'") == 3
+    assert "col--aside" not in body
+    # The only h1 on the page is the page title.
+    assert html.count("<h1>") == 1
 
 
-def test_the_detected_account_summary_is_a_wrapping_tile_grid():
+def test_the_detected_account_summary_is_a_labelled_fact_list():
     html = render(rich_live_app(), "/account")
     body = _content(html)
 
-    assert "<div class='summary-grid'>" in body
-    assert body.count("<div class='summary'>") == 8
-    # Long single lines would defeat a full-width card; the tiles wrap instead.
-    rule = _style_block(".summary-grid{")
-    assert "repeat(auto-fit,minmax(190px,1fr))" in rule
-    assert "grid-template-columns:minmax(0,1fr) minmax(0,1fr)" not in rule
+    assert "<dl class='facts'>" in body
+    account = body.split("id='account'", 1)[1].split("id='symbols'", 1)[0]
+    assert account.count("<dt>") == 8
+    assert account.count("<dd>") == 8
+    # A long value wraps under its own label instead of inside a fixed tile; the
+    # narrow breakpoint folds the two columns into one.
+    rule = _style_block(".facts{")
+    assert "grid-template-columns:minmax(120px" in rule
+    narrow = _style_block("@media (max-width:860px){")
+    assert ".facts{grid-template-columns:minmax(0,1fr)" in narrow
 
 
 def test_the_pair_grid_is_left_to_span_the_page():
     body = _content(render(many_excluded_app(), "/account"))
 
-    grid = body.split("<div class='symbol-grid'", 1)[1]
+    grid = body.split("<div class='pick-grid'", 1)[1]
     # The grid's own container is the only thing wrapping it: it is not nested
-    # inside a narrower column or a second card.
+    # inside a narrower column or a second card, and it is one labelled group.
     assert grid.index("</section>") > grid.index("EURUSD.a")
-    rule = _style_block(".symbol-grid{")
+    assert "role='group' aria-label='Verified forex pairs'" in grid
+    rule = _style_block(".pick-grid{")
     assert "repeat(auto-fill,minmax(200px,1fr))" in rule
     assert "max-height:360px" in rule
+    # Every tile carries its input and its broker name exactly once.
+    assert body.count("name='symbol'") == 2  # two verified pairs
 
 
-def test_the_excluded_symbols_are_collapsed_and_scroll_inside_a_bounded_box():
+def test_the_excluded_symbols_are_listed_once_and_scroll_inside_a_bounded_box():
     html = render(many_excluded_app(), "/account")
     page = parse(html)
 
-    disclosure = [
-        attrs for attrs in page.by_tag("details") if "disclosure" in attrs.get("class", "")
-    ]
-    assert len(disclosure) == 1
-    assert "open" not in disclosure[0]  # collapsed until the operator asks
     assert page.has_text("113 reported symbol(s) not selectable")
+    # The names and their reasons appear on the page exactly once: as a list,
+    # rather than a tile that only says "not selectable" *and* a list of reasons.
+    assert "class='pick pick--off'" not in html
+    assert html.count("not selectable") == 1
+    listed = html.split("aria-label='Reported symbols that cannot be selected", 1)[1]
+    listed = listed.split("</ul>", 1)[0]
+    assert listed.count("<li><code>") == 113  # every name is listed, none dropped
 
-    # When it is opened the list scrolls on its own: a hundred rows must not
-    # stretch the page and push the confirmation out of reach.
-    assert "<div class='scroll-list' tabindex='0'" in html
+    # A hundred rows must not stretch the page and push the confirmation out of
+    # reach: the list scrolls on its own and is bounded.
+    assert "<ul class='scroll-list small' tabindex='0'" in html
     rule = _style_block(".scroll-list{")
     assert "max-height:220px" in rule
     assert "overflow:auto" in rule
+    # The list is a real group with a name, reachable without a mouse.
+    assert "role='group' aria-label='Reported symbols that cannot be selected" in html
+    # The list is capped: past the cap the page says how many rows it left out
+    # and still accounts for them, rather than silently dropping them.
+    assert "not listed here" not in html  # 113 rows is under the cap
+    huge = parse(render(many_excluded_app(430), "/account"))
+    assert huge.has_text("The other 30 excluded symbol(s) are counted but not listed here")
+    assert huge.has_text("Every reported symbol was classified")
 
 
 def test_a_narrow_viewport_stacks_every_section_instead_of_squeezing_it():
-    narrow = _style_block("@media (max-width:1120px){")
+    assert BREAKPOINTS == (620, 860, 1080)
+    tablet = _style_block("@media (max-width:1080px){")
+    assert ".layout{grid-template-columns:minmax(0,1fr)}" in tablet
+    narrow = _style_block("@media (max-width:620px){")
+    # The picker and the candidate lists fold to one column, and every form field
+    # is allowed the full width of the screen.
+    assert ".pick-grid{grid-template-columns:minmax(0,1fr);max-height:none}" in narrow
+    assert ".candidate-list{grid-template-columns:minmax(0,1fr)}" in narrow
+    assert ".field,fieldset{max-width:none}" in narrow
 
-    assert ".split{grid-template-columns:minmax(0,1fr)}" in narrow
-    # The tile grid needs no breakpoint of its own: auto-fit drops to one column
-    # when the viewport cannot fit two tiles.
-    assert "repeat(auto-fit,minmax(190px,1fr))" in _style_block(".summary-grid{")
-    assert "repeat(auto-fill,minmax(200px,1fr))" in _style_block(".symbol-grid{")
 
-
-def test_the_layout_change_adds_no_post_target_or_field():
-    body = _content(render(many_excluded_app(), "/account"))
+def test_the_page_adds_no_post_target_or_field():
+    html = render(many_excluded_app(), "/account")
+    body = _content(html)
     actions = set(re.findall(r"<form method='post' action='([^']+)'", body))
     forms = re.findall(r"<form\b[^>]*>.*?</form>", body, re.S)
 
-    # The same two targets as before the redesign: the save form and the
-    # confirmation (plus disconnect, which lives in the top bar outside this body).
+    # The same two targets as any other build: the save form and the confirmation.
+    # Disconnect lives in the shared top bar, outside this body.
     assert actions == {"/actions/symbols", "/actions/confirm"}
-    assert len(forms) == 3  # checkbox form, bulk controls, confirm
+    assert len(forms) == 3  # the checkbox form, the bulk controls, the confirm
     assert all("name='nonce'" in form for form in forms)
     assert "name='symbol'" in body
+    # ...and the top bar's own controls are the shared shell's, not this page's.
+    assert "/actions/disconnect" in html
 
 
 def test_reading_the_new_layout_changes_nothing():

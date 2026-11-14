@@ -476,5 +476,11 @@ def test_the_live_overview_is_accessible_and_has_a_narrow_layout():
     }:
         assert href in GET_ROUTES, href
     assert ".lifecycle{" in views.STYLES
-    assert ".command-grid,.lifecycle,.tile-grid" in views.STYLES
-    assert "@media (max-width:560px)" in views.STYLES
+    assert "@media (max-width:620px)" in views.STYLES
+    # The lifecycle list is a grid that folds to one column with the phone rules.
+    narrow = views.STYLES[
+        views.STYLES.index("@media (max-width:620px)") : views.STYLES.index(
+            "@media (prefers-reduced-motion"
+        )
+    ]
+    assert ".pick-grid{grid-template-columns:minmax(0,1fr)" in narrow
