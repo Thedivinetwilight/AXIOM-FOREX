@@ -38,6 +38,7 @@ import pytest
 
 from axiom_forex.facade import build_fixture_platform
 from axiom_forex.workstation import views
+from axiom_forex.workstation.ui.render import render_connecting
 from axiom_forex.workstation.app import (
     CONFIRM_REFUSALS,
     CSP,
@@ -1006,7 +1007,7 @@ def test_connecting_state_is_rendered_with_a_status_role():
     connecting = replace(
         ctx, terminal=replace(ctx.terminal, state="CONNECTING", connected=False)
     )
-    html = views.render_connecting(connecting)
+    html = render_connecting(connecting)
     assert "role='status'" in html
     assert "Connecting" in html
 

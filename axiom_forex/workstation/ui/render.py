@@ -60,9 +60,24 @@ def render_page(ctx: PageContext) -> str:
 
 
 def render_connecting(ctx: PageContext) -> str:
-    from .. import views as legacy
+    """A status region while the launcher waits for the terminal to answer.
 
-    return legacy.render_connecting(ctx)
+    It says what is happening, what happens if nothing answers, and that nothing
+    retries on its own -- there is no timer, no polling and no meta refresh here.
+    """
+
+    head = page_head("Workstation", "Connecting to the terminal…", "")
+    body = (
+        head
+        + "<div class='notice notice--info' role='status'>"
+        "<span class='spinner' aria-hidden='true'></span>"
+        "<div><strong>Connecting to MetaTrader 5…</strong>"
+        "<p>Waiting for the terminal to answer. If the terminal is closed the attempt will "
+        "fail and nothing will retry on its own.</p></div></div>"
+        + "<p class='small muted' style='margin-top:12px'>This page does not refresh itself. "
+        "<a href='/'>Back to the guided start</a></p>"
+    )
+    return shell.document(ctx, body)
 
 
 def render_message(

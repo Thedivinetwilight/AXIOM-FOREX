@@ -307,6 +307,11 @@ legend{padding:0 6px;font-size:12.5px;font-weight:700;color:var(--ink-2);
   gap:var(--s4)}
 .page-jump{font-size:13px;color:var(--ink-2);padding:var(--s3) 0}
 .page-jump a{text-decoration:none} .page-jump a:hover{text-decoration:underline}
+/* ----------------------------------------------------------------- status */
+.spinner{width:14px;height:14px;border-radius:50%;flex:0 0 auto;margin-top:3px;
+  border:2px solid var(--line-strong);border-top-color:var(--paper-accent);
+  animation:spin 900ms linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 /* ------------------------------------------------------- one file, one job */
 .job{border:1px solid var(--line);border-radius:var(--r-md);padding:var(--s3) var(--s4);
   background:var(--surface);margin-top:var(--s3)}
@@ -469,6 +474,7 @@ legend{padding:0 6px;font-size:12.5px;font-weight:700;color:var(--ink-2);
 }
 @media (prefers-reduced-motion:reduce){
   *{transition-duration:.01ms!important;animation-duration:.01ms!important}
+  .spinner{animation:none;border-top-color:var(--line-strong)}
 }
 @media print{
   .rail,.strip,.page-actions,.skip{display:none}
