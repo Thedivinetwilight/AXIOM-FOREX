@@ -15,12 +15,11 @@ sentences, and none of them is a zero or a dash.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from .. import format as fmt
 from ..components import (
     action_form,
-    blockers,
     button_link,
     cell,
     chip,
@@ -33,8 +32,6 @@ from ..components import (
     notice,
     page_head,
     section,
-    stat,
-    stats,
     table,
 )
 from . import common
