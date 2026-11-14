@@ -14,7 +14,7 @@ from html import escape
 from ..context import PageContext
 from . import shell
 from .components import button_link, notice, page_head
-from .pages import autopilot, live, mode, monitoring, overview, setup
+from .pages import autopilot, live, mode, monitoring, overview, setup, start
 from .theme import STYLES  # re-exported for the tests that read it
 
 PAGES: dict[str, Callable[[PageContext], str]] = {
@@ -27,6 +27,7 @@ PAGES: dict[str, Callable[[PageContext], str]] = {
     "mode": mode.render_mode,
     "setup": setup.render_setup,
     "overview": overview.render_overview,
+    "start": start.render_start,
 }
 
 #: Pages whose new composition is complete.  Everything else is still the old
