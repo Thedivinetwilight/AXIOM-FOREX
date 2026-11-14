@@ -18,6 +18,7 @@ from .pages import (
     account,
     autopilot,
     data,
+    kronos,
     live,
     mode,
     monitoring,
@@ -42,6 +43,7 @@ PAGES: dict[str, Callable[[PageContext], str]] = {
     "account": account.render_account,
     "data": data.render_data,
     "strategies": strategies.render_strategies,
+    "kronos": kronos.render_kronos,
 }
 
 #: Pages whose new composition is complete.  Everything else is still the old
