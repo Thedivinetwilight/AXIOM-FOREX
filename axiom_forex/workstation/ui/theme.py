@@ -633,6 +633,7 @@ fieldset.field>legend{font-size:11.5px;font-weight:600;color:var(--ink-2);paddin
   .guide-status{margin-left:0}
   .field,fieldset{max-width:none}
   .col--aside{grid-template-columns:minmax(0,1fr)}
+  .form-steps{grid-template-columns:minmax(0,1fr)}
 }
 @media (prefers-reduced-motion:reduce){
   *{transition-duration:.01ms!important;animation-duration:.01ms!important}
