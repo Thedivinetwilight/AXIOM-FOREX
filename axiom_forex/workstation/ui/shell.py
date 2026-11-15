@@ -181,22 +181,56 @@ def quote_chip(account: Mapping[str, Any]) -> str:
 
 
 # ----------------------------------------------------------------------- rail
+#: The groups the rail keeps on its one visible row.  Everything else is one
+#: labelled disclosure away: sixteen links in a row is a wall, and a wall is not
+#: a hierarchy.  Both tiers come from the same ``NAV_GROUPS`` table.
+PRIMARY_GROUPS: tuple[str, ...] = ("Run", "Monitor")
+
+
+def _nav_links(ctx: Any, pages: Sequence[str], by_page: Mapping[str, tuple[str, str]]) -> list[str]:
+    links: list[str] = []
+    for page in pages:
+        if page not in by_page:
+            continue
+        href, label = by_page[page]
+        current = " aria-current='page'" if str(getattr(ctx, "page", "")) == page else ""
+        links.append(f"<a href='{escape(href)}'{current}>{escape(label)}</a>")
+    return links
+
+
 def _rail(ctx: Any) -> str:
     by_page = {page: (href, label) for page, href, label in NAV}
     groups: list[str] = []
-    for index, (name, pages) in enumerate(NAV_GROUPS):
-        links = []
-        for page in pages:
-            if page not in by_page:
-                continue
-            href, label = by_page[page]
-            current = " aria-current='page'" if str(getattr(ctx, "page", "")) == page else ""
-            links.append(f"<a href='{escape(href)}'{current}>{escape(label)}</a>")
+    secondary: list[str] = []
+    for name, pages in NAV_GROUPS:
+        links = _nav_links(ctx, pages, by_page)
         if not links:
             continue
-        if index:
-            groups.append("<span class='rail-sep' aria-hidden='true'></span>")
-        groups.append(f"<div class='rail-group'>{''.join(links)}</div>")
+        if name in PRIMARY_GROUPS:
+            if groups:
+                groups.append("<span class='rail-sep' aria-hidden='true'></span>")
+            groups.append(f"<div class='rail-group'>{''.join(links)}</div>")
+        else:
+            secondary.append(
+                f"<div class='rail-group'><span class='rail-group-label'>{escape(name)}</span>"
+                f"{''.join(links)}</div>"
+            )
+    here = str(getattr(ctx, "page", ""))
+    secondary_pages = {page for name, pages in NAV_GROUPS if name not in PRIMARY_GROUPS for page in pages}
+    current_label = ""
+    if here in secondary_pages and here in by_page:
+        # The current page is behind the disclosure: name it on the summary, so a
+        # page in the second tier never looks like no page is current.
+        current_label = f"<span class='rail-more-current'>· {escape(by_page[here][1])}</span>"
+    more = (
+        f"<details class='rail-more{' rail-more--current' if current_label else ''}' "
+        "data-nav-tier='secondary'>"
+        f"<summary>Setup &amp; tools{current_label}</summary>"
+        f"<div class='rail-more-panel'>{''.join(secondary)}</div>"
+        "</details>"
+        if secondary
+        else ""
+    )
 
     ends = [paper_loop_chip(ctx), execution_mode_chip(ctx)]
     terminal = ctx.terminal
@@ -215,7 +249,7 @@ def _rail(ctx: Any) -> str:
         "<div class='rail-in'>"
         f"<a class='brand' href='/autopilot'><span class='brand-mark'>AXIOM</span>"
         f"<span class='brand-name'>FOREX · workstation</span></a>"
-        f"<nav class='rail-nav' aria-label='Workstation'>{''.join(groups)}</nav>"
+        f"<nav class='rail-nav' aria-label='Workstation'>{''.join(groups)}{more}</nav>"
         f"<div class='rail-end'>{''.join(ends)}</div>"
         "</div></header>"
     )
@@ -272,21 +306,19 @@ def banners(ctx: Any) -> str:
     if ctx.terminal.simulated:
         if ctx.terminal.connected:
             items.append(
-                notice(
+                data_flag(
                     "SIMULATED / SAMPLE DATA — no MetaTrader 5 terminal is attached",
                     "The offline simulator is running because the launcher was started with "
                     "--simulate. Nothing on this page was read from a broker or an account, and "
                     "this preview can never reach observation mode.",
-                    tone="warn",
                 )
             )
         else:
             items.append(
-                notice(
+                data_flag(
                     "SIMULATED / SAMPLE DATA — offline simulator enabled",
                     "The launcher was started with --simulate. The preview is not started, no "
                     "terminal is attached, and nothing here was read from a broker or account.",
-                    tone="warn",
                 )
             )
     if getattr(ctx, "notice", ""):
@@ -305,6 +337,26 @@ def banners(ctx: Any) -> str:
             )
         )
     return notice_stack(items)
+
+
+
+def data_flag(title: str, detail: str) -> str:
+    """The sample-data bar: one line on the page, the long form one click away.
+
+    It keeps the exact wording and the ``notice`` tone the rest of the UI is
+    tested against, but as a single strip, so a simulated session does not push
+    the page it qualifies below the fold on every route.
+    """
+
+    return (
+        "<div class='dataflag notice--warn' role='note'>"
+        "<span class='glyph' aria-hidden='true'>!</span>"
+        f"<strong>{escape(title)}</strong>"
+        "<details class='dataflag-more'><summary>details</summary>"
+        f"<span class='n-body'>{escape(detail)}</span></details>"
+        "</div>"
+    )
+
 
 
 def legend() -> str:
@@ -337,10 +389,10 @@ def document(ctx: Any, body: str | Sequence[str]) -> str:
             f"{escape(str(feedback.get('message') or ''))}</div>"
         )
     return (
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<!doctype html><html lang='en' data-theme='dark'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{title} · {APP_NAME} {APP_SUBTITLE}</title>"
-        "<meta name='color-scheme' content='light'>"
+        "<meta name='color-scheme' content='dark'>"
         "<meta name='description' content='Local AXIOM-FOREX trading workstation. "
         "Read-only observation, locally simulated paper fills, and a guarded live path.'>"
         f"<style>{STYLES}</style></head><body>"

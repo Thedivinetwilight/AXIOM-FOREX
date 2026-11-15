@@ -698,6 +698,7 @@ class WorkstationApp:
             result = dict(self.scalper_live_result)
             self.scalper_live_result = {}
             return {
+                "continuous": self.autopilot_live_view(),
                 "last_arm": last_arm,
                 "configured": False,
                 "armed": False,
@@ -721,9 +722,15 @@ class WorkstationApp:
                 scalper_live["result"] = dict(self.scalper_live_result)
                 self.scalper_live_result = {}
             view["scalper_live"] = scalper_live
+            # The continuous guarded session is the live workflow's own bridge:
+            # its status is read here, on the page an operator looks for it, and
+            # it is the same object /autopilot used to host.  Reading it starts
+            # nothing.
+            view["continuous"] = self.autopilot_live_view()
             return view
         except Exception as exc:
             return {
+                "continuous": self.autopilot_live_view(),
                 "configured": True,
                 "armed": False,
                 "last_arm": last_arm,

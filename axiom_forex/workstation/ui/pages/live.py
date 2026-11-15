@@ -23,7 +23,7 @@ leaves it there.
 from __future__ import annotations
 
 from html import escape
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .. import format as fmt
 from ..components import (
@@ -42,6 +42,7 @@ from ..components import (
     table,
 )
 from . import runner as runner_page
+from .common import duration_ms, feed_cell, live_latency_facts, live_orders_table
 
 LIFECYCLE = (
     ("configured", "Recorded"),
@@ -51,6 +52,221 @@ LIFECYCLE = (
     ("submitted", "Submitted"),
     ("reconciled", "Reconciled"),
 )
+
+
+#: Every blocker the live path can raise, with the one place that clears it.  A
+#: refusal an operator cannot act on is a dead end, so each row carries its fix;
+#: none of these links sends, arms or starts anything by itself.
+FIXES: dict[str, tuple[str, str]] = {
+    "mode_not_live": ("Switch the mode to LIVE", "/mode"),
+    "not_connected": ("Connect the terminal", "/setup"),
+    "terminal_not_connected": ("Connect the terminal", "/setup"),
+    "no_live_workflow": ("Open setup", "/setup"),
+    "live_unavailable": ("Open setup", "/setup"),
+    "stack_unavailable": ("Open setup", "/setup"),
+    "plan_missing": ("Review the exact plan", "/live#plan"),
+    "plan_not_selected": ("Review the exact plan", "/live#plan"),
+    "plan_pair_mismatch": ("Review the exact plan", "/live#plan"),
+    "plan_timeframe_mismatch": ("Review the exact plan", "/live#plan"),
+    "selection_not_applied": ("Review the exact plan", "/live#plan"),
+    "not_armed": ("Arm the plan with the phrase", "/live#plan"),
+    "paper_not_running": ("Start the PAPER loop", "/autopilot"),
+    "paper_lane": ("Start the PAPER loop", "/autopilot"),
+    "feed_stale": ("Check the quotes", "/account"),
+    "stale_quote": ("Check the quotes", "/account"),
+    "unresolved_order": ("Reconcile the unresolved request", "/live#path"),
+    "unresolved_requests": ("Reconcile the unresolved request", "/live#path"),
+    "account_not_confirmed": ("Confirm the account", "/live#account"),
+    "account_mismatch": ("Confirm the account", "/live#account"),
+    "risk_limit": ("Read the risk limits", "/live#plan"),
+    "live_autopilot_unavailable": ("Open the paper command center", "/autopilot"),
+}
+_FALLBACK_FIX = ("Open setup", "/setup")
+
+
+def fix_for(code: str) -> tuple[str, str]:
+    """The control that clears a blocker, or the setup page when it is unknown."""
+
+    return FIXES.get(str(code or ""), _FALLBACK_FIX)
+
+
+def blockers_with_fix(items: Sequence[Mapping[str, Any]]) -> str:
+    """Blockers inline with the control that clears each one.
+
+    Nothing is hidden behind a summary: a refusal that stops real orders is on
+    the page, in the words the runtime used, next to its fix.
+    """
+
+    rows: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        reason = str(item.get("reason") or "")
+        message = str(item.get("message") or item.get("detail") or "")
+        hint = str(item.get("hint") or "")
+        label, href = fix_for(reason)
+        classes = " class='is-danger'" if str(item.get("tone") or "") == "danger" else ""
+        rows.append(
+            f"<li{classes}>"
+            "<span class='glyph' aria-hidden='true'>!</span>"
+            f"<span><span class='b-title'>{fmt.text(message or reason or 'Blocked')}</span>"
+            + (f"<span class='b-note'>{fmt.text(hint)}</span>" if hint else "")
+            + f"<span class='b-code'>{fmt.text(reason)}</span>"
+            f"<span class='do'><a class='btn btn--sm' href='{href}'>{fmt.text(label)}</a></span>"
+            "</span></li>"
+        )
+    if not rows:
+        return ""
+    return f"<ol class='blockers'>{''.join(rows)}</ol>"
+
+
+def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
+    """The continuous guarded session: the only live loop this workstation runs.
+
+    It is the bridge the launcher wires over the workflow this page already
+    builds, so the start and stop controls post that object's own actions and
+    every order still goes through the same guarded runner and broker adapter.
+    There is no second order route, and nothing on this panel sends by itself.
+    """
+
+    continuous = dict(view.get("continuous") or {})
+    nonce = fmt.attr(getattr(ctx, "action_nonce", ""))
+    if not continuous.get("available"):
+        return section(
+            "Continuous LIVE Autopilot",
+            notice(
+                "No continuous live session is wired into this workstation",
+                fmt.text(str(continuous.get("message") or ""))
+                or "This process cannot run a continuous live session. The PAPER loop, the "
+                "manual arming path and the one-shot intent bridge below are unaffected.",
+                tone="muted",
+            )
+            + button_link("/autopilot", "PAPER command center", small=True),
+            note="Continuous means a loop decides repeatedly. This workstation has none here, "
+            "so no button on this page pretends it does.",
+            id="continuous",
+        )
+
+    state = str(continuous.get("state") or "IDLE")
+    sending = bool(continuous.get("order_sending"))
+    running = state in {"RUNNING", "STARTING"}
+    blockers = [dict(item) for item in (continuous.get("blockers") or ())]
+    orders = [dict(item) for item in (continuous.get("orders") or ())]
+    latency = dict(continuous.get("latency") or {})
+    feed = dict(continuous.get("feed") or {})
+    strategy = dict(continuous.get("strategy") or {})
+    positions = [dict(item) for item in (continuous.get("positions") or ())]
+    unresolved = [item for item in orders if item.get("unresolved")]
+    match = continuous.get("plan_matches_selection")
+    pair = str(continuous.get("pair") or strategy.get("pair") or "")
+    symbol = str(continuous.get("broker_symbol") or pair or "not resolved")
+    timeframe = str(continuous.get("timeframe") or strategy.get("timeframe") or "")
+    candidate = str(strategy.get("candidate_id") or continuous.get("candidate_id") or "")
+
+    kpis = "".join(
+        [
+            "<div><span class='k'>Session</span><span class='v'>"
+            + chip(state, "danger" if sending else ("ok" if running else "muted"), dot=running)
+            + "</span><span class='f'>"
+            + ("a loop is deciding now" if running else "no loop is deciding")
+            + "</span></div>",
+            "<div><span class='k'>Order sending</span><span class='v'>"
+            + (chip("SENDING REAL ORDERS", "danger", dot=True) if sending else chip("not sending", "muted"))
+            + "</span><span class='f'>broker adapter preflight decides every order</span></div>",
+            "<div><span class='k'>Orders recorded</span><span class='v'>"
+            + fmt.text(len(orders))
+            + "</span><span class='f'>"
+            + fmt.text(f"{len(unresolved)} unresolved")
+            + "</span></div>",
+            "<div><span class='k'>Broker positions</span><span class='v'>"
+            + fmt.text(continuous.get("open_positions", len(positions)))
+            + "</span><span class='f'>reported by the terminal, not by PAPER</span></div>",
+            "<div><span class='k'>Quote feed</span><span class='v'>"
+            + feed_cell(feed)
+            + "</span><span class='f'>what the strategy read, and how old</span></div>",
+        ]
+    )
+
+    body = (
+        "<div class='kpi'>" + kpis + "</div>"
+        + facts(
+            [
+                ("What would run", fmt.text(candidate) or "no candidate selected"),
+                ("Pair and broker symbol", f"{fmt.text(pair) or '—'} · {fmt.text(symbol)}"),
+                ("Timeframe", fmt.text(timeframe) or "not resolved"),
+                (
+                    "Plan matches the selection",
+                    {True: "yes", False: "no", None: "not known"}.get(match, "not known"),
+                ),
+                ("Armed on this account", chip("ARMED", "danger", dot=True) if continuous.get("armed") else chip("Not armed", "muted")),
+                ("Feed detail", fmt.text(str(feed.get("detail") or "not measured"))),
+            ]
+        )
+    )
+    if blockers:
+        body += "<h3 class='small muted' style='margin:18px 0 6px'>What stops it, and where to fix it</h3>"
+        body += blockers_with_fix(blockers)
+    else:
+        body += notice(
+            "Every prerequisite the live path checks is satisfied",
+            "That is a statement about the checks, not about the market: the next signal still "
+            "passes the adapter's own preflight, the risk limits and the unresolved-order lockout.",
+            tone="ok",
+        )
+
+    controls: list[str] = []
+    if running:
+        controls.append(
+            action_form("autopilot-live-stop", nonce, "Stop the live session", tone="warn", described_by="continuous-note")
+        )
+    elif not blockers:
+        controls.append(
+            action_form("autopilot-live-start", nonce, "Start the live session", tone="danger", described_by="continuous-note")
+        )
+    if controls:
+        body += "<div class='actions' style='margin-top:12px'>" + "".join(controls) + "</div>"
+    body += (
+        "<p class='small muted' id='continuous-note' style='margin-top:8px'>Starting begins the "
+        "loop this page already wired: every signal passes that path's gate, risk limits, account "
+        "check and unresolved-order lockout. Stopping disarms the plan and stops new submissions; "
+        "any open position stays open in the terminal. Arming happens below, with the phrase.</p>"
+    )
+
+    if orders:
+        body += "<h3 class='small muted' style='margin:18px 0 6px'>Orders the live path recorded</h3>"
+        body += live_orders_table(
+            orders,
+            caption="Every order this session attempted, with the path's own answer and whether "
+            "the request is still unresolved at the broker.",
+        )
+    if any(value is not None for value in latency.values()):
+        body += "<h3 class='small muted' style='margin:18px 0 6px'>Measured latency</h3>"
+        body += live_latency_facts(latency)
+    if positions:
+        body += "<h3 class='small muted' style='margin:18px 0 6px'>Broker positions</h3>"
+        body += table(
+            (("Ticket", False), ("Symbol", False), ("Volume", False), ("Profit", False)),
+            [
+                [
+                    cell(fmt.text(item.get("ticket") or ""), label="Ticket", mono=True),
+                    cell(fmt.text(item.get("symbol") or ""), label="Symbol"),
+                    cell(fmt.text(item.get("volume") or ""), label="Volume", mono=True),
+                    cell(fmt.text(item.get("profit") or ""), label="Profit", mono=True),
+                ]
+                for item in positions
+            ],
+            caption="Open positions the terminal reports. Stopping the session never closes them.",
+        )
+
+    return section(
+        "Continuous LIVE Autopilot",
+        body,
+        note="The continuous lane: a loop decides repeatedly, and every order it proposes goes "
+        "through the guarded runner and broker adapter this page builds. It is not the one-shot "
+        "bridge below, and it is never started for you.",
+        tools=chip("continuous" if running else "idle", "danger" if running else "muted"),
+        id="continuous",
+    )
 
 
 def _live_status_banner(view: Mapping[str, Any]) -> str:
@@ -442,10 +658,11 @@ def _session_section(view: Mapping[str, Any], nonce: str) -> str:
         tone="muted",
     )
     return section(
-        "Session and arming",
+        "Manual session (no strategy bridge)",
         body,
         note="Start begins the loop; stop ends it and disarms. Neither connects, signs in, "
-        "changes the mode, or closes a position.",
+        "changes the mode, or closes a position. The continuous autopilot above uses this same "
+        "session underneath: there is one order route, not two.",
         id="session",
     )
 
@@ -593,7 +810,7 @@ def broker_stop_settings_section(view: Mapping[str, Any], nonce: str) -> str:
 
 def _scalper_live_section(view: Mapping[str, Any], nonce: str) -> str:
     scalper = dict(view.get("scalper_live") or {})
-    title = "Guarded AX-SCALPER one-shot LIVE intent"
+    title = "Guarded AX-SCALPER one-shot LIVE intent (not continuous)"
     if not scalper.get("available"):
         return section(
             title,
@@ -602,8 +819,13 @@ def _scalper_live_section(view: Mapping[str, Any], nonce: str) -> str:
                 "This workstation has no exact typed-intent bridge. PAPER results cannot "
                 "authorise LIVE trading.",
                 tone="muted",
-            ),
-            id="scalper-live",
+            )
+            + "<p class='small muted'>Nothing here loops: a one-shot intent is typed, reviewed, "
+            "approved, armed and submitted once, and the continuous session above is a different "
+            "control with a different record.</p>",
+            note="One-shot, not a session.",
+            tools=chip("ONE-SHOT", "muted"),
+            id="one-shot",
         )
     selected = dict(scalper.get("selected") or {})
     broker = dict(selected.get("broker") or {})
@@ -781,10 +1003,12 @@ def _scalper_live_section(view: Mapping[str, Any], nonce: str) -> str:
     return section(
         title,
         body,
-        note="LIVE and PAPER stay separate: this section never promotes a PAPER result. Every "
-        "step needs its own phrase, and a blocked state sends nothing.",
+        note="One-shot, not a session: one typed intent, one review, one submission, then it is "
+        "over — it never loops and it is not the continuous autopilot above. LIVE and PAPER stay "
+        "separate: this section never promotes a PAPER result, every step needs its own phrase, "
+        "and a blocked state sends nothing.",
         tools=chip("ONE-SHOT", "danger" if one_shot else "muted"),
-        id="scalper-live",
+        id="one-shot",
     )
 
 
@@ -852,10 +1076,10 @@ def render_live(ctx: Any) -> str:
     head = page_head(
         "LIVE · real MetaTrader 5 account. Nothing here is a simulated fill.",
         "Live execution",
-        "Review the exact plan, confirm the account, then arm it with the phrase. Arming "
-        "writes the plan and sends nothing; every order still passes the broker adapter's own "
-        "preflight. PAPER results never authorise live execution: this page never promotes its "
-        "results, and the paper book is read on /autopilot only.",
+        "One page for the real-account path: the continuous guarded session first, then the "
+        "manual review and arming that authorises it, then the one-shot AX-SCALPER intent. "
+        "Arming writes the plan and sends nothing; every order still passes the adapter's own "
+        "preflight, and PAPER results never authorise anything here.",
         badges=_state_chip(armed, configured)
         + chip("LIVE · REAL BROKER", "danger", dot=True)
         + chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper"),
@@ -866,16 +1090,24 @@ def render_live(ctx: Any) -> str:
         ),
     )
 
-    banner = _live_status_banner(view) + (
-        "<div class='notice notice--warn' role='alert'>"
-        "<div><strong>Before you use this page</strong>"
+    banner = (
+        _live_status_banner(view)
+        + "<nav class='anchor-nav' aria-label='Live workflow'>"
+        "<a href='#continuous'>1 · Continuous session</a>"
+        "<a href='#plan'>2 · Plan &amp; arming</a>"
+        "<a href='#session'>3 · Manual session</a>"
+        "<a href='#one-shot'>4 · One-shot intent</a>"
+        "<a href='#account'>5 · Account</a>"
+        "<a href='#stop'>6 · Broker-side stop</a>"
+        "</nav>"
+        + "<details class='disclosure'><summary>Before you use this page</summary>"
         "<p>Everything here acts on a <em>real</em> MetaTrader 5 account. Paper mode is the "
         "default and nothing on this page changes that by itself. Arming writes a plan and "
         "authorises the adapter without sending anything; starting a session can send a real "
         "order on the next strategy signal. No button here connects, signs in, switches "
         "account, or edits your broker settings, and none of these settings is changed by "
         "anything on the paper pages. The PAPER command center is on "
-        "<a href='/autopilot'>/autopilot</a>; this page never promotes its results.</p></div></div>"
+        "<a href='/autopilot'>/autopilot</a>; this page never promotes its results.</p></details>"
     )
     if not configured:
         limits = [
@@ -885,13 +1117,16 @@ def render_live(ctx: Any) -> str:
             ("The PAPER command center is on /autopilot", "its fills are simulated on this machine"),
         ]
         return head + banner + layout(
-            notice(
-                "No MetaTrader 5 trading adapter is wired in",
-                "No live trading adapter is wired in at all. This workstation cannot send a real order. Everything on the PAPER side "
-                "keeps working, and nothing here pretends otherwise.",
-                tone="warn",
+            continuous_live_section(view, ctx)
+            + section(
+                "What is missing",
+                facts(limits),
+                note="No MetaTrader 5 trading adapter is wired in at all: this workstation "
+                "cannot send a real order. Everything on the PAPER side keeps working, and "
+                "nothing here pretends otherwise.",
+                id="limits",
+                plain=True,
             )
-            + section("What is missing", facts(limits), id="limits", plain=True)
             + section(
                 "The exact plan, and arming it",
                 (
@@ -993,9 +1228,10 @@ def render_live(ctx: Any) -> str:
         else ""
     )
     main += stop_warnings(view)
+    main += continuous_live_section(view, ctx)
+    main += _plan_section(view, nonce)
     main += _session_section(view, nonce)
     main += _account_section(view)
-    main += _plan_section(view, nonce)
     main += _scalper_live_section(view, nonce)
     main += broker_stop_settings_section(view, nonce)
     main += _last_path_section(view)

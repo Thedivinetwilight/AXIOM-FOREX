@@ -12,7 +12,16 @@ from html import escape
 from typing import Any, Mapping, Sequence
 
 from .. import format as fmt
-from ..components import cell, chip, facts, key_values, notice, paragraph, section, table
+from ..components import (
+    cell,
+    chip,
+    facts,
+    key_values,
+    notice,
+    paragraph,
+    section,
+    table,
+)
 from ..shell import PAGE_SCOPES, page_scope
 
 
@@ -227,3 +236,93 @@ def scope_note_for(page: str) -> str:
 
 def small_note(text: str) -> str:
     return paragraph(fmt.text(text), klass="small muted")
+
+
+# ---------------------------------------------------------------- live path facts
+def feed_cell(feed: Mapping[str, Any]) -> str:
+    """A live feed's freshness: fresh, stale, or not measured -- never assumed."""
+
+    if not feed:
+        return "not measured"
+    fresh = feed.get("fresh")
+    if fresh is None:
+        return chip("not measured", "muted")
+    age = feed.get("age_seconds")
+    age_text = "age unknown" if age is None else f"{float(age):.1f}s old"
+    return (
+        chip("fresh", "ok", dot=True) if fresh else chip("stale", "danger", dot=True)
+    ) + (
+        " <span class='small muted'>{} · {} · {}</span>".format(
+            fmt.text(age_text),
+            fmt.text(str(feed.get("source") or "")),
+            fmt.text(str(feed.get("symbol") or "")),
+        )
+    )
+
+
+def duration_ms(value: Any) -> str:
+    """A duration the live path measured, or the words for one it did not."""
+
+    if value is None or value == "":
+        return "not measured by this path"
+    try:
+        return f"{float(value):.1f} ms"
+    except (TypeError, ValueError):
+        return "not measured by this path"
+
+
+def live_orders_table(orders: Sequence[Mapping[str, Any]], *, caption: str) -> str:
+    """Every order the live path attempted, with the path's own answer."""
+
+    return table(
+        (("Request", False), ("At", False), ("Status", False), ("Refusal", False),
+         ("Detail", False), ("Unresolved", False)),
+        [
+            [
+                cell(fmt.text(item.get("request_id") or ""), label="Request", mono=True),
+                cell(fmt.text(item.get("at") or ""), label="At", mono=True),
+                cell(fmt.text(item.get("status") or ""), label="Status"),
+                cell(fmt.text(item.get("refusal") or "—"), label="Refusal"),
+                cell(fmt.text(item.get("detail") or "—"), label="Detail"),
+                cell(fmt.text("yes" if item.get("unresolved") else "no"), label="Unresolved"),
+            ]
+            for item in orders
+        ],
+        caption=caption,
+    )
+
+
+def live_latency_facts(latency: Mapping[str, Any]) -> str:
+    """Measured timings, with the sentence that stops them reading as fill speed."""
+
+    return facts(
+        [
+            ("Decision", duration_ms(latency.get("decision_ms"))),
+            ("Submission call", duration_ms(latency.get("submit_ms"))),
+            ("Session start", duration_ms(latency.get("start_ms"))),
+            ("Reading this page", duration_ms(latency.get("view_ms"))),
+            ("Cycles measured", fmt.text(latency.get("cycles") or 0)),
+        ]
+    ) + (
+        "<p class='small muted'>Measured on this machine, in this process. Not a fill time, "
+        "not a broker measurement, and not a promise about execution speed.</p>"
+    )
+
+
+
+def fold(title: str, html: str, *, count: str = "", note: str = "") -> str:
+    """A section an operator can put away without losing it.
+
+    History belongs on the page; it does not have to be on the screen while a
+    session is being operated.  Nothing is removed from the document -- the same
+    markup, the same ids and the same tables are inside the disclosure.
+    """
+
+    badge = f"<span class='chip chip--muted'>{escape(count)}</span>" if count else ""
+    sub = f"<span class='fold-n'>{escape(note)}</span>" if note else ""
+    return (
+        "<details class='fold'><summary>"
+        f"<span class='fold-h'>{escape(title)}</span>{badge}{sub}"
+        "</summary>"
+        f"<div class='fold-body'>{html}</div></details>"
+    )

@@ -52,6 +52,12 @@ def _page(app) -> str:
     return render_page(app._context("autopilot", "Autopilot"))
 
 
+def _live_page(app) -> str:
+    """The LIVE page: the one place a real-account session is started or stopped."""
+
+    return render_page(app._context("live", "Live execution"))
+
+
 def _text(html: str) -> str:
     body = html[html.index("<main") :] if "<main" in html else html
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body))
@@ -248,16 +254,30 @@ def test_a_blocked_bridge_shows_the_reason_and_offers_no_start(tmp_path):
     assert "SENDING REAL ORDERS" not in text
 
 
-def test_a_ready_bridge_offers_the_start_and_states_what_it_preserves(tmp_path):
+def test_a_ready_bridge_offers_the_start_on_the_live_page(tmp_path):
+    _autopilot_instance, app = _autopilot(tmp_path)
+    app.autopilot_live = _bridge(tmp_path)
+    html = _live_page(app)
+    text = _text(html)
+
+    assert "action='/actions/autopilot-live-start'" in html
+    assert "Continuous LIVE Autopilot" in text
+    assert "not sending" in text
+    assert "unresolved-order lockout" in text
+    assert "Plan matches the selection yes" in text
+
+
+def test_the_paper_page_hands_the_live_session_over_instead_of_starting_it(tmp_path):
     _autopilot_instance, app = _autopilot(tmp_path)
     app.autopilot_live = _bridge(tmp_path)
     html = _page(app)
     text = _text(html)
 
-    assert "action='/actions/autopilot-live-start'" in html
-    assert "not sending" in text
-    assert "unresolved-order lockout" in text
-    assert "Plan matches the selection yes" in text
+    # One control location: the paper page reports and links, it does not start.
+    assert "action='/actions/autopilot-live-start'" not in html
+    assert "action='/actions/autopilot-live-stop'" not in html
+    assert "href='/live#continuous'" in html
+    assert "This page never starts a live session" in text
 
 
 def test_a_running_bridge_shows_the_stop_the_history_and_the_timings(tmp_path):
@@ -267,7 +287,7 @@ def test_a_running_bridge_shows_the_stop_the_history_and_the_timings(tmp_path):
     pilot = _bridge(tmp_path, candidate_id=CANDIDATE)
     pilot.start()
     app.autopilot_live = pilot
-    html = _page(app)
+    html = _live_page(app)
     text = _text(html)
 
     assert "action='/actions/autopilot-live-stop'" in html
@@ -340,9 +360,9 @@ def test_a_session_started_on_the_live_page_is_shown_not_restarted(tmp_path):
     _autopilot_instance, app = _autopilot(tmp_path)
     pilot = _bridge(tmp_path, session_running=True)
     app.autopilot_live = pilot
-    html = _page(app)
+    html = _live_page(app)
 
-    # The same session, started from /live, is visible here and can be stopped.
+    # The same session, started from /live, is visible there and can be stopped.
     assert pilot.trading.started == 0
     assert "action='/actions/autopilot-live-stop'" in html
     assert "SENDING REAL ORDERS" in _text(html)

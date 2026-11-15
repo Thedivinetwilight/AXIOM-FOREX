@@ -958,26 +958,21 @@ def _handoff_section(ctx: Any, view: Mapping[str, Any]) -> str:
             "time, not a broker measurement, and not a promise about execution speed.</p>"
         )
 
-    controls = []
+    # The control lives on the page that owns the real account, so this page can
+    # never start a live session by accident: it reports the state and hands over.
     if running:
-        controls.append(
-            action_form(
-                "autopilot-live-stop",
-                ctx.action_nonce,
-                "Stop the live session",
-                tone="warn",
-                described_by="handoff-note",
-            )
+        body += (
+            "<p class='small' id='handoff-note'><strong>The LIVE session is running.</strong> "
+            "It was started on <a href='/live#continuous'>Live execution</a>, which is the only "
+            "place it can be started or stopped: every signal it produces still passes that "
+            "path's gate, risk limits, account check and unresolved-order lockout.</p>"
         )
     elif live.get("available") and not own_blockers:
-        controls.append(
-            action_form(
-                "autopilot-live-start",
-                ctx.action_nonce,
-                "Start the live session",
-                tone="danger",
-                described_by="handoff-note",
-            )
+        body += (
+            "<p class='small' id='handoff-note'>Every prerequisite this page can see is "
+            "satisfied. Starting is a real-account action, so it is taken on "
+            "<a href='/live#continuous'>Live execution</a>, where the account is confirmed and "
+            "the phrase is typed.</p>"
         )
     elif live.get("available"):
         first = own_blockers[0]
@@ -986,21 +981,23 @@ def _handoff_section(ctx: Any, view: Mapping[str, Any]) -> str:
             f"<code>{fmt.text(first.get('reason') or 'a prerequisite is missing')}</code> — "
             f"{fmt.text(first.get('message') or '')}</p>"
         )
-    body += (
-        "<p class='small muted' id='handoff-note' style='margin-top:10px'>Starting the live "
-        "session here only begins the loop /live already wired: every signal still passes "
-        "that path's own gate, risk limits, account check and unresolved-order lockout. "
-        "Stopping it disarms the plan and stops new submissions; any open position stays "
-        "open in the terminal. Without that wiring there is no control at all.</p>"
+    handover = (
+        button_link("/live#continuous", "Open the LIVE session controls", small=True)
+        if live.get("available")
+        else button_link("/live", "Open the separate LIVE review", small=True)
     )
-    if controls:
-        body += "<div class='actions' style='margin-top:8px'>" + "".join(controls) + "</div>"
+    body += (
+        "<p class='small muted' style='margin-top:10px'>This page never starts a live session. "
+        "The continuous session is started and stopped on Live execution, over the same guarded "
+        "runner and broker adapter; stopping it disarms the plan and stops new submissions, and "
+        "any open position stays open in the terminal.</p>"
+    )
 
     return section(
         "Taking this to LIVE: what is missing",
         body,
         note="Every line is a refusal with a reason, not a checklist that a click can clear.",
-        tools=button_link("/live", "Open the separate LIVE review", small=True),
+        tools=handover,
         id="live-handoff",
     )
 
@@ -1278,6 +1275,19 @@ def render_autopilot(ctx: Any) -> str:
         actions=button_link("/live", "Open LIVE review", small=True),
     )
 
+    # The run controls, then the record: an operator should not have to scroll a
+    # thousand rows of history to press Stop.
+    head += (
+        "<nav class='anchor-nav' aria-label='Autopilot sections'>"
+        "<a href='#start-stop'>Run</a>"
+        "<a href='#pnl'>Paper P&amp;L</a>"
+        "<a href='#scalper-paper'>AX-SCALPER</a>"
+        "<a href='#live-handoff'>LIVE handoff</a>"
+        "<a href='#decisions'>Record</a>"
+        "<a href='#status'>Status</a>"
+        "</nav>"
+    )
+
     sections_drawn: list[tuple[str, str]] = [("start-stop", "Start and stop")]
     body_parts: list[str] = [
         notice(
@@ -1308,7 +1318,9 @@ def render_autopilot(ctx: Any) -> str:
     if steps:
         sections_drawn.append(("steps", "What it did, in order"))
         body_parts.append(
-            section(
+            common.fold(
+                "What it did, in order",
+                section(
                 "What it did, in order",
                 table(
                     (("Step", False), ("Result", False), ("Took (ms)", True), ("Detail", False)),
@@ -1327,6 +1339,8 @@ def render_autopilot(ctx: Any) -> str:
                 "with the reason it refused.",
                 id="steps",
                 flush=True,
+                ),
+                count=f"{len(steps)} steps",
             )
         )
 
@@ -1345,12 +1359,24 @@ def render_autopilot(ctx: Any) -> str:
                 ("positions", "Open positions"),
             ]
         )
+        decisions = [dict(item) for item in (paper.get("decisions") or ())]
+        fills = [dict(item) for item in (paper.get("fills") or ())]
         body_parts.extend(
             [
                 _active_section(paper),
                 _feed_section(paper),
-                _decisions_section(paper),
-                _fills_section(paper),
+                common.fold(
+                    "Decisions",
+                    _decisions_section(paper),
+                    count=f"{len(decisions)} recorded",
+                    note="every cycle's decision, kept as written",
+                ),
+                common.fold(
+                    "Simulated fills",
+                    _fills_section(paper),
+                    count=f"{len(fills)} fills",
+                    note="local simulation only",
+                ),
                 _positions_section(paper),
             ]
         )
@@ -1374,11 +1400,13 @@ def render_autopilot(ctx: Any) -> str:
     latency_html = _latency_section(view)
     if latency_html:
         sections_drawn.append(("latency", "Observed latency"))
-        body_parts.append(latency_html)
+        body_parts.append(
+            common.fold("Observed latency", latency_html, note="measured in this process")
+        )
     stored_html = _stored_section(view, nonce)
     if stored_html:
         sections_drawn.append(("stored", "Stored book"))
-        body_parts.append(stored_html)
+        body_parts.append(common.fold("Stored book", stored_html, note="on disk, read only"))
 
     all_sections = list(sections_drawn) + [
         ("status", "Status"),
