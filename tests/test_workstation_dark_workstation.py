@@ -248,6 +248,14 @@ def test_history_is_folded_rather_than_scrolled_past():
     for anchor in ("#start-stop", "#pnl", "#live-handoff"):
         assert f"href='{anchor}'" in html, anchor
 
+    # The paper lane is its own engine: folded, counted, and still anchored.
+    assert "id='scalper-paper'" in html
+    assert "AX-SCALPER PAPER · its own engine and its own ledger" in html
+    assert "never a LIVE route" in html
+    # The fold owns the anchor, so the id it points at is unique on the page.
+    assert html.count("id='scalper-paper'") == 1
+    assert "id='scalper-paper-lane'" in html
+
 
 @pytest.mark.parametrize("width", [620, 860, 1080])
 def test_the_new_pieces_have_a_narrow_rule(width):

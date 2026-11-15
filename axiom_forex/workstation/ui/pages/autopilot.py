@@ -553,7 +553,7 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             + "<p class='small muted' style='margin-top:10px'>LIVE is a separate page: this "
             "PAPER page cannot arm, submit, or close a broker order.</p>",
             note="A separate paper engine, with its own ledger and its own admission rules.",
-            id="scalper-paper",
+            id="scalper-paper-lane",
         )
     state = str(scalper.get("state") or "UNKNOWN")
     config = dict(scalper.get("config") or {})
@@ -788,7 +788,7 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
         note="A separate paper engine: its ledger, its admission rules and its own counters. "
         "LIVE is a separate page, and nothing here can reach it.",
         tools=chip(state, {"RUNNING": "ok", "BLOCKED": "danger"}.get(state, "muted")),
-        id="scalper-paper",
+        id="scalper-paper-lane",
     )
 
 
@@ -1390,7 +1390,18 @@ def render_autopilot(ctx: Any) -> str:
     sections_drawn.append(("pnl", "Paper P&L"))
 
     sections_drawn.append(("scalper-paper", "AX-SCALPER PAPER"))
-    body_parts.append(_scalper_section(view, nonce))
+    # Its own engine, its own record: on the page, one click away, and out of the
+    # way of the paper loop's start, book and hand-over.
+    scalper_paper = dict(view.get("scalper_paper") or {})
+    body_parts.append(
+        common.fold(
+            "AX-SCALPER PAPER · its own engine and its own ledger",
+            _scalper_section(view, nonce),
+            count=str(scalper_paper.get("state") or "not wired"),
+            note="never a LIVE route; nothing here can send or close an order",
+            anchor="scalper-paper",
+        )
+    )
 
     body_parts.append(_handoff_section(ctx, view))
     sections_drawn.append(("live-handoff", "Taking this to LIVE"))

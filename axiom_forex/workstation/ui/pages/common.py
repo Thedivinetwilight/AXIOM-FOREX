@@ -310,7 +310,7 @@ def live_latency_facts(latency: Mapping[str, Any]) -> str:
 
 
 
-def fold(title: str, html: str, *, count: str = "", note: str = "") -> str:
+def fold(title: str, html: str, *, count: str = "", note: str = "", anchor: str = "") -> str:
     """A section an operator can put away without losing it.
 
     History belongs on the page; it does not have to be on the screen while a
@@ -320,8 +320,9 @@ def fold(title: str, html: str, *, count: str = "", note: str = "") -> str:
 
     badge = f"<span class='chip chip--muted'>{escape(count)}</span>" if count else ""
     sub = f"<span class='fold-n'>{escape(note)}</span>" if note else ""
+    ident = f" id='{escape(anchor)}'" if anchor else ""
     return (
-        "<details class='fold'><summary>"
+        f"<details class='fold'{ident}><summary>"
         f"<span class='fold-h'>{escape(title)}</span>{badge}{sub}"
         "</summary>"
         f"<div class='fold-body'>{html}</div></details>"
