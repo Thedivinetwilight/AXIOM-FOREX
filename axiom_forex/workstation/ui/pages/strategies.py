@@ -25,6 +25,7 @@ from ..components import (
     empty_state,
     facts,
     jump_nav,
+    jump_nav_bar,
     layout,
     notice,
     page_head,
@@ -952,6 +953,7 @@ def render_strategies(ctx: Any) -> str:
 
     main = (
         body
+        + jump_nav_bar(jumps)
         + jump_nav(jumps)
         + _funnel_section(funnel)
         + _ladder_section(funnel)

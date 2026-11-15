@@ -1,149 +1,147 @@
-# The dark workstation — what changed, and how it was checked
+# The trading workstation — what changed, and how it was checked
 
-This note records the redesign that replaced the light console, the LIVE
-restructure that came with it, the checks that were actually run, and the gates
-that are still open. It is deliberately short on adjectives and specific about
-evidence.
+This note records the second redesign pass, the LIVE workflow it exposes, the
+checks that were actually run, and the gates that are still open. It replaces
+the earlier note of the same name: that build was rejected by the operator as
+*"blindingly light, shifting the layout, and not a trading workstation"*, and
+this one starts from that verdict rather than defending it.
 
-## 1. What changed
+## 1. Why the previous build was rejected, in its own screenshots
+
+The measurements below come from the running workstation (`--simulate`) in a
+headless Chromium, at 1440×900 and 390×844, before this pass:
+
+| What the operator saw | What the screenshot showed |
+| --- | --- |
+| "blindingly light" | body copy at `#e9eff7` on `#0a0f15` — a 16.6:1 glare surface, near-white text across every paragraph, plus a large light-on-dark label layer |
+| "shifts the layout" | the run pages changed shape between routes: `/live` was a two-column document, `/autopilot` a long single column, and the aside moved and re-flowed per page |
+| "not a trading workstation" | no command surface: `/live` opened with a full-width red card, then prose; `/autopilot` was 5 201 px of stacked cards at 1440 px, with the run controls buried above a record nobody could reach |
+| "LIVE not clear" | the continuous session was one card among twelve, the answer to *"will the next signal send a real order?"* sat in a nested red block, and the one-shot bridge read like a second autopilot |
+
+## 2. What changed
 
 ### Theme (`axiom_forex/workstation/ui/theme.py`)
 
-* Dark first, and only dark on screen: page `#0a0f15`, panel `#101a24`, raised
-  `#15212c`, rail `#060a0f`. `color-scheme:dark` is declared on `:root`, on form
-  controls, and in the document `<meta>`, so the browser paints its own widgets
-  dark as well. Print is the one light surface.
-* Contrast is a test, not a wish: `--ink` 16.6:1 and `--ink-2` 11.1:1 on the page,
-  every tone colour (ok / warn / info / live / paper) at 6.6:1 or better on its
-  own tint, faint labels `--ink-4` lifted to 5.4:1.
-* One stylesheet, one token block, the same three breakpoints (620 / 860 / 1080),
-  reduced-motion and print blocks unchanged. No scripts, no fonts, no images.
+* Charcoal-navy planes: page `#080d13`, panel `#0d151d`, raised `#121c26`,
+  rail `#050a0f`. `color-scheme:dark` on `:root`, in the document `<meta>`, and
+  on the browser's own widgets.
+* **Glare is capped, not maximised.** Headlines are the brightest thing on the
+  screen (`--ink #dde7f1`, ≈0.77 relative luminance); body copy is deliberately
+  dimmer (`--ink-body #b3c2d1`, ≈0.51) and still clears AAA (≥7:1) against the
+  page. Labels step down again (`--ink-3`, `--ink-4`).
+* Terminal density: 13.5 px base, 30 px table rows, 30 px buttons, 48 px rail,
+  30 px status strip, 5 px/8 px spacing steps.
+* One accent grammar: red is LIVE, blue is PAPER, amber is attention, green is a
+  passing check. Each tone colour is checked against its own tint for AA.
+* Print remains the one light surface; reduced motion is honoured.
 
-### Chrome (`axiom_forex/workstation/ui/shell.py`)
+### Chrome (`shell.py`)
 
-* The sample-data warning is one strip with its full sentence behind *details*;
-  a `--simulate` session no longer pushes the page it qualifies below the fold.
-* The rail is two tiers from one table: **Run** and **Monitor** stay on the row,
-  **Set up** and **Advanced** sit behind a labelled *Setup & tools* disclosure,
-  and when the current page is in the second tier the summary names it.
-* Every route is still reachable from the rail, exactly one link carries
-  `aria-current='page'`, and the skip link is the first thing Tab reaches.
-* Prose is measured in characters (`max-width:82ch`), not in the width of the
-  window.
-* Folds: decisions, simulated fills, run steps, observed latency, the stored book,
-  the AX-SCALPER paper lane's review/risk/symbol dumps and every strategy-library
-  template but the first are one click away, with their ids, tables and counts
-  intact. Page heights at 1440 px: `/autopilot` 6456 → 5201, `/strategies`
-  16558 → 7145.
+* The status strip now **opens with the lane** — `SIMULATED DATA`, `LIVE · REAL
+  BROKER` or `PAPER · SIMULATED FILLS` — derived from the session, so a simulator
+  is never labelled LIVE and a LIVE lane is read before any figure.
+* The LIVE entry in the rail carries `data-lane='live'` and its current-page
+  marker is drawn in the LIVE colour.
+* Below 860 px the rail is one scrolling row instead of four wrapped ones, and
+  the strip scrolls rather than stacking: on a 390 px screen the chrome no longer
+  eats 300 px before the page starts.
 
-### Live execution (`axiom_forex/workstation/ui/pages/live.py`, `app.py`)
+### The command deck (`components.deck`, `readout`, `kpi`, `workgrid`, `jump_nav_bar`)
 
-* **The continuous guarded session is the first card on `/live`.** It shows state,
-  whether it is sending real orders, orders and refusals, unresolved requests,
-  broker positions, the quote feed with its age, measured latency, the strategy
-  and exact plan, the account the session would trade with its fingerprint, and
-  whether an arm has confirmed that fingerprint.
-* Every blocker is inline with the control that clears it (`mode_not_live` →
-  *Switch the mode to LIVE*, `not_armed` → *Arm the plan with the phrase*, …).
-  An unmapped reason still lands on setup rather than a dead end.
-* Start appears only when the bridge reports no blockers; stop replaces it while
-  it runs. Both post the bridge's own actions, so there is no second order route:
-  every order still goes through the guarded runner and the broker adapter.
-* `/autopilot` no longer starts a live session. It reports the state and hands
-  over to `/live#continuous`. One control location, one real account.
-* The AX-SCALPER bridge is labelled one-shot in its title, its chip and its note,
-  and says it is not the continuous session above it. It stays blocked while the
-  continuous session runs and while no candidate has passed independent
+Both run pages open with the same object in the same place: a lane-marked deck
+whose head carries the title and the run control, whose read-out strip carries
+the measured figures, and whose body carries the facts. It is a region named by
+its own heading, its controls are real buttons with accessible names, and it
+never states a value the caller did not pass in.
+
+### Live execution (`pages/live.py`)
+
+* **The continuous guarded session is the deck.** Session state, whether it is
+  sending real orders, orders recorded/unresolved, broker-reported positions and
+  quote health are the read-outs; the pass/fail facts (strategy, account and
+  fingerprint, mode, pair and broker symbol, timeframe, plan match, armed, feed
+  detail) sit under them; start/stop are the bridge's own actions in the deck
+  head — one control, one location, one order route.
+* The *answer* banner is one row: **"The next strategy signal WILL send a real
+  order"** / *"Armed, but no session is running"* / *"No real order can be sent
+  right now"*, with the state chip at the right edge.
+* Blockers stay inline with the control that clears each one (`mode_not_live` →
+  *Switch the mode to LIVE*; `not_armed` → *Arm the plan with the phrase*; …), and
+  a start button appears only when the bridge reports no blockers.
+* The one-shot AX-SCALPER intent is a separate section, labelled `ONE-SHOT`, whose
+  four typed steps (record → review → approve → arm) are laid out as steps and
+  which says *"not continuous"* and *"Nothing here loops"*. It never borrows the
+  deck, and it stays unavailable while no candidate has passed independent
   admission.
-* The page is indexed at the top (session · plan · manual session · one-shot ·
-  account · broker stop) and a page that has no adapter says so once, in one
-  section, instead of three stacked notices.
+* The page is indexed at the top (session · plan · one-shot · account · broker
+  stop), every anchor lands below the sticky chrome, and long ledgers read as two
+  pairs per row above 1 200 px.
 
-## 2. Tests actually run
+### The PAPER command centre (`pages/autopilot.py`)
+
+* The deck carries loop state, open simulated positions, net P&L after costs,
+  quote freshness and the execution mode, with **one** start/stop control and the
+  paper-only boundaries in its foot.
+* Paper P&L follows the controls. The AX-SCALPER paper lane, the LIVE handoff, the
+  paper runner, Kronos and the latency record fold as reference, with their ids,
+  headings and tables intact.
+* Desktop height at 1440 px: **5 201 px → 1 714 px**; the whole run surface now
+  fits in one screen above the fold.
+
+### Every other route
+
+Same rail, same strip, same page head, same `main` + `aside` grid; nested regions
+no longer draw a second frame; anchored sections clear the sticky chrome. Long
+research pages keep their sticky index and their folds.
+
+## 3. Tests
 
 | Check | Result |
 | --- | --- |
-| `pytest tests -q` (whole suite, final commit) | **2341 passed in 438.06 s** |
-| `tests/test_workstation_dark_workstation.py` (new) | 16 passed |
-| `tests/test_autopilot_ui.py` (3 bridge tests moved to `/live`) | 20 passed |
-| `tests/test_live_workflow.py` (no-adapter wording) | 45 passed with the dark file |
-| `compileall axiom_forex tests` | clean |
-| `git diff --check c796afd..HEAD` | clean |
-| conflict markers (`git grep`) | none |
+| `tests/test_workstation_command_deck.py` (new, 22 tests) | passed |
+| workstation/LIVE/paper/monitoring/redesign/revamp/symbols/autopilot UI files | 335 passed |
+| `pytest -q` (whole suite) | see the commit message of the final increment |
+| `python -m compileall axiom_forex tests` | clean |
+| `git diff --check` | clean |
 
-The new file guards, in its own words: the dark defaults (page luminance, ink
-contrast, no white surface outside print), `data-theme='dark'` and the
-`color-scheme` meta on every route, the two-tier rail and second-tier current
-page, route reachability and exactly one `aria-current`, the continuous panel in
-blocked / ready / running states, inline fixes, the unmapped-fix fallback, the
-one-shot wording, single control location, and that the live page never posts the
-paper loop's actions or the reverse.
+The new file asserts, in its own words: the glare cap and AAA body contrast, the
+lane band on every route and its derivation from the session, the deck anatomy on
+both run pages, the LIVE deck's five read-outs, start/stop being the bridge's own
+registered actions, a blocked deck offering no start, every blocker carrying its
+fix, no submit control without an admitted candidate, the one-shot labelling, no
+LIVE action on any PAPER page, no paper action on the LIVE page, the deck's
+handlers (start → RUNNING → stop), the honest "nothing changed" answer for a
+missing bridge, the chrome/deck state agreement, landmarks/aside/labels, and the
+narrow rules that keep the deck usable.
 
-## 3. Visual checks (real browser, real screenshots)
+## 4. Visual checks (real browser, real screenshots)
 
-A headless Chromium (`@sparticuz/chromium` 153 + `puppeteer-core`) was installed
-in the sandbox and pointed at the workstation running `--simulate` on
-`127.0.0.1:8901`. Every route was loaded at **1440, 1024, 860, 420 and 360 px**
-and measured, not just looked at: **80 route/width combinations.**
+A headless Chromium (`@sparticuz/chromium` 131 + `puppeteer-core`, run with stub
+NSS libraries because this sandbox has none) was pointed at the workstation
+running `--simulate` on `0.0.0.0:8765`, and at static renders of the *wired* LIVE
+states produced from the test suite's own stand-ins (no MT5, no arming, no order).
 
-* page-level horizontal overflow: **0 of 80**
-* elements escaping the viewport outside a scroll container: **0 of 80**
-* worst text contrast with its own background: **5.37:1** (a 10.5 px uppercase
-  label), everything else higher
-* keyboard: first Tab lands on *Skip to content* with a 3 px focus ring; 23 tab
-  stops, no focus trap, no stop on a ring-less control, and closed menus are not
-  in the tab order
-* the second-tier menu fits the viewport at every width (it overflowed by 47 px
-  at 1024 px before the fix), and below 860 px the rail wraps instead of
-  scrolling so the panel cannot open off-screen
+* **All 16 routes at 1440 and 390 px**: 0 elements with a near-white background,
+  0 page-level horizontal overflows, 0 tables escaping their scroller.
+* Heights at 1440 px: `/autopilot` 5 201 → 1 714; `/live` 3 272 → 2 269;
+  `/` 2 748 → 2 210; `/performance` 4 160 → 3 153; `/positions` 2 766 → 2 056;
+  `/activity` 2 174 → 1 618; `/health` 1 950 → 1 437; `/account` 1 611 → 1 111.
+* The wired LIVE page was inspected in three states — ready (start offered),
+  running (stop offered, *SENDING REAL ORDERS*), blocked (no start, fix inline),
+  at 1440 px and at 390 px.
+* Two fixes came from looking at the screenshots rather than from a test: the
+  page-head row had lost its flex container (primary actions sat under the
+  title), and the one-shot steps were four stacked forms 1 200 px tall.
 
-Screenshots inspected during the work: `/`, `/live`, `/autopilot`,
-`/performance` at 1440 px; `/`, `/live`, `/autopilot`, `/performance`,
-`/positions`, `/health` at 420 px. Two rounds of fixes came from looking at them:
-the triple warning at the top of `/live`, the dark-on-dark primary buttons the
-audit caught at 1.17:1, and the second-tier menu escaping at 1024 px. A third
-came from measuring the rendered height of every route: `/strategies` was
-16558 px and `/autopilot` 6456 px before their long tables were folded.
+## 5. Gates that are still open
 
-Tables scroll inside their own box on wide screens by design, and tables marked
-`table--stack` become labelled blocks at the phone breakpoint. Tables that are
-not marked do still scroll inside their own box at 360–420 px; nothing scrolls
-the page itself.
-
-## 4. Gates that are still open
-
-* **No strategy candidate has passed independent admission.** AX-SCALPER execution
-  stays blocked on `/live` and `/autopilot`; nothing in this change weakens or
-  bypasses that admission.
-* **LIVE was never armed, started or connected in this environment.** Every state
-  shown here came from the simulator or from stand-ins in tests. The continuous
-  card's *ready* and *running* states are exercised by tests, not by a broker.
-* **No evidence of profitability is claimed anywhere**, and none was produced.
-* The one-off `test_the_close_is_not_offered_while_the_loop_is_running` failure
-  from the previous phase remains unreproduced (8 lane runs, 4 full suites); the
-  stored-book read path it touches is unchanged by this work.
-
-## 5. Windows / MT5 checks still to run
-
-None of these can run in this sandbox (no Windows, no MetaTrader 5 terminal), so
-they are listed rather than claimed:
-
-1. Launch on Windows against a real terminal (`--settings mt5_settings.local.json`,
-   no `--simulate`) and confirm the rail shows `MT5 · <mode>` rather than
-   *simulator*.
-2. **Connect**, then confirm the account section matches the terminal's login
-   (masked), server, currency and leverage, and that the continuous card's account
-   row shows the same fingerprint.
-3. Switch to LIVE, type the phrase and the account signature, arm a plan, and
-   confirm the continuous card's *Armed on this account* and the start button
-   appear only when the bridge reports no blockers.
-4. Start the continuous session and confirm: the state moves to RUNNING, the
-   stop replaces the start, the order path records the first attempt with its
-   retcode, and an unresolved request blocks the next one.
-5. Stop it and confirm the plan is disarmed, new submissions stop, and any open
-   position stays open at the broker.
-6. With the continuous session running, confirm the one-shot AX-SCALPER section
-   reports *blocked*; with it stopped and no admitted candidate, confirm it is
-   still blocked for the admission reason.
-7. Confirm PAPER never sends: run the paper loop from `/autopilot`, then check the
-   terminal's journal shows no order from AXIOM.
+* **No strategy candidate has passed independent admission.** AX-SCALPER live
+  submission stays blocked on `/live`; with no typed-intent bridge the page says
+  so and offers no submit control at all. Nothing here weakens that admission.
+* **LIVE was never armed, started or connected in this environment.** Every LIVE
+  state in the screenshots came from the test suite's in-memory stand-ins. The
+  ready/running/blocked deck states are exercised by tests, not by a broker.
+* **Windows/MT5 were not available here.** The Windows launcher, the terminal
+  adapter and the broker path were not executed; `/live` was only rendered.
+* Table behaviour at 360–420 px is unchanged: tables marked `table--stack` become
+  labelled blocks, and any table not so marked scrolls inside its own box.

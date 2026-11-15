@@ -203,7 +203,12 @@ def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
                 "Plan matches the selection",
                 {True: "yes", False: "no", None: "not known"}.get(match, "not known"),
             ),
-            ("Armed on this account", chip("ARMED", "danger", dot=True) if continuous.get("armed") else chip("Not armed", "muted")),
+            (
+                "Continuous bridge armed",
+                chip("ARMED", "danger", dot=True)
+                if continuous.get("armed")
+                else chip("Not armed", "muted"),
+            ),
             ("Feed detail", fmt.text(str(feed.get("detail") or "not measured"))),
         ]
     )
@@ -1171,7 +1176,7 @@ def render_live(ctx: Any) -> str:
         facts(
             [
                 ("Adapter", chip("configured", "ok") if configured else chip("not configured", "muted")),
-                ("Armed", chip("ARMED", "danger", dot=True) if armed else chip("Not armed", "muted")),
+                ("Workflow armed", chip("ARMED", "danger", dot=True) if armed else chip("Not armed", "muted")),
                 (
                     "Session",
                     chip(str(view.get("session_state") or continuous.get("state") or "NOT RUNNING"),

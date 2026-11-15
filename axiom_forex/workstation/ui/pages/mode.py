@@ -22,6 +22,7 @@ from ..components import (
     facts,
     field,
     jump_nav,
+    jump_nav_bar,
     layout,
     notice,
     page_head,
@@ -345,17 +346,17 @@ def render_mode(ctx: Any) -> str:
 
     aside = _account_section(preflight, ctx) + _positions_section(ctx)
 
+    jumps = [
+        ("mode-paper", "Paper"),
+        ("mode-live", "Live"),
+        ("checks", "What stops an order"),
+        ("requirements", "Per-order checks"),
+        ("audit", "Mode history"),
+    ]
     main = (
         _banner(view, ctx)
-        + jump_nav(
-            [
-                ("mode-paper", "Paper"),
-                ("mode-live", "Live"),
-                ("checks", "What stops an order"),
-                ("requirements", "Per-order checks"),
-                ("audit", "Mode history"),
-            ]
-        )
+        + jump_nav_bar(jumps)
+        + jump_nav(jumps)
         + _paper_section(view, nonce)
         + _live_section(view, preflight, ctx, nonce)
         + _checks_section(preflight)

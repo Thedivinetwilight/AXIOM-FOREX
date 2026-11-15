@@ -593,6 +593,10 @@ fieldset.field>legend{font-size:11.5px;font-weight:600;color:var(--ink-2);paddin
   .shell{padding:var(--s3) var(--s3) var(--s6)}
   .strip-fact{font-size:11.5px}
   .brand-name{display:none}
+  /* The strip already carries the lane, the mode and the loop; the rail's own
+     copies are for a desktop where there is room for both. */
+  .rail-end .chip,.rail-end .chip-link{display:none}
+  .rail-end .btn--sm{padding:3px 8px;font-size:11.5px}
   .anchor-nav{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
   .anchor-nav::-webkit-scrollbar{display:none}
   .anchor-nav a{flex:0 0 auto}

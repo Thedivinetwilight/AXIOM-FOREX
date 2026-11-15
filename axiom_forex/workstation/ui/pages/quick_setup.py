@@ -30,6 +30,7 @@ from ..components import (
     chip,
     field,
     jump_nav,
+    jump_nav_bar,
     layout,
     meter,
     notice,
@@ -974,6 +975,7 @@ def render_quick_setup(ctx: Any) -> str:
                     tone="warn",
                 )
 
+    body += jump_nav_bar(_targets(view, catalog_view))
     body += jump_nav(_targets(view, catalog_view))
     body += catalog.catalog_sections(catalog_view, nonce)
     body += catalog.rebuild_blockers_section(catalog_view)

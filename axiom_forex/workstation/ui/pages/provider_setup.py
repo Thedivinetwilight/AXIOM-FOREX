@@ -31,6 +31,7 @@ from ..components import (
     facts,
     field,
     jump_nav,
+    jump_nav_bar,
     layout,
     notice,
     page_head,
@@ -462,6 +463,7 @@ def render_provider_setup(ctx: Any) -> str:
         + result
         + _facts_section(view)
         + _file_section(view)
+        + jump_nav_bar(_targets(groups))
         + jump_nav(_targets(groups))
         + form
         + blockers_section

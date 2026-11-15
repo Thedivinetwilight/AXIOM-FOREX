@@ -27,6 +27,7 @@ from ..components import (
     facts,
     field,
     jump_nav,
+    jump_nav_bar,
     layout,
     meter,
     notice,
@@ -1188,20 +1189,20 @@ def render_kronos(ctx: Any) -> str:
             role="status" if result.get("ok") else "alert",
         )
 
+    jumps = [
+        ("install", "Install"),
+        ("forecast", "Forecast"),
+        ("status", "Status"),
+        ("chart", "Chart"),
+        ("run", "Run"),
+        ("estimate", "Before you load"),
+        ("history", "History"),
+        ("benchmark", "Benchmark"),
+    ]
     main = (
         body
-        + jump_nav(
-            [
-                ("install", "Install"),
-                ("forecast", "Forecast"),
-                ("status", "Status"),
-                ("chart", "Chart"),
-                ("run", "Run"),
-                ("estimate", "Before you load"),
-                ("history", "History"),
-                ("benchmark", "Benchmark"),
-            ]
-        )
+        + jump_nav_bar(jumps)
+        + jump_nav(jumps)
         + _install_section(view, nonce)
         + _forecast_section(view, nonce)
         + _status_section(view)
