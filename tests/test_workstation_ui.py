@@ -761,6 +761,13 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "scalper-live-arm",
         "scalper-live-submit",
         "scalper-live-reconcile",
+        # The one-shot DEMO execution test. It sends exactly one order, only to
+        # an account MT5 itself reports as DEMO, only through the same live leg
+        # a strategy order uses; it cannot close, cannot arm, cannot change the
+        # mode, and it disarms after the broker answers. Reconciling reads the
+        # same request id and never re-sends.
+        "demo-test-submit",
+        "demo-test-reconcile",
         # The full-catalog audit: it reads the stored evaluation record and writes
         # one report file. It evaluates nothing, re-ranks nothing, promotes
         # nothing, and holds no order, arming or mode surface at all.

@@ -28,6 +28,7 @@ from ..scalper.live_bridge import (
     paper_host_evidence_gate,
     scalper_host_policy,
 )
+from .live_demo_test import DemoExecutionTest
 from .live_host import LiveRunnerHost, OwnerThreadLeg, OwnerThreadPlatform
 from .live_plan import PLAN_FILENAME, SCALPER_BINDING_FIELDS
 from .live_workflow import ArmedStrategy, LiveTrading
@@ -344,6 +345,21 @@ def build_live_workflow(
         audit_log=audit_log,
     )
     live.scalper_bridge = bridge
+
+    # The one-shot DEMO execution test.  It shares the adapter, the mode, the
+    # provider stack and the *same* live leg; it owns no route of its own and it
+    # is deliberately reachable only through this controller.
+    def platform_for(pair: str) -> Any:
+        return platform_factory(pair)
+
+    live.demo_test = DemoExecutionTest(
+        adapter=adapter,
+        mode=mode,
+        platform_for=platform_for,
+        pairs=lambda: list(getattr(live, "symbol_choices")() or ()) if live is not None else (),
+        repository=repository,
+        audit_log=audit_log,
+    )
     return live
 
 

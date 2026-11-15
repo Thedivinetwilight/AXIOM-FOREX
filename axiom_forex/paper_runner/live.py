@@ -63,6 +63,17 @@ BOOKING_FAILED = "live_fill_not_booked"
 STATUS_UNREADABLE = "live_status_unreadable"
 PROTECTIVE_STOP_MISSING = "live_protective_stop_missing"
 PROTECTIVE_STOP_UNCONFIGURED = "live_protective_stop_unconfigured"
+#: The one-shot DEMO execution test's own guards.  A demo test replaces the
+#: strategy-approval requirement -- it is not a strategy -- with the stricter
+#: requirement that the terminal positively names the account DEMO, and that the
+#: request is the demo test's own identity and closes nothing.
+DEMO_ACCOUNT_REQUIRED = "demo_account_required"
+DEMO_ACCOUNT_UNCONFIRMED = "demo_account_mode_unknown"
+DEMO_IDENTITY_REQUIRED = "demo_test_identity_required"
+DEMO_CLOSE_FORBIDDEN = "demo_test_cannot_close"
+
+#: The identity a demo-test request must carry.  It is not a strategy id.
+DEMO_TEST_STRATEGY_ID = "axiom-demo-execution-test"
 
 #: Reasons that mean "the broker may have an order we cannot account for".
 BLOCKING_REASONS = frozenset({UNRESOLVED_ORDER, "live_order_outcome_unknown"})
@@ -272,6 +283,7 @@ class LiveLeg:
         request_id: str = "",
         strategy_approved: bool = True,
         ledger_positions: Sequence[Mapping[str, Any]] | None = None,
+        demo_test: bool = False,
     ) -> tuple[LiveBlocker, ...]:
         """Everything that would stop a live order right now.  Sends nothing."""
 
@@ -392,7 +404,43 @@ class LiveLeg:
                     "never re-sent automatically.",
                 )
             )
-        if not strategy_approved:
+        if demo_test:
+            # A demo execution test is not a strategy, so it never claims an
+            # approval; it must instead be the demo identity, close nothing, and
+            # run against an account the terminal itself calls DEMO.
+            mode = str(getattr(self.adapter, "account_mode", "") or "")
+            confirmed = bool(getattr(self.adapter, "account_mode_confirmed", False))
+            if not confirmed:
+                blockers.append(
+                    LiveBlocker(
+                        DEMO_ACCOUNT_UNCONFIRMED,
+                        "The terminal did not confirm the account type, so a demo test "
+                        "cannot be sent.",
+                        "Sign in again and reconnect; only an account MT5 reports as DEMO "
+                        "is accepted.",
+                    )
+                )
+            elif not bool(getattr(self.adapter, "account_is_demo", False)):
+                blockers.append(
+                    LiveBlocker(
+                        DEMO_ACCOUNT_REQUIRED,
+                        f"The connected account is {mode or 'not DEMO'}, not DEMO. A demo "
+                        "execution test refuses to send to anything else.",
+                        "Sign the terminal in to a demo account. No setting on this page "
+                        "can override the check.",
+                    )
+                )
+            if self.strategy_id != DEMO_TEST_STRATEGY_ID:
+                blockers.append(
+                    LiveBlocker(
+                        DEMO_IDENTITY_REQUIRED,
+                        "A demo test must carry the demo test's own identity, not a "
+                        "strategy id.",
+                        "This is a wiring fault, not an operator action; nothing will be "
+                        "sent.",
+                    )
+                )
+        elif not strategy_approved:
             blockers.append(
                 LiveBlocker(
                     STRATEGY_NOT_APPROVED,
@@ -527,14 +575,34 @@ class LiveLeg:
 
     # -- the order path --------------------------------------------------
 
-    def submit_plan(self, plan: Any, *, strategy_approved: bool = True) -> dict[str, Any]:
-        """Gate, route, and book exactly one order.  Never retries."""
+    def submit_plan(
+        self,
+        plan: Any,
+        *,
+        strategy_approved: bool = True,
+        demo_test: bool = False,
+    ) -> dict[str, Any]:
+        """Gate, route, and book exactly one order.  Never retries.
+
+        ``demo_test`` is the one-shot DEMO execution test's door: it replaces the
+        strategy-approval requirement with the demo account identity check and
+        nothing else.  Every other guard, the gate, the router and the adapter are
+        the same ones a strategy order goes through.
+        """
 
         request = getattr(plan, "request", None)
         context = getattr(plan, "context", None)
         request_id = str(getattr(request, "request_id", "") or "")
+        if demo_test and getattr(request, "close_intent", None) is not None:
+            return self._refuse(
+                [DEMO_CLOSE_FORBIDDEN],
+                request_id=request_id,
+                detail="a demo test never closes a position",
+            )
         blockers = self.blockers(
-            request_id=request_id, strategy_approved=strategy_approved
+            request_id=request_id,
+            strategy_approved=strategy_approved,
+            demo_test=demo_test,
         )
         if blockers:
             return self._refuse(

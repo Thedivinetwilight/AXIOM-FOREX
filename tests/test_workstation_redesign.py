@@ -262,6 +262,11 @@ _STATE_GATED: dict[str, str] = {
     "catalog-paper-flat": "catalog PAPER position exists",
     "catalog-paper-stop": "catalog PAPER runner is running",
     "dataset-evaluate": "an imported dataset is selected",
+    # The demo execution test: the form exists only when an MT5 adapter is wired
+    # into this process (it is the object that would send), and the reconcile
+    # control only when a demo-test record exists to reconcile.
+    "demo-test-submit": "a MetaTrader 5 trading adapter is wired in",
+    "demo-test-reconcile": "a demo execution test record exists",
     "imports-refresh": "a data folder is configured",
     "kronos-benchmark": "the Kronos panel is wired in",
     "kronos-forecast": "the Kronos panel is wired in",

@@ -397,6 +397,8 @@ tbody tr:hover td{background:var(--hover)}
 .notice--info .n-title{color:var(--info-ink)}
 .notice--muted{background:var(--surface-2)}
 /* A qualifier, not a card: one line that colours its own left edge. */
+.demo-record{margin:var(--s2) 0 0;padding-top:var(--s2);border-top:1px solid var(--surface-3)}
+.demo-record form{margin-top:var(--s2)}
 .inline-note{margin:0 0 var(--s2);padding:2px 0 2px 9px;border-left:2px solid var(--warn);
   color:var(--ink-3);font-size:11.5px;line-height:1.45}
 .inline-note strong{color:var(--ink-2);font-weight:600}

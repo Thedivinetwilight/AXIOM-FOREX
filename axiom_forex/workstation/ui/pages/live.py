@@ -1128,6 +1128,268 @@ def _last_path_section(view: Mapping[str, Any]) -> str:
     )
 
 
+
+# --------------------------------------------------------------- demo test
+def demo_test_section(ctx: Any, nonce: str) -> str:
+    """The one-shot DEMO execution test, and nothing more than that.
+
+    This is the page's only form that can reach a broker, so it says what it is
+    before it says what it does: an execution smoke test, not a strategy, not
+    AX-SCALPER, and no evidence at all about profitability.  Every value is
+    typed, every value is judged against the broker's own terms, and the submit
+    button only exists while nothing is blocking.
+    """
+
+    view = dict((ctx.extra or {}).get("demo_test") or {})
+    if not view:
+        return ""
+    available = bool(view.get("available"))
+    account = dict(view.get("account") or {})
+    record = dict(view.get("record") or {})
+    symbols = [dict(item) for item in (view.get("symbols") or ())]
+    blocking = [dict(item) for item in (view.get("blockers") or ())]
+    result = dict(view.get("result") or {})
+    status = str(record.get("status") or "IDLE")
+    mode = str(account.get("mode") or "UNCONFIRMED")
+    fingerprint = str(account.get("fingerprint") or "")
+
+    intro = (
+        "<p class='inline-note' role='note'>"
+        "<strong>Execution smoke test.</strong> One order, sent once, to a demo account "
+        "MetaTrader 5 itself reports as DEMO — so you can see that AXIOM's order path "
+        "reaches your terminal. It is <strong>not</strong> a strategy, <strong>not</strong> "
+        "AX-SCALPER, and it is no evidence at all about profitability or about whether any "
+        "strategy should trade."
+        "</p>"
+    )
+
+    state_rows = [
+        (
+            "Account the terminal is on",
+            chip(f"{mode}", "ok" if account.get("is_demo") else "danger", dot=True)
+            + (
+                f" <span class='mono small'>{fmt.text(fingerprint)}</span>"
+                if fingerprint
+                else ""
+            )
+            + (
+                f" <span class='small muted'>{fmt.text(str(account.get('server') or ''))}</span>"
+                if account.get("server")
+                else ""
+            ),
+        ),
+        (
+            "Terminal confirms the account type",
+            chip("confirmed", "ok") if account.get("confirmed") else chip("not confirmed", "warn"),
+        ),
+        (
+            "Axiom execution mode",
+            chip(str(dict(view.get("execution") or {}).get("name") or "UNKNOWN"),
+                 "danger" if dict(view.get("execution") or {}).get("live_effective") else "warn"),
+        ),
+        (
+            "Live trading armed",
+            chip("ARMED", "danger", dot=True) if account.get("armed") else chip("not armed", "muted"),
+        ),
+        (
+            "Last demo test",
+            chip(status, "ok" if status in {"FILLED", "PARTIAL"} else "warn" if status in {"SUBMITTING", "UNRESOLVED"} else "muted")
+            + (
+                f" <span class='mono small'>{fmt.text(str(record.get('request_id') or ''))}</span>"
+                if record.get("request_id")
+                else ""
+            ),
+        ),
+    ]
+
+    if result:
+        outcome_chip = (
+            chip(str(result.get("status") or result.get("reason") or "refused"),
+                 "ok" if result.get("ok") else "warn")
+        )
+        outcome = notice(
+            "The last demo test action",
+            outcome_chip
+            + " "
+            + fmt.text(str(result.get("message") or result.get("reason") or "")),
+            tone="ok" if result.get("ok") else "warn",
+            role="status" if result.get("ok") else "alert",
+        )
+    else:
+        outcome = ""
+
+    if not available:
+        body = empty_state(
+            "No demo test can be built here",
+            str(view.get("message") or "This workstation has no MetaTrader 5 adapter."),
+        )
+        return section(
+            "DEMO execution test — one order, DEMO account only",
+            intro + body,
+            note="Nothing on this page can reach a broker without an adapter.",
+            id="demo-test",
+        )
+
+    options = [("", "Choose a broker symbol")]
+    terms_lines: list[str] = []
+    for item in symbols:
+        pair = str(item.get("pair") or "")
+        broker_symbol = str(item.get("broker_symbol") or "")
+        if item.get("verified"):
+            options.append((pair, f"{pair} · {broker_symbol}"))
+            stop = dict(item.get("stop") or {})
+            terms_lines.append(
+                f"<li><strong>{fmt.text(pair)}</strong> as "
+                f"<span class='mono'>{fmt.text(broker_symbol)}</span>: "
+                f"{fmt.text(item.get('volume_min', ''))}–{fmt.text(item.get('volume_max', ''))} "
+                f"lots, step {fmt.text(item.get('volume_step', ''))}, "
+                f"{fmt.text(item.get('digits', ''))} digits, point "
+                f"{fmt.text(item.get('point', ''))}, broker stop level "
+                f"{fmt.text(item.get('stops_level', 0))} points, bid "
+                f"{fmt.text(item.get('bid', ''))} / ask {fmt.text(item.get('ask', ''))}"
+                + (
+                    f", broker-side stop in force {stop.get('points')} points"
+                    f" ({fmt.text(stop.get('declared', ''))})"
+                    if stop.get("valid")
+                    else ", <strong>no broker-side stop configured</strong>"
+                )
+                + "</li>"
+            )
+        else:
+            terms_lines.append(
+                f"<li class='muted'>{fmt.text(pair)} — not usable: "
+                f"{fmt.text(str(item.get('reason') or 'not verified by the terminal'))}</li>"
+            )
+
+    terms = (
+        "<details class='disclosure'><summary>The broker's current terms for these symbols</summary>"
+        "<ul class='small'>" + "".join(terms_lines) + "</ul></details>"
+        if terms_lines
+        else ""
+    )
+
+    form = action_form(
+        "demo-test-submit",
+        nonce,
+        "Send one DEMO test order",
+        tone="danger",
+        fields=(
+            field(
+                "symbol",
+                "Broker symbol",
+                kind="select",
+                options=options,
+                hint="Only symbols your provider setup resolved and the terminal confirms.",
+            )
+            + field(
+                "side",
+                "Direction",
+                kind="select",
+                options=[("", "Choose BUY or SELL"), ("BUY", "BUY"), ("SELL", "SELL")],
+                hint="Never defaulted; the order goes the way you choose.",
+            )
+            + field(
+                "volume",
+                "Volume (lots)",
+                hint="The broker's minimum, step and maximum are in the terms above.",
+                placeholder="0.01",
+            )
+            + field(
+                "stop_points",
+                "Protective stop (points)",
+                hint="Must be the broker-side stop in force for that symbol, above the "
+                "broker's own minimum. An unprotected order is never sent.",
+                placeholder="200",
+            )
+            + field(
+                "confirmation",
+                "Confirmation phrase",
+                hint=f"Type exactly: {fmt.text(str(view.get('confirmation') or ''))}",
+            )
+            + field(
+                "account_confirmation",
+                "Account signature",
+                hint="Repeat the short fingerprint in the panel above, so the test names one "
+                "account.",
+                value="",
+            )
+        ),
+    )
+
+    blocking_html = blockers(
+        [
+            {
+                "title": str(item.get("message") or item.get("reason") or "Blocked"),
+                "note": str(item.get("hint") or ""),
+                "code": str(item.get("reason") or ""),
+                "tone": "danger",
+            }
+            for item in blocking
+        ],
+        empty=(
+            "No blocker stands between this page and a demo order right now: the terminal "
+            "names a DEMO account, LIVE is confirmed and armed. The fields below are judged "
+            "again at submission, and the broker's answer is the only result."
+        ),
+    )
+
+    record_html = ""
+    if record.get("request_id"):
+        broker = dict(record.get("broker") or {})
+        reconciliation = dict(record.get("reconciliation") or {})
+        record_html = facts(
+            [
+                ("Request id (durable)", f"<span class='mono'>{fmt.text(str(record.get('request_id')))}</span>"),
+                ("Record status", chip(status, "ok" if status in {"FILLED", "PARTIAL", "RECONCILED"} else "warn")),
+                ("Broker retcode", fmt.text(str(broker.get("retcode") or "—"))
+                 + (f" {fmt.text(str(broker.get('retcode_name')))}" if broker.get("retcode_name") else "")),
+                ("Volume requested / filled", f"{fmt.text(str(broker.get('volume_requested') or '—'))} / "
+                 f"{fmt.text(str(broker.get('volume_filled') or '—'))}"),
+                ("Reconciled", "yes" if reconciliation else "not yet — reconcile the same id"),
+            ],
+            split=True,
+        )
+        reconcile_form = action_form(
+            "demo-test-reconcile",
+            nonce,
+            "Reconcile the same request",
+            small=True,
+            title="Reads the durable order record and the broker's own order list by the same "
+            "id. It never re-sends.",
+        )
+    else:
+        reconcile_form = ""
+
+    every_time = (
+        "<ul class='small'>"
+        "<li>The account must be one MetaTrader 5 itself reports as <strong>DEMO</strong>. "
+        "REAL, CONTEST and an account MT5 cannot classify are refused at submission time.</li>"
+        "<li>One order per record. A second submit is a duplicate and the page says so; an "
+        "ambiguous answer is never re-sent, only reconciled by the same id.</li>"
+        "<li>The order goes through the same gate, the same risk limits, the same router and "
+        "the same adapter as a strategy order — this page adds no second way to a broker.</li>"
+        "<li>Trading is disarmed as soon as the broker answers, whatever the answer was. If "
+        "the order fills, the position stays open on your demo account, protected by the stop "
+        "you selected; this page cannot close it.</li>"
+        "</ul>"
+    )
+
+    return section(
+        "DEMO execution test — one order, DEMO account only",
+        intro
+        + facts(state_rows, split=True)
+        + terms
+        + outcome
+        + blocking_html
+        + form
+        + (f"<div class='demo-record'>{record_html}{reconcile_form}</div>" if record_html else "")
+        + every_time,
+        note="One order, sent through the same gate and adapter a strategy order uses. "
+        "Not a strategy result, not an AX-SCALPER trade, not a profitability claim.",
+        id="demo-test",
+    )
+
+
 def render_live(ctx: Any) -> str:
     view = dict((ctx.extra or {}).get("live") or {})
     nonce = fmt.attr(ctx.action_nonce)
@@ -1140,9 +1402,10 @@ def render_live(ctx: Any) -> str:
         "LIVE · real MetaTrader 5 account. Nothing here is a simulated fill.",
         "Live execution",
         "The continuous guarded session first, then the manual review and arming that "
-        "authorises it, then the one-shot AX-SCALPER intent. Arming writes the plan and sends "
-        "nothing; every order still passes the adapter's own preflight, and PAPER results never "
-        "authorise anything here.",
+        "authorises it, the one-shot AX-SCALPER intent, and a one-shot DEMO execution test you "
+        "can run against a demo account to see the order path work. Arming writes the plan and "
+        "sends nothing; every order still passes the adapter's own preflight, and PAPER results "
+        "never authorise anything here.",
         badges=_state_chip(armed, configured)
         + chip("LIVE · REAL BROKER", "danger", dot=True)
         + chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper"),
@@ -1159,8 +1422,9 @@ def render_live(ctx: Any) -> str:
             ("plan", "2 · Plan & arming"),
             ("session", "3 · Manual session"),
             ("one-shot", "4 · One-shot intent"),
-            ("account", "5 · Account"),
-            ("stop", "6 · Broker-side stop"),
+            ("demo-test", "5 · DEMO test order"),
+            ("account", "6 · Account"),
+            ("stop", "7 · Broker-side stop"),
         ]
     )
 
@@ -1277,6 +1541,7 @@ def render_live(ctx: Any) -> str:
                 id="plan",
             )
             + _scalper_live_section(view, nonce)
+            + demo_test_section(ctx, nonce)
             + broker_stop_settings_section(view, nonce)
             + section(
                 "What is missing",
@@ -1306,6 +1571,7 @@ def render_live(ctx: Any) -> str:
         + _plan_section(view, nonce)
         + _session_section(view, nonce)
         + _scalper_live_section(view, nonce)
+        + demo_test_section(ctx, nonce)
         + _account_section(view)
         + broker_stop_settings_section(view, nonce)
         + _last_path_section(view)

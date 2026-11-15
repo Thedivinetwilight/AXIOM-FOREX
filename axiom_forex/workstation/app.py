@@ -235,6 +235,13 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "scalper-live-arm",
         "scalper-live-submit",
         "scalper-live-reconcile",
+        # The one-shot DEMO execution test: one real order to an account MT5
+        # itself reports as DEMO, built from the broker's current terms, through
+        # the same guarded live leg every strategy order uses.  It is not a
+        # strategy and cannot close anything; it disarms after the outcome and
+        # never re-sends a request it cannot explain.
+        "demo-test-submit",
+        "demo-test-reconcile",
         "catalog-audit",
         # The paper starting capital: one local, Git-ignored document holding the
         # amount and currency the operator typed.  It is the basis of the paper
@@ -437,6 +444,8 @@ class WorkstationApp:
     autopilot_live: Any = None
     #: The last live-bridge action's result, shown once on the next render.
     autopilot_live_result: dict[str, Any] = field(default_factory=dict)
+    #: The last demo-execution-test answer, consumed by the next /live render.
+    demo_test_result: dict[str, Any] = field(default_factory=dict)
     #: One-shot, path-scoped outcome of the last POST.  It is consumed by the
     #: GET that the POST redirected to, and by no other render.  Keeping this in
     #: the app (rather than in a cookie, query string or client storage) keeps
@@ -858,6 +867,9 @@ class WorkstationApp:
                 # The mode page shows the broker positions that stay open when LIVE
                 # is switched off, so it reads the same read-only view.
                 "live": self.live_view() if page in {"live", "mode"} else {},
+                # The one-shot DEMO execution test, on the LIVE page only: it is
+                # an execution smoke test with no paper counterpart.
+                "demo_test": self.demo_test_view() if page == "live" else {},
                 "kronos": self.kronos_view() if page == "kronos" else {},
                 "strategies": (
                     self.strategies_view(query=query) if page == "strategies" else {}
@@ -1493,6 +1505,10 @@ class WorkstationApp:
             return self._paper_capital_action(form)
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
+        if action in {"demo-test-submit", "demo-test-reconcile"}:
+            # The one-shot DEMO execution test.  It is dispatched by its own name
+            # so no other action can reach the demo controller by accident.
+            return self._demo_test_action(action, form)
         if action.startswith("scalper-live-"):
             return self._scalper_live_action(action, form)
         if action.startswith("autopilot-") or action.startswith("scalper-paper-"):
@@ -1857,6 +1873,102 @@ class WorkstationApp:
             else HTTPStatus.CONFLICT
         )
         return status, "/live", f"AX-SCALPER LIVE {action}: {reason}. {message}"
+
+
+    # -- the one-shot DEMO execution test ---------------------------------
+    def demo_test_view(self) -> dict[str, Any]:
+        """The demo test's own model.  Reads only; sends nothing."""
+
+        controller = getattr(self.live, "demo_test", None) if self.live is not None else None
+        if controller is None:
+            return {
+                "available": False,
+                "reason": "demo_test_unavailable",
+                "message": (
+                    "This workstation has no MetaTrader 5 adapter wired in, so there is "
+                    "nothing to send a demo order with."
+                ),
+                "account": {},
+                "symbols": [],
+                "blockers": [],
+                "record": {},
+            }
+        try:
+            view = dict(controller.view())
+        except Exception as exc:
+            return {
+                "available": False,
+                "reason": "demo_test_view_unreadable",
+                "message": f"The demo test could not read its state ({type(exc).__name__}).",
+                "account": {},
+                "symbols": [],
+                "blockers": [],
+                "record": {},
+            }
+        if self.demo_test_result:
+            view["result"] = dict(self.demo_test_result)
+            self.demo_test_result = {}
+        return view
+
+    def _demo_test_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        """One demo order, at most once, through the guarded live leg."""
+
+        controller = getattr(self.live, "demo_test", None) if self.live is not None else None
+        if controller is None:
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "/live",
+                "No MetaTrader 5 adapter is wired into this workstation, so no demo test "
+                "order was built or sent.",
+            )
+
+        def field(name: str) -> str:
+            raw = form.get(name)
+            if isinstance(raw, (list, tuple)):
+                raw = raw[0] if raw else ""
+            return str(raw if raw is not None else "").strip()
+
+        values = {
+            "symbol": field("symbol"),
+            "side": field("side"),
+            "volume": field("volume"),
+            "stop_points": field("stop_points"),
+            "confirmation": field("confirmation"),
+            "account_confirmation": field("account_confirmation"),
+        }
+        try:
+            if action == "demo-test-submit":
+                outcome = controller.submit(values)
+            elif action == "demo-test-reconcile":
+                outcome = controller.reconcile()
+            else:
+                return HTTPStatus.NOT_FOUND, "/live", "unknown action"
+        except Exception as exc:
+            outcome = {
+                "ok": False,
+                "reason": type(exc).__name__,
+                "message": (
+                    "The demo execution test refused this action. No order was sent from "
+                    "here."
+                ),
+                "blockers": [],
+            }
+        result = dict(outcome or {})
+        # Never keep the typed confirmation phrase in memory after the attempt.
+        for key in ("confirmation", "account_confirmation"):
+            values.pop(key, None)
+        self.demo_test_result = {**result, "values": {**values, **(result.get("values") or {})}}
+        reason = str(result.get("reason") or ("accepted" if result.get("ok") else "refused"))
+        message = str(result.get("message") or reason)
+        self._log(
+            f"DEMO execution test {action}: {reason}"
+            + (f" request={result.get('request_id')}" if result.get("request_id") else "")
+        )
+        return (
+            HTTPStatus.SEE_OTHER,
+            "/live",
+            f"DEMO execution test: {reason}. {message}",
+        )
 
     # -- live execution -----------------------------------------------------
     def _live_action(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
