@@ -92,7 +92,10 @@ never states a value the caller did not pass in.
 
 Same rail, same strip, same page head, same `main` + `aside` grid; nested regions
 no longer draw a second frame; anchored sections clear the sticky chrome. Long
-research pages keep their sticky index and their folds.
+research pages keep their sticky index and their folds, and now carry the same
+sticky band of anchors as the run pages (`/strategies`, `/kronos`, `/mode`,
+`/quick-setup`, `/provider-setup`), built from the target list their in-page index
+already used.
 
 ## 3. Tests
 
@@ -100,7 +103,7 @@ research pages keep their sticky index and their folds.
 | --- | --- |
 | `tests/test_workstation_command_deck.py` (new, 22 tests) | passed |
 | workstation/LIVE/paper/monitoring/redesign/revamp/symbols/autopilot UI files | 335 passed |
-| `pytest -q` (whole suite) | see the commit message of the final increment |
+| `pytest -q` (whole suite) | **2 363 passed in 637.50 s** (2 341 before this pass + 22 new) |
 | `python -m compileall axiom_forex tests` | clean |
 | `git diff --check` | clean |
 
@@ -123,6 +126,15 @@ states produced from the test suite's own stand-ins (no MT5, no arming, no order
 
 * **All 16 routes at 1440 and 390 px**: 0 elements with a near-white background,
   0 page-level horizontal overflows, 0 tables escaping their scroller.
+* **Document sweep on all 16 routes**: no duplicate `id`, no form control
+  without a label, no button or link without an accessible name, exactly one
+  `h1`, no `href="#"` placeholder.
+* **Keyboard sweep on `/live`**: the first nine tab stops are the skip link, the
+  brand, seven rail items and the `Setup & tools` disclosure, each with a 2 px
+  visible outline; no trap and no skipped landmark.
+* Contrast, measured from the tokens: page `#080d13` at 0.004 relative
+  luminance; headline `#dde7f1` at 0.789 (15.6:1); body `#b3c2d1` at 0.528
+  (10.7:1, AAA); secondary 9.2:1; meta 7.0:1; the dimmest label 5.6:1 (AA).
 * Heights at 1440 px: `/autopilot` 5 201 → 1 714; `/live` 3 272 → 2 269;
   `/` 2 748 → 2 210; `/performance` 4 160 → 3 153; `/positions` 2 766 → 2 056;
   `/activity` 2 174 → 1 618; `/health` 1 950 → 1 437; `/account` 1 611 → 1 111.
