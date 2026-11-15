@@ -619,7 +619,8 @@ def _plan_section(view: Mapping[str, Any], nonce: str) -> str:
     refusal = ""
     if decision:
         refusal = facts(
-            [
+            split=True,
+            pairs=[
                 ("Last arming decision", chip("Armed" if decision.get("armed") else str(decision.get("outcome") or "refused"), "ok" if decision.get("armed") else "warn", dot=True)),
                 ("Reason", f"<code>{fmt.text(decision.get('reason') or '—')}</code>"),
                 ("Message", fmt.text(decision.get("message") or "no message was recorded")),
@@ -631,7 +632,8 @@ def _plan_section(view: Mapping[str, Any], nonce: str) -> str:
         "The exact plan, and arming it",
         "<h3 class='small muted' style='margin:0 0 6px'>Exact plan, candidate and evidence</h3>"
         + facts(
-            [
+            split=True,
+            pairs=[
                 ("Plan on record", chip("yes", "ok") if plan.get("present") else chip("no", "warn")),
                 ("Plan fingerprint", f"<code>{fmt.text(plan.get('fingerprint') or '—')}</code>"),
                 ("Symbols", fmt.text(", ".join(view.get("symbols") or []) or "none named")),
@@ -672,7 +674,8 @@ def _session_section(view: Mapping[str, Any], nonce: str) -> str:
     else:
         controls.append(action_form("live-start", nonce, "Start live session", tone="primary"))
     body = facts(
-        [
+        split=True,
+        pairs=[
             ("Adapter", chip("configured", "ok") if view.get("configured") else chip("not configured", "muted")),
             ("Armed", chip("ARMED", "danger", dot=True) if view.get("armed") else chip("Not armed", "muted")),
             ("Execution mode", chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper", dot=True)),
@@ -880,7 +883,8 @@ def _scalper_live_section(view: Mapping[str, Any], nonce: str) -> str:
     account = str(scalper.get("account_fingerprint") or "")
 
     body = facts(
-        [
+        split=True,
+        pairs=[
             (
                 "One-shot submission",
                 chip("available", "ok", dot=True) if one_shot else chip("BLOCKED", "danger", dot=True),
@@ -930,57 +934,67 @@ def _scalper_live_section(view: Mapping[str, Any], nonce: str) -> str:
         )
 
     body += (
-        "<h3 class='small muted' style='margin:18px 0 6px'>The typed intent, one step at a time</h3>"
+        "<h3 style='margin:14px 0 4px'>The typed intent, one step at a time</h3>"
         "<p class='small muted'>Each step is its own click with its own phrase. The same durable "
-        "request id follows the intent to the broker and back.</p>"
+        "request id follows the intent to the broker and back. Nothing here loops.</p>"
     )
+    steps = [
+        (
+            "Record the exact proposal",
+            "<form method='post' action='/actions/scalper-live-register' class='form'>"
+            f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
+            + "<div class='form-row'>"
+            + field("intent_id", "Exact intent id", field_id="register-intent", value=intent_id, placeholder=intent_id or "paste or keep empty for a new proposal")
+            + field("account_confirmation", "Type the exact account fingerprint", field_id="register-account", placeholder=account or "account fingerprint")
+            + field("plan_fingerprint", "Type the exact plan fingerprint", field_id="register-plan", value=fingerprint)
+            + "</div>"
+            "<div class='actions'><button class='btn' type='submit'>Record exact proposal</button></div>"
+            "</form>",
+        ),
+        (
+            "Review it",
+            "<form method='post' action='/actions/scalper-live-review' class='form'>"
+            f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
+            + "<div class='form-row'>"
+            + field("phrase", "Review phrase", field_id="review-phrase", placeholder=str(scalper.get("review_phrase") or ""))
+            + field("intent_id", "Intent id", field_id="review-intent", value=intent_id)
+            + "</div>"
+            "<div class='actions'><button class='btn' type='submit'>Review exact proposal</button></div>"
+            "</form>",
+        ),
+        (
+            "Approve the signed evidence",
+            "<form method='post' action='/actions/scalper-live-approve' class='form'>"
+            f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
+            + "<div class='form-row'>"
+            + field("phrase", "Approval phrase", field_id="approve-phrase", placeholder=str(scalper.get("approval_phrase") or ""))
+            + field("intent_id", "Intent id", field_id="approve-intent", value=intent_id)
+            + "</div>"
+            "<div class='actions'><button class='btn' type='submit'>Verify signed approval and approve</button></div>"
+            "</form>",
+        ),
+        (
+            "Arm this exact plan",
+            "<form method='post' action='/actions/scalper-live-arm' class='form'>"
+            f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
+            + "<div class='form-row'>"
+            + field("confirmation", "Arming confirmation", field_id="one-shot-arm-phrase", placeholder=str(scalper.get("arm_phrase") or ""))
+            + field("intent_id", "Intent id", field_id="one-shot-arm-intent", value=intent_id)
+            + "</div>"
+            "<div class='actions'><button class='btn btn--danger' type='submit'>Arm this exact plan</button></div>"
+            "</form>",
+        ),
+    ]
+    body += "<div class='form-steps'>" + "".join(
+        f"<div class='form-step'><span class='fs-n'>{index}</span>{form}</div>"
+        for index, (_label, form) in enumerate(steps, start=1)
+    ) + "</div>"
     body += (
-        "<form method='post' action='/actions/scalper-live-register' class='form'>"
-        f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
-        + "<div class='form-row'>"
-        + field("intent_id", "Exact intent id", field_id="register-intent", value=intent_id, placeholder=intent_id or "paste or keep empty for a new proposal")
-        + field("account_confirmation", "Type the exact account fingerprint", field_id="register-account", placeholder=account or "account fingerprint")
-        + field("plan_fingerprint", "Type the exact plan fingerprint", field_id="register-plan", value=fingerprint)
-        + "</div>"
-        "<div class='actions'><button class='btn' type='submit'>Record exact proposal</button></div>"
-        "</form>"
-    )
-    body += (
-        "<form method='post' action='/actions/scalper-live-review' class='form'>"
-        f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
-        + "<div class='form-row'>"
-        + field("phrase", "Review phrase", field_id="review-phrase", placeholder=str(scalper.get("review_phrase") or ""))
-        + field("intent_id", "Intent id", field_id="review-intent", value=intent_id)
-        + "</div>"
-        "<div class='actions'><button class='btn' type='submit'>Review exact proposal</button></div>"
-        "</form>"
-    )
-    body += (
-        "<form method='post' action='/actions/scalper-live-approve' class='form'>"
-        f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
-        + "<div class='form-row'>"
-        + field("phrase", "Approval phrase", field_id="approve-phrase", placeholder=str(scalper.get("approval_phrase") or ""))
-        + field("intent_id", "Intent id", field_id="approve-intent", value=intent_id)
-        + "</div>"
-        "<div class='actions'><button class='btn' type='submit'>Verify signed approval and approve</button></div>"
-        "</form>"
-    )
-    body += (
-        "<form method='post' action='/actions/scalper-live-arm' class='form'>"
-        f"<input type='hidden' name='nonce' value='{fmt.attr(nonce)}'>"
-        + "<div class='form-row'>"
-        + field("confirmation", "Arming confirmation", field_id="one-shot-arm-phrase", placeholder=str(scalper.get("arm_phrase") or ""))
-        + field("intent_id", "Intent id", field_id="one-shot-arm-intent", value=intent_id)
-        + "</div>"
-        "<div class='actions'><button class='btn btn--danger' type='submit'>Arm this exact plan</button></div>"
-        "</form>"
-    )
-    body += (
-        "<div class='actions' style='margin-top:12px'>"
+        "<div class='actions' style='margin-top:10px'>"
         + action_form("scalper-live-submit", nonce, "Submit one guarded intent", tone="danger")
         + action_form("scalper-live-reconcile", nonce, "Reconcile the same request id")
         + "</div>"
-        '<p class="small muted" style="margin-top:8px">An ambiguous request is reconciled by the '
+        '<p class="small muted" style="margin-top:6px">An ambiguous request is reconciled by the '
         "same durable id; it is never re-sent.</p>"
     )
 
@@ -1016,7 +1030,8 @@ def _scalper_live_section(view: Mapping[str, Any], nonce: str) -> str:
         "Broker response and unresolved requests</h3>"
         "<p class='small muted' style='margin:0 0 6px'>Last guarded AX-SCALPER action</p>"
     ) + facts(
-        [
+        split=True,
+        pairs=[
             ("Broker state", fmt.text(broker.get("state") or "not reported")),
             ("Broker request id", f"<code>{fmt.text(broker.get('request_id') or '—')}</code>"),
             ("Broker retcode", fmt.text(broker.get("retcode_name") or broker.get("retcode") or "Broker retcode not reported")),
@@ -1207,12 +1222,11 @@ def render_live(ctx: Any) -> str:
     )
 
     warning = (
-        notice(
-            "SIMULATED / SAMPLE DATA in the banner is about the terminal, not about this page",
-            "If the launcher was started with --simulate there is no real terminal, and the "
-            "adapter refuses to arm. Check the banner above before reading any figure here.",
-            tone="muted",
-        )
+        "<p class='inline-note' role='note'>"
+        "<strong>SIMULATED / SAMPLE DATA in the banner is about the terminal, not about this "
+        "page.</strong> If the launcher was started with --simulate there is no real terminal, "
+        "and the adapter refuses to arm. Check the banner above before reading any figure here."
+        "</p>"
         if ctx.terminal.simulated
         else ""
     )

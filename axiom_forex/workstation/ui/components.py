@@ -260,19 +260,29 @@ def facts(
     pairs: Sequence[tuple[str, str]],
     *,
     loose: bool = False,
+    split: bool = False,
 ) -> str:
     """A definition list: ``(label, value-html)``.
 
     This replaces the old tile grid on purpose — the label and the value it
     qualifies stay on one line, and a long "why it is unavailable" note wraps
     underneath its own figure instead of inside a box of its own.
+
+    ``split`` lays a long ledger out as two label/value pairs per row above
+    1200 px, which halves the height of a page that answers thirty questions in
+    one column.  It is a layout, not a grouping: the pairs stay in the order the
+    caller wrote them, and a narrow window folds back to one pair per row.
     """
 
     rows: list[str] = []
     for label, value in pairs:
         rows.append(f"<dt>{escape(label)}</dt><dd>{value}</dd>")
-    klass = "facts facts--loose" if loose else "facts"
-    return f"<dl class='{klass}'>{''.join(rows)}</dl>"
+    classes = ["facts"]
+    if loose:
+        classes.append("facts--loose")
+    if split:
+        classes.append("facts--split")
+    return f"<dl class='{' '.join(classes)}'>{''.join(rows)}</dl>"
 
 
 def fact_line(pairs: Sequence[tuple[str, str]]) -> str:

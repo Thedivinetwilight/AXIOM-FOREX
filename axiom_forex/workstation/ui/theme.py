@@ -56,6 +56,8 @@ STYLES = """
 }
 
 *,*::before,*::after{box-sizing:border-box}
+/* Anchors land below the sticky rail and strip, never underneath them. */
+section[id],h2[id],details[id]{scroll-margin-top:96px}
 html{-webkit-text-size-adjust:100%;background:var(--rail);scrollbar-color:var(--line-strong) transparent}
 body{margin:0;background:var(--paper);color:var(--ink-body);
   font:13.5px/1.5 var(--font);font-variant-numeric:tabular-nums;text-rendering:optimizeLegibility}
@@ -140,9 +142,10 @@ hr{border:0;border-top:1px solid var(--line);margin:var(--s4) 0}
 
 /* ------------------------------------------------------------------ page */
 .shell{max-width:var(--max);margin:0 auto;padding:var(--s4) var(--s5) var(--s7)}
-.page-head{display:flex;gap:var(--s5);align-items:flex-start;justify-content:space-between;
-  flex-wrap:wrap;padding-bottom:var(--s3);margin-bottom:var(--s4);border-bottom:1px solid var(--line)}
-.page-head-main{min-width:0;display:grid;gap:3px;max-width:96ch;flex:1 1 60%}
+.page-head{padding-bottom:var(--s3);margin-bottom:var(--s4);border-bottom:1px solid var(--line)}
+.page-head-row{display:flex;gap:var(--s4);align-items:flex-start;justify-content:space-between;
+  flex-wrap:wrap}
+.page-head-main{min-width:0;display:grid;gap:3px;max-width:92ch;flex:1 1 60%}
 .kicker{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;font-weight:700;
   letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3)}
 .page-head .lede{max-width:96ch;color:var(--ink-2);font-size:12.5px;line-height:1.45}
@@ -231,6 +234,13 @@ hr{border:0;border-top:1px solid var(--line);margin:var(--s4) 0}
 .facts--inline .k{color:var(--ink-4);font-weight:600}
 .facts--inline .v{font-weight:600;color:var(--ink-body)}
 .facts--tight dt,.facts--tight dd{padding:4px 0}
+/* A long ledger reads as two columns of pairs on a wide screen. */
+@media (min-width:1200px){
+  .facts--split{grid-template-columns:repeat(2,minmax(120px,min(28%,190px)) minmax(0,1fr))}
+  .facts--split>dt{border-top:1px solid var(--surface-3)}
+  .facts--split>dt:nth-of-type(1),.facts--split>dt:nth-of-type(2),
+  .facts--split>dt:nth-of-type(1)+dd,.facts--split>dt:nth-of-type(2)+dd{border-top:0}
+}
 
 /* ---------------------------------------------------------------- figures */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));
@@ -386,6 +396,10 @@ tbody tr:hover td{background:var(--hover)}
 .notice--info .glyph{background:var(--info);color:#06101c}
 .notice--info .n-title{color:var(--info-ink)}
 .notice--muted{background:var(--surface-2)}
+/* A qualifier, not a card: one line that colours its own left edge. */
+.inline-note{margin:0 0 var(--s2);padding:2px 0 2px 9px;border-left:2px solid var(--warn);
+  color:var(--ink-3);font-size:11.5px;line-height:1.45}
+.inline-note strong{color:var(--ink-2);font-weight:600}
 /* The simulated-data bar: one line, the long sentence behind details. */
 .dataflag{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:5px var(--s3);
   border:1px solid #5a4520;border-left:3px solid var(--warn);border-radius:var(--r-xs);
@@ -446,6 +460,15 @@ fieldset.field>legend{font-size:11.5px;font-weight:600;color:var(--ink-2);paddin
 .form{display:grid;gap:var(--s2)}
 .form-row{display:flex;gap:var(--s3);flex-wrap:wrap;align-items:flex-end}
 .form-row>.field{flex:1 1 200px;margin-bottom:0}
+/* A sequence of one-shot steps reads as a grid of steps, not a stack of forms. */
+.form-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:6px}
+.form-step{position:relative;border:1px solid var(--line);border-left:3px solid var(--live-accent);
+  border-radius:var(--r-sm);background:var(--surface-2);padding:8px var(--s3) 4px}
+.form-step .fs-n{position:absolute;top:6px;right:8px;font-family:var(--mono);font-size:10px;
+  color:var(--ink-4)}
+.form-step .field{margin-bottom:6px;max-width:none}
+.form-step .form-row>.field{flex:1 1 140px}
+.form-step .btn{width:100%}
 .template{background:var(--rail-2);border:1px solid var(--line);border-radius:var(--r-sm);
   color:var(--ink-2);font-family:var(--mono);font-size:11.5px;padding:8px 10px;overflow:auto;
   white-space:pre;max-height:340px}
@@ -593,7 +616,7 @@ fieldset.field>legend{font-size:11.5px;font-weight:600;color:var(--ink-2);paddin
   .table--stack td.num{text-align:left}
   .table--stack td:not([data-label]){grid-template-columns:minmax(0,1fr)}
   .table--stack td:not([data-label])::before{content:none}
-  .page-head{gap:var(--s2)}
+  .page-head-row{gap:var(--s2)}
   .page-actions{width:100%;justify-content:flex-start}
   .page-actions .btn,.actions .btn{flex:1 1 auto}
   .kpi{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
