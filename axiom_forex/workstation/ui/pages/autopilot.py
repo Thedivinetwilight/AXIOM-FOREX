@@ -1181,7 +1181,9 @@ def _review_candidates(review: Mapping[str, Any]) -> str:
     candidates = [dict(item) for item in (review.get("candidates") or ())]
     if not candidates:
         return ""
-    return "<h4 class='small muted' style='margin:14px 0 6px'>Every candidate the review saw</h4>" + table(
+    return common.fold(
+        "Every candidate the review saw",
+        table(
         (("Candidate", False), ("Family", False), ("Eligible", False), ("Reason", False)),
         [
             [
@@ -1197,6 +1199,9 @@ def _review_candidates(review: Mapping[str, Any]) -> str:
         ],
         caption="Nothing is admitted without recorded evidence; a refusal names what is missing.",
         dense=True,
+        ),
+        count=f"{len(candidates)} candidates",
+        note="none admitted: no candidate has passed independent admission",
     )
 
 

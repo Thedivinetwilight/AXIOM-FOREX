@@ -1,18 +1,22 @@
-"""The redesign's design system: tokens, layout and components, in one stylesheet.
+"""The design system: tokens, layout and components, in one stylesheet.
 
-This is a deliberate replacement, not a reskin.  The old UI was a dark sidebar
-shell built out of rounded ``card``/``kpi`` tiles with a coloured chip for every
-fact.  This one is a light, editorial console:
+This is a dark-first trading workstation, not a reskin.  The planes are
+charcoal-navy and get darker as they go up (page, panel, rail), so a screen
+never glares and the eye is led by contrast rather than by white space:
 
-* a dark **command rail** across the top (brand, primary navigation, session
-  state) instead of a permanent left sidebar, so the reading width is not
-  narrowed on a laptop;
+* a **command rail** across the top, in two tiers: the run/monitor links an
+  operator uses on every shift stay on one row, and setup/diagnostic pages sit
+  behind one labelled disclosure, so sixteen links never become a wall;
 * a one-line **status strip** that carries the facts every page shares (loop,
   mode, terminal, capital, read time) once, instead of repeating them per card;
 * **facts as ledger rows** and **numbers in real tables** instead of a grid of
   tiles, so a figure always sits beside the label and provenance that qualify it;
+* **folds** for history -- decisions, fills, steps, latency, stored books -- so
+  the run controls stay above the record rather than a thousand rows below it;
 * a single accent grammar: blue is PAPER, red is LIVE, amber is attention, green
-  is a passing check.  Colour is never the only carrier of meaning.
+  is a passing check.  Colour is never the only carrier of meaning, every tone
+  colour is checked against its own tint for AA contrast, and the browser is
+  told ``color-scheme:dark`` so its own widgets match.
 
 Everything is plain CSS: no scripts, no fonts to fetch, no images.  The page must
 survive a strict ``script-src 'none'`` policy, which is what makes it safe to
@@ -26,7 +30,7 @@ STYLES = """
   color-scheme:dark;
   /* Charcoal-navy, dark first: the page is the darkest plane, panels sit a step
      above it, and nothing here is white. */
-  --ink:#e9eff7; --ink-2:#b8c6d6; --ink-3:#93a4b8; --ink-4:#78899d;
+  --ink:#e9eff7; --ink-2:#b8c6d6; --ink-3:#93a4b8; --ink-4:#8296ab;
   --paper:#0a0f15; --surface:#101a24; --surface-2:#15212c; --surface-3:#1d2b38;
   --line:#22303d; --line-2:#2c3c4c; --line-strong:#43586d;
   --paper-accent:#4a86ff; --paper-accent-ink:#9dc0ff; --paper-tint:#122340;
@@ -470,7 +474,8 @@ a:hover{color:var(--paper-accent-hover)}
 .rail-more[open]>summary{background:var(--surface-2);color:var(--ink)}
 .rail-more--current>summary{color:var(--ink);box-shadow:inset 0 -2px 0 0 var(--paper-accent)}
 .rail-more-current{color:var(--ink-3);font-size:12.5px;white-space:nowrap}
-.rail-more-panel{position:absolute;left:0;top:calc(100% + 6px);z-index:60;min-width:420px;
+.rail-more-panel{position:absolute;right:0;left:auto;top:calc(100% + 6px);z-index:60;
+  min-width:min(420px,calc(100vw - 32px));
   display:grid;grid-template-columns:1fr 1fr;gap:var(--s2) var(--s4);
   padding:var(--s4);border:1px solid var(--line-2);border-radius:var(--r-md);
   background:var(--surface);box-shadow:0 18px 40px -18px #000}
@@ -490,11 +495,13 @@ td.num,th.num{color:var(--ink)}
 .field label,.field .label{color:var(--ink-2)}
 .field .hint,.field .err{color:var(--ink-3)}
 .field .err{color:var(--live-accent)}
-.btn{background:var(--surface-2)}
-.btn:hover{background:var(--surface-3)}
+.btn:not(.btn--primary):not(.btn--danger){background:var(--surface-2)}
+.btn:not(.btn--primary):not(.btn--danger):hover{background:var(--surface-3)}
 .btn--ghost{background:transparent}
-.btn--primary,.btn--danger{color:var(--accent-ink)}
-.btn--primary:hover,.btn--danger:hover{color:var(--accent-ink)}
+.btn--primary{background:var(--paper-accent);border-color:var(--paper-accent);color:var(--accent-ink)}
+.btn--primary:hover{background:var(--paper-accent-hover);border-color:var(--paper-accent-hover)}
+.btn--danger{background:var(--live-accent);border-color:var(--live-accent);color:var(--accent-ink)}
+.btn--danger:hover{background:#ff9b98;border-color:#ff9b98}
 .chip{background:var(--surface-2);border-color:var(--line-2);color:var(--ink-2)}
 .progress{background:var(--surface-3)}
 .template{background:var(--rail-2);border-color:var(--line);color:var(--ink-2)}
@@ -551,8 +558,11 @@ td.num,th.num{color:var(--ink)}
 }
 @media (max-width:860px){
   .rail-in{padding:0 var(--s4);gap:var(--s3);min-height:52px}
-  .rail-nav{order:3;width:100%;overflow-x:auto;flex-wrap:nowrap;padding-bottom:6px;
-    scrollbar-width:thin}
+  .rail-nav{order:3;width:100%;overflow:visible;flex-wrap:wrap;gap:2px;
+    padding-bottom:4px}
+  .rail-group{flex-wrap:wrap}
+  .rail-nav a{min-height:32px;padding:5px 9px}
+  .rail-more{width:100%}
   .rail-more-panel{position:static;min-width:0;grid-template-columns:minmax(0,1fr);
     margin-top:4px;box-shadow:none}
   .rail-sep{display:none}

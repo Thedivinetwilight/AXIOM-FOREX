@@ -130,15 +130,28 @@ retcode and whether the fill was booked.
 
 No password, token, balance, or equity figure is ever shown, logged, or stored.
 
-### The start button on `/autopilot`
+### The continuous session on this page
 
-`/autopilot` can also start **this** session, once a strategy is selected and running
-there. That page's bridge calls the same `start_session()` and displays the same
-refusals; it cannot arm, cannot write a plan and cannot change a size or a limit. It
-refuses when no plan is written, when the plan belongs to a different candidate than
-the running selection, when the mode is not LIVE, when the adapter is not connected,
-when the plan is not armed, or when this page reports any blocker. Stopping from
-either page disarms and leaves open positions untouched. See `AUTOPILOT.md`.
+The first card on **Live execution** is the continuous guarded session: a loop over
+the selected strategy that calls the same `start_session()` this page's manual
+control calls. It shows its state, whether it is sending real orders, the orders and
+refusals it recorded, the requests that are still unresolved at the broker, the
+broker's open positions, the quote feed it read with its age, and the timings measured
+in this process. Every blocker is listed with the control that clears it; when there
+is no blocker the start button appears, and when it is running the stop replaces it.
+
+It cannot arm, cannot write a plan and cannot change a size or a limit. It refuses
+when no plan is written, when the plan belongs to a different candidate than the
+running selection, when the mode is not LIVE, when the adapter is not connected, when
+the plan is not armed, or when this page reports any blocker. Stopping disarms and
+leaves open positions untouched.
+
+`/autopilot` used to host a duplicate of these controls; it now reports the session's
+state and links here, so a real-account session is started and stopped in one place.
+The **one-shot AX-SCALPER intent** on this page is a different control: one typed
+intent, reviewed, approved, armed and submitted once. It never loops, it is not the
+continuous session, and it is blocked while the continuous session is running. See
+`AUTOPILOT.md`.
 
 ## Before your first real order
 

@@ -44,8 +44,9 @@ stay local; broker-reported positions and P&L remain on `/live`.
 
 Once a selection is running, a separate bridge (`live_autopilot.py`) can offer the
 **same** strategy to the live workflow that the Live execution page already owns.
-That bridge adds a start and a stop button and nothing else: it cannot arm, cannot
-size, cannot widen a limit, cannot pick a symbol and cannot send an order. See
+That bridge cannot arm, cannot size, cannot widen a limit, cannot pick a symbol and
+cannot send an order. Its start and stop controls are on `/live`, where the real
+account is; `/autopilot` reports the session's state and hands over. See
 "Running the selection on LIVE" below.
 
 ---
@@ -208,10 +209,13 @@ Passing the screen on history is not a live readiness verdict.
 
 ## Running the selection on LIVE
 
-The bottom card on `/autopilot` is a bridge to the live workflow `/live` already
-built. It is a *front door*, not a second order path:
+The top card on `/live` runs the continuous session; the bottom card on
+`/autopilot` reports it and hands over. The bridge is a *front door*, not a second
+order path, and it has one control location:
 
-* **It starts the same session `/live` starts.** `LiveTrading.start_session()` is
+* **It starts the same session `/live` starts, and only from `/live`.** The start
+  and stop buttons are on the Live execution page, next to the account they act on;
+  `/autopilot` shows the state and links there. `LiveTrading.start_session()` is
   called; that method refuses unless the adapter is armed and every blocker on the
   live page is clear. Nothing is re-implemented and nothing is checked twice with a
   weaker rule.

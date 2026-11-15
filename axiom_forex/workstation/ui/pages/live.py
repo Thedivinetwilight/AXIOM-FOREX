@@ -187,11 +187,28 @@ def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
         ]
     )
 
+    account = dict(view.get("account") or {})
+    fingerprint = str(account.get("fingerprint") or view.get("account_fingerprint") or "")
     body = (
         "<div class='kpi'>" + kpis + "</div>"
         + facts(
             [
                 ("What would run", fmt.text(candidate) or "no candidate selected"),
+                (
+                    "Account this session would trade",
+                    chip(str(view.get("account_mode") or "unknown").upper(), "danger" if str(view.get("account_mode") or "").upper() == "REAL" else "warn")
+                    + " "
+                    + (
+                        chip("fingerprint confirmed", "ok", dot=True)
+                        if view.get("armed") and fingerprint
+                        else chip("not confirmed by an arm", "muted")
+                    )
+                    + f" <code>{fmt.text(fingerprint or 'not read')}</code>",
+                ),
+                (
+                    "Session mode",
+                    chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper", dot=True),
+                ),
                 ("Pair and broker symbol", f"{fmt.text(pair) or '—'} · {fmt.text(symbol)}"),
                 ("Timeframe", fmt.text(timeframe) or "not resolved"),
                 (
@@ -1121,9 +1138,10 @@ def render_live(ctx: Any) -> str:
             + section(
                 "What is missing",
                 facts(limits),
-                note="No MetaTrader 5 trading adapter is wired in at all: this workstation "
-                "cannot send a real order. Everything on the PAPER side keeps working, and "
-                "nothing here pretends otherwise.",
+                note="No MetaTrader 5 adapter is configured on this workstation, so there is "
+                "no live trading adapter to send with: nothing here can reach a broker. "
+                "Everything on the PAPER side keeps working, and nothing here pretends "
+                "otherwise.",
                 id="limits",
                 plain=True,
             )
