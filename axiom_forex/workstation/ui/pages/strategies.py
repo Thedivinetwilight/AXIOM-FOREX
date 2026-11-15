@@ -845,6 +845,34 @@ def _claims_section(view: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+
+def _template_cards(catalogue: Sequence[Mapping[str, Any]], nonce: str) -> list[str]:
+    """One template open, the rest folded: a library is browsed, not scrolled.
+
+    The first card stays open because the page's own contents list points at it;
+    every other card is one click away, with its variant count on the summary and
+    its whole table still in the document.
+    """
+
+    cards: list[str] = []
+    for index, item in enumerate(catalogue):
+        variants = [dict(entry) for entry in (item.get("variants_detail") or ())]
+        html = _template_section(item, variants, nonce)
+        if index == 0:
+            cards.append(html)
+            continue
+        label = str(item.get("title") or item.get("name") or item.get("card_id") or "Template")
+        cards.append(
+            common.fold(
+                label,
+                html,
+                count=f"{len(variants)} variants",
+                note=str(item.get("family") or ""),
+            )
+        )
+    return cards
+
+
 def render_strategies(ctx: Any) -> str:
     view = dict((ctx.extra or {}).get("strategies") or {})
     nonce = str(getattr(ctx, "action_nonce", ""))
@@ -931,10 +959,7 @@ def render_strategies(ctx: Any) -> str:
         + (funnel and _results_section(funnel) or "")
         + _search_section(view)
         + _selections_section(view, nonce)
-        + "".join(
-            _template_section(item, [dict(entry) for entry in (item.get("variants_detail") or ())], nonce)
-            for item in catalogue
-        )
+        + "".join(_template_cards(catalogue, nonce))
         + _screen_section(view, nonce)
         + _evaluate_one_section(view, nonce)
         + _criteria_section(view)

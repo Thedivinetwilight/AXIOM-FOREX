@@ -238,7 +238,10 @@ def test_the_paper_loop_can_not_be_started_from_the_live_page(tmp_path):
 def test_history_is_folded_rather_than_scrolled_past():
     from pathlib import Path
 
+    from tests.test_workstation_paper_center import FakeScalper
+
     _instance, app = _autopilot(Path("/tmp/axiom-dark-fold"))
+    app.scalper_paper = FakeScalper()
     html = _paper(app)
     from axiom_forex.workstation.ui.theme import STYLES
 
@@ -248,13 +251,15 @@ def test_history_is_folded_rather_than_scrolled_past():
     for anchor in ("#start-stop", "#pnl", "#live-handoff"):
         assert f"href='{anchor}'" in html, anchor
 
-    # The paper lane is its own engine: folded, counted, and still anchored.
-    assert "id='scalper-paper'" in html
-    assert "AX-SCALPER PAPER · its own engine and its own ledger" in html
-    assert "never a LIVE route" in html
-    # The fold owns the anchor, so the id it points at is unique on the page.
+    # The paper lane keeps its heading and its state; its long dumps fold under it.
     assert html.count("id='scalper-paper'") == 1
-    assert "id='scalper-paper-lane'" in html
+    lane = html[html.index("id='scalper-paper'") :]
+    assert "Strategy review — evidence and policy decision" in lane
+    assert "Risk settings, with the unit each value uses" in lane
+    assert "Terminal-verified Forex symbols (exact broker names)" in lane
+    # Folded, not removed: the tables are still in the document.
+    assert "class='fold'" in lane
+    assert "Exactly the enabled strategies" in lane
 
 
 @pytest.mark.parametrize("width", [620, 860, 1080])

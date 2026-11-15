@@ -553,7 +553,7 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             + "<p class='small muted' style='margin-top:10px'>LIVE is a separate page: this "
             "PAPER page cannot arm, submit, or close a broker order.</p>",
             note="A separate paper engine, with its own ledger and its own admission rules.",
-            id="scalper-paper-lane",
+            id="scalper-paper",
         )
     state = str(scalper.get("state") or "UNKNOWN")
     config = dict(scalper.get("config") or {})
@@ -724,8 +724,9 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
         + "</div>"
         + start_note
         + picker
-        + "<h3 class='small muted' style='margin:18px 0 6px'>Strategy review — evidence and policy decision</h3>"
-        + (
+        + common.fold(
+            "Strategy review — evidence and policy decision",
+            (
             facts(
                 [
                     (
@@ -746,28 +747,37 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             + _review_candidates(review)
             if review
             else empty_state("No strategy review", "No review has been recorded for this observer.")
+            ),
+            count=str(review.get("status") or review.get("decision") or "no review"),
+            note="what the lane reviewed, and what it decided",
         )
-        + "<h3 class='small muted' style='margin:18px 0 6px'>Risk settings, with the unit each value uses</h3>"
-        + facts(risk_pairs)
-        + "<h3 class='small muted' style='margin:18px 0 6px'>Exactly the enabled strategies "
-        "in this PAPER observer</h3>"
-        + strategies
-        + "<h3 class='small muted' style='margin:18px 0 6px'>Terminal-verified Forex symbols (exact broker names)</h3>"
-        + table(
+        + common.fold("Risk settings, with the unit each value uses", facts(risk_pairs),
+                      note="the limits this lane trades under")
+        + common.fold(
+            "Exactly the enabled strategies in this PAPER observer",
+            strategies,
+            count=f"{len(versions)} enabled",
+        )
+        + common.fold(
+            "Terminal-verified Forex symbols (exact broker names)",
+            table(
             (("Broker name", False), ("Pair", False), ("Kind", False), ("Digits", True), ("Spread (points)", True)),
             symbol_rows,
             caption="Exactly the symbols the terminal reports, with the name to type.",
             empty=empty_state("No verified symbol", "Connect a real terminal first."),
-        )
-        + (
-            table(
-                (("Name", False), ("Kind", False), ("Reason", False)),
-                exclusion_rows,
-                caption="Excluded terminal symbols",
-                dense=True,
             )
-            if exclusion_rows
-            else ""
+            + (
+                table(
+                    (("Name", False), ("Kind", False), ("Reason", False)),
+                    exclusion_rows,
+                    caption="Excluded terminal symbols",
+                    dense=True,
+                )
+                if exclusion_rows
+                else ""
+            ),
+            count=f"{len(symbol_rows)} verified",
+            note="the exact broker names, never invented",
         )
     )
     body += "<h3 class='small muted' style='margin:18px 0 6px'>Blockers and their direct fixes</h3>" + blockers_html
@@ -788,7 +798,7 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
         note="A separate paper engine: its ledger, its admission rules and its own counters. "
         "LIVE is a separate page, and nothing here can reach it.",
         tools=chip(state, {"RUNNING": "ok", "BLOCKED": "danger"}.get(state, "muted")),
-        id="scalper-paper-lane",
+        id="scalper-paper",
     )
 
 
@@ -1390,18 +1400,7 @@ def render_autopilot(ctx: Any) -> str:
     sections_drawn.append(("pnl", "Paper P&L"))
 
     sections_drawn.append(("scalper-paper", "AX-SCALPER PAPER"))
-    # Its own engine, its own record: on the page, one click away, and out of the
-    # way of the paper loop's start, book and hand-over.
-    scalper_paper = dict(view.get("scalper_paper") or {})
-    body_parts.append(
-        common.fold(
-            "AX-SCALPER PAPER · its own engine and its own ledger",
-            _scalper_section(view, nonce),
-            count=str(scalper_paper.get("state") or "not wired"),
-            note="never a LIVE route; nothing here can send or close an order",
-            anchor="scalper-paper",
-        )
-    )
+    body_parts.append(_scalper_section(view, nonce))
 
     body_parts.append(_handoff_section(ctx, view))
     sections_drawn.append(("live-handoff", "Taking this to LIVE"))

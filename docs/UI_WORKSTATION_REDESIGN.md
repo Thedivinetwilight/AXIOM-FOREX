@@ -30,8 +30,11 @@ evidence.
   `aria-current='page'`, and the skip link is the first thing Tab reaches.
 * Prose is measured in characters (`max-width:82ch`), not in the width of the
   window.
-* Folds: decisions, simulated fills, run steps, observed latency and the stored
-  book are one click away with their ids, tables and counts intact.
+* Folds: decisions, simulated fills, run steps, observed latency, the stored book,
+  the AX-SCALPER paper lane's review/risk/symbol dumps and every strategy-library
+  template but the first are one click away, with their ids, tables and counts
+  intact. Page heights at 1440 px: `/autopilot` 6456 → 5201, `/strategies`
+  16558 → 7145.
 
 ### Live execution (`axiom_forex/workstation/ui/pages/live.py`, `app.py`)
 
@@ -60,7 +63,7 @@ evidence.
 
 | Check | Result |
 | --- | --- |
-| `pytest tests -q` (whole suite) | **2341 passed in 437.18 s** |
+| `pytest tests -q` (whole suite, final commit) | **2341 passed in 438.06 s** |
 | `tests/test_workstation_dark_workstation.py` (new) | 16 passed |
 | `tests/test_autopilot_ui.py` (3 bridge tests moved to `/live`) | 20 passed |
 | `tests/test_live_workflow.py` (no-adapter wording) | 45 passed with the dark file |
@@ -98,7 +101,9 @@ Screenshots inspected during the work: `/`, `/live`, `/autopilot`,
 `/performance` at 1440 px; `/`, `/live`, `/autopilot`, `/performance`,
 `/positions`, `/health` at 420 px. Two rounds of fixes came from looking at them:
 the triple warning at the top of `/live`, the dark-on-dark primary buttons the
-audit caught at 1.17:1, and the second-tier menu escaping at 1024 px.
+audit caught at 1.17:1, and the second-tier menu escaping at 1024 px. A third
+came from measuring the rendered height of every route: `/strategies` was
+16558 px and `/autopilot` 6456 px before their long tables were folded.
 
 Tables scroll inside their own box on wide screens by design, and tables marked
 `table--stack` become labelled blocks at the phone breakpoint. Tables that are
