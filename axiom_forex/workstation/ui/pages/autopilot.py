@@ -26,20 +26,24 @@ from .. import format as fmt
 from ..components import (
     action_form,
     jump_nav,
+    jump_nav_bar,
     blockers,
     button_link,
     cell,
     chip,
+    deck,
     empty_state,
     facts,
     field,
     layout,
     notice,
     page_head,
+    readout,
     section,
     stat,
     stats,
     table,
+    workgrid,
 )
 from . import common
 from . import runner as runner_page
@@ -226,16 +230,30 @@ def _start_form(ctx: Any, choices: Mapping[str, Any]) -> str:
 
 
 def _control_section(ctx: Any, view: Mapping[str, Any]) -> tuple[str, bool]:
+    """The PAPER command deck: the loop's state, its figures, and its one control.
+
+    It is the same shape as the LIVE deck on purpose — state on the left, figures
+    in one strip, the run control in reach — so the two run pages are read the
+    same way and the lane is the only thing that changes.  Neither control can
+    place a broker order, arm live trading, or change the execution mode.
+    """
+
     state = str(view.get("state") or "IDLE")
     running = state in {"RUNNING", "PREPARING"}
     positions = list(view.get("positions") or ())
     choices = dict(view.get("choices") or {})
+    paper = dict(view.get("paper") or {})
+    account = common.account_view(ctx)
+    quotes = [dict(item) for item in (paper.get("quotes") or ())]
+    fresh = sum(1 for item in quotes if item.get("fresh"))
+    counts = dict(account.get("counts") or {}) if account else {}
+
     if running:
         body = (
             "<div class='actions'>"
             + action_form("autopilot-stop", ctx.action_nonce, "Stop the paper loop", tone="warn")
             + "</div>"
-            "<p class='small muted' style='margin-top:8px'>Stopping ends the loop and leaves "
+            "<p class='small muted' style='margin-top:6px'>Stopping ends the loop and leaves "
             "every open position open and visible below. It does not change the execution "
             "mode and does not touch LIVE.</p>"
         )
@@ -245,7 +263,6 @@ def _control_section(ctx: Any, view: Mapping[str, Any]) -> tuple[str, bool]:
                 "open while the loop runs. Stop the loop first if you mean to close them: "
                 "stopping never closes anything by itself.</p>"
             )
-        tools = chip("LOOP RUNNING", "ok", dot=True)
     else:
         body = _start_form(ctx, choices) if view.get("available") else (
             "<p class='small muted'>The catalog autopilot is not wired into this process, so "
@@ -253,26 +270,55 @@ def _control_section(ctx: Any, view: Mapping[str, Any]) -> tuple[str, bool]:
         )
         if positions:
             body += (
-                "<div class='actions' style='margin-top:12px'>"
+                "<div class='actions' style='margin-top:10px'>"
                 + action_form(
                     "autopilot-flat",
                     ctx.action_nonce,
                     "Close the simulated positions",
                     tone="danger",
                 )
-                + "</div><p class='small muted' style='margin-top:6px'>A separate click, and "
+                + "</div><p class='small muted' style='margin-top:5px'>A separate click, and "
                 "paper only: it closes the simulated book at the current quote, or refuses "
                 "and leaves it alone. Nothing is sent to a broker.</p>"
             )
-        tools = chip("LOOP IDLE", "muted")
+
+    net, net_note = "Unavailable", "no paper account is wired"
+    if account and account.get("available") is not False:
+        net, net_note = _metric_parts(account, "net_pnl")
+    readouts = [
+        readout("Loop", chip(state, STATE_TONE.get(state, "muted"), dot=running),
+                foot="a loop is deciding now" if running else "nothing is looping"),
+        readout(
+            "Open positions",
+            fmt.text(counts.get("open_positions", len(positions))),
+            foot="simulated, on this machine",
+            small=True,
+        ),
+        readout("Net P&L after costs", fmt.text(net), foot=fmt.text(net_note) or "paper ledger", small=True),
+        readout(
+            "Quotes",
+            f"{fresh} of {len(quotes)}" if quotes else "none yet",
+            foot="fresh quotes the loop can price",
+            small=True,
+        ),
+        readout(
+            "Execution mode",
+            chip("PAPER", "paper", dot=True),
+            foot="this page can only trade paper",
+            small=True,
+        ),
+    ]
     return (
-        section(
+        deck(
             "Start and stop",
-            body,
-            note="One start for the whole paper workflow and one stop. Neither can place an "
-            "order, arm live trading, or change the execution mode.",
-            tools=tools,
             id="start-stop",
+            lane="paper",
+            state="one start for the whole paper workflow, one stop",
+            note="simulated fills",
+            readouts=readouts,
+            body=body,
+            foot="Neither control can place an order, arm live trading, or change the "
+            "execution mode.",
         ),
         running,
     )
@@ -520,6 +566,15 @@ def _pnl_section(ctx: Any) -> str:
         id="pnl",
         plain=True,
     )
+
+
+def _metric_parts(account: Mapping[str, Any], key: str) -> tuple[str, str]:
+    """A metric as ``(value, note)`` so a readout can show the figure alone."""
+
+    metric = dict((account.get("metric_by_key") or {}).get(key) or {})
+    if not metric.get("available"):
+        return "Unavailable", str(metric.get("note") or "")
+    return str(metric.get("value") or fmt.UNKNOWN), str(metric.get("note") or "")
 
 
 def _metric_or_reason(account: Mapping[str, Any], key: str) -> str:
@@ -1283,7 +1338,7 @@ def render_autopilot(ctx: Any) -> str:
     head = page_head(
         "Paper command center · simulated fills on this machine; LIVE review and arming are on /live",
         "Autopilot",
-        headline,
+        f"{headline} {detail}" if detail.endswith(('.', '!', '?')) else f"{headline} {detail}.",
         badges=_state_chip(state)
         + chip("PAPER · SIMULATED FILLS", "paper", dot=True)
         + common.data_chip(ctx.paper_label),
@@ -1292,7 +1347,7 @@ def render_autopilot(ctx: Any) -> str:
 
     # The run controls, then the record: an operator should not have to scroll a
     # thousand rows of history to press Stop.
-    head += (
+    index = (
         "<nav class='anchor-nav' aria-label='Autopilot sections'>"
         "<a href='#start-stop'>Run</a>"
         "<a href='#pnl'>Paper P&amp;L</a>"
@@ -1304,14 +1359,11 @@ def render_autopilot(ctx: Any) -> str:
     )
 
     sections_drawn: list[tuple[str, str]] = [("start-stop", "Start and stop")]
-    body_parts: list[str] = [
-        notice(
-            headline,
-            f"{detail} {fmt.text(str(view.get('note') or ''))}".strip(),
-            tone=tone,
+    body_parts: list[str] = [control_html]
+    if view.get("note"):
+        body_parts.append(
+            "<p class='small muted'>" + fmt.text(str(view.get("note") or "")) + "</p>"
         )
-    ]
-    body_parts.append(control_html)
 
     blocker_items = runner_page.blocker_items(view.get("blockers") or ())
     if blocker_items:
@@ -1396,22 +1448,48 @@ def render_autopilot(ctx: Any) -> str:
             ]
         )
 
+    # The money, straight after the controls: it is the figure an operator checks
+    # between cycles, so it is not below a hundred rows of reference material.
     body_parts.append(_pnl_section(ctx))
     sections_drawn.append(("pnl", "Paper P&L"))
 
+    # Reference material folds.  Its ids, tables and full text stay in the
+    # document, so the record is still one click away and still greppable.
+    body_parts.append(
+        common.fold(
+            "AX-SCALPER PAPER · live MT5 quotes",
+            _scalper_section(view, nonce),
+            count="separate paper engine",
+            note="upper case, explicit session, and no route to LIVE",
+        )
+    )
     sections_drawn.append(("scalper-paper", "AX-SCALPER PAPER"))
-    body_parts.append(_scalper_section(view, nonce))
 
-    body_parts.append(_handoff_section(ctx, view))
+    body_parts.append(
+        common.fold(
+            "Taking this to LIVE: what is missing",
+            _handoff_section(ctx, view),
+            count="a review, not a button",
+            note="the LIVE controls live on /live",
+        )
+    )
     sections_drawn.append(("live-handoff", "Taking this to LIVE"))
 
-    body_parts.append(runner_page.sections(ctx))
+    runner_html = runner_page.sections(ctx)
+    if runner_html:
+        body_parts.append(
+            common.fold(
+                "Paper strategy runner",
+                runner_html,
+                note="paper fills only, never live",
+            )
+        )
     sections_drawn.append(("runner", "Paper strategy runner"))
 
     kronos_html = _kronos_section(view, nonce)
     if kronos_html:
         sections_drawn.append(("kronos", "Kronos"))
-        body_parts.append(kronos_html)
+        body_parts.append(common.fold("Kronos forecast input", kronos_html, note="optional, never a trader"))
     latency_html = _latency_section(view)
     if latency_html:
         sections_drawn.append(("latency", "Observed latency"))
@@ -1438,7 +1516,7 @@ def render_autopilot(ctx: Any) -> str:
             tone="paper" if False else "info",
         )
     )
-    return head + layout("".join(body_parts), aside)
+    return head + index + workgrid("".join(body_parts), aside)
 
 
 def _status_pairs(ctx: Any, view: Mapping[str, Any]) -> list[tuple[str, str]]:

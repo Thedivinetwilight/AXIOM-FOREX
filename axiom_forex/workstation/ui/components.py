@@ -146,6 +146,115 @@ def layout(*columns: str, wide: bool = False) -> str:
     )
 
 
+def workgrid(main: str, aside: str) -> str:
+    """The working surface: the page's own body, then its compass and status.
+
+    ``aside`` is a real ``<aside>`` landmark rather than a decorated div, it
+    sticks under the status strip on a desktop and falls below the body on a
+    tablet, and it never holds a control that belongs to another lane.
+    """
+
+    if not aside:
+        return f"<div class='layout layout--single'><div class='col'>{main}</div></div>"
+    return (
+        f"<div class='layout'><div class='col'>{main}</div>"
+        f"<aside class='col col--aside' aria-label='Page status'>{aside}</aside></div>"
+    )
+
+
+#: Tones a readout may use; the token pairs live in the stylesheet.
+READOUT_TONES = ("live", "paper", "ok", "warn")
+
+
+def readout(label: str, value: str, *, foot: str = "", tone: str = "", small: bool = False) -> str:
+    """One figure in a command deck: label above, value, then its own note."""
+
+    klass = "ro" + (f" ro--{tone}" if tone in READOUT_TONES else "")
+    value_klass = "v v--sm" if small else "v"
+    foot_html = f"<span class='f'>{foot}</span>" if foot else ""
+    return (
+        f"<div class='{klass}'><span class='k'>{escape(label)}</span>"
+        f"<span class='{value_klass}'>{value}</span>{foot_html}</div>"
+    )
+
+
+def deck(
+    title: str,
+    *,
+    id: str = "",
+    lane: str = "",
+    state: str = "",
+    note: str = "",
+    actions: str = "",
+    readouts: Sequence[str] = (),
+    body: str = "",
+    foot: str = "",
+) -> str:
+    """The command deck a run page opens with: state, figures and its controls.
+
+    Every run page has one, in the same place and the same shape, so an operator
+    who has learnt /live can read /autopilot without relearning the page.  The
+    deck's left edge carries the lane (red is LIVE, blue is PAPER), the read-outs
+    are measured facts passed in by the caller, and nothing here is inferred from
+    a colour: a value that is unavailable says so in words.
+    """
+
+    lane_class = " deck--live" if lane == "live" else " deck--paper" if lane == "paper" else ""
+    if lane == "warn":
+        lane_class = " deck--warn"
+    elif lane == "ok":
+        lane_class = " deck--ok"
+    title_id = f" id='{attr(id)}'" if id else ""
+    lane_chip = ""
+    if lane in {"live", "paper"}:
+        lane_chip = (
+            f"<span class='lane lane--{attr(lane)}'>"
+            f"<span class='dot' aria-hidden='true'></span>"
+            f"{'LIVE' if lane == 'live' else 'PAPER'}</span>"
+        )
+    state_chip = f"<span class='sub'>{state}</span>" if state else ""
+    note_html = f"<span class='sub'>{note}</span>" if note else ""
+    head = (
+        "<div class='deck-head'><div class='deck-title'>"
+        f"<h2{title_id}>{escape(title)}</h2>{lane_chip}{state_chip}{note_html}"
+        "</div>"
+        + (f"<div class='deck-actions'>{actions}</div>" if actions else "")
+        + "</div>"
+    )
+    figures = "".join(item for item in readouts if item)
+    readout_html = f"<div class='deck-readouts'>{figures}</div>" if figures else ""
+    body_html = f"<div class='deck-body'>{body}</div>" if body else ""
+    foot_html = f"<div class='deck-foot'>{foot}</div>" if foot else ""
+    return (
+        f"<section class='deck{lane_class}'"
+        + (f" aria-labelledby='{attr(id)}'" if id else "")
+        + f">{head}{readout_html}{body_html}{foot_html}</section>"
+    )
+
+
+def kpi(items: Sequence[tuple[str, str, str]]) -> str:
+    """A row of labelled figures that is one instrument strip, not a tile wall."""
+
+    rows = "".join(
+        f"<div><span class='k'>{escape(label)}</span><span class='v'>{value}</span>"
+        + (f"<span class='f'>{foot}</span>" if foot else "")
+        + "</div>"
+        for label, value, foot in items
+    )
+    return f"<div class='kpi'>{rows}</div>" if rows else ""
+
+
+def jump_nav_bar(targets: Sequence[tuple[str, str]]) -> str:
+    """The page's own compass: one sticky row of anchors, only for real sections."""
+
+    if len(targets) < 2:
+        return ""
+    links = "".join(
+        f"<a href='#{attr(slug)}'>{escape(label)}</a>" for slug, label in targets
+    )
+    return f"<nav class='anchor-nav' aria-label='On this page'>{links}</nav>"
+
+
 # --------------------------------------------------------------------- facts
 def facts(
     pairs: Sequence[tuple[str, str]],

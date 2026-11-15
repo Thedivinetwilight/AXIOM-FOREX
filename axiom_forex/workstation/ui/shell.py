@@ -194,8 +194,48 @@ def _nav_links(ctx: Any, pages: Sequence[str], by_page: Mapping[str, tuple[str, 
             continue
         href, label = by_page[page]
         current = " aria-current='page'" if str(getattr(ctx, "page", "")) == page else ""
-        links.append(f"<a href='{escape(href)}'{current}>{escape(label)}</a>")
+        # The lane a link opens is on the link itself, so the current LIVE entry
+        # is marked in the LIVE colour without any page having to say so twice.
+        lane = " data-lane='live'" if page == "live" else ""
+        links.append(f"<a href='{escape(href)}'{current}{lane}>{escape(label)}</a>")
     return links
+
+
+def lane_band(ctx: Any) -> str:
+    """The one lane marker every screen carries: LIVE, PAPER, or sample data.
+
+    It is a word first and a colour second, and it is derived from the same facts
+    as the chips beside it: a simulated terminal is never labelled LIVE, and a
+    route that merely *reviews* the live path says so in its own scope line.
+    """
+
+    page = str(getattr(ctx, "page", ""))
+    simulated = bool(getattr(ctx.terminal, "simulated", False))
+    if simulated:
+        return (
+            "<span class='lane lane--sim'><span class='dot' aria-hidden='true'></span>"
+            "SIMULATED DATA</span>"
+        )
+    if page == "live":
+        return (
+            "<span class='lane lane--live'><span class='dot' aria-hidden='true'></span>"
+            "LIVE · REAL BROKER</span>"
+        )
+    if page_scope(ctx)[2] == "paper":
+        return (
+            "<span class='lane lane--paper'><span class='dot' aria-hidden='true'></span>"
+            "PAPER · SIMULATED FILLS</span>"
+        )
+    mode = str((ctx.execution_mode or {}).get("mode", "PAPER")).upper()
+    if mode == "LIVE" and getattr(ctx, "live_effective", False):
+        return (
+            "<span class='lane lane--live'><span class='dot' aria-hidden='true'></span>"
+            "LIVE · MT5</span>"
+        )
+    return (
+        "<span class='lane lane--paper'><span class='dot' aria-hidden='true'></span>"
+        "PAPER</span>"
+    )
 
 
 def _rail(ctx: Any) -> str:
@@ -264,9 +304,10 @@ def _strip(ctx: Any) -> str:
         facts.append(("Paper loop", escape(str(summary.get("state") or "IDLE"))))
     mode = str((ctx.execution_mode or {}).get("mode", "PAPER")).upper()
     mode_text = "LIVE" if mode == "LIVE" else "PAPER"
+    mode_tone = " is-live" if mode == "LIVE" else ""
     if mode == "LIVE" and not ctx.live_effective:
         mode_text = "LIVE (not confirmed)"
-    facts.append(("Execution", mode_text))
+        mode_tone = " is-live"
     terminal = ctx.terminal
     if terminal.simulated:
         terminal_text = "simulator preview" if terminal.connected else "simulator idle"
@@ -274,7 +315,6 @@ def _strip(ctx: Any) -> str:
         terminal_text = f"MT5 · {terminal.mode}"
     else:
         terminal_text = "not connected"
-    facts.append(("Terminal", terminal_text))
     account = dict((ctx.extra or {}).get("account") or {})
     quotes = [dict(item) for item in (account.get("quotes") or ())]
     if quotes:
@@ -290,7 +330,14 @@ def _strip(ctx: Any) -> str:
     generated = getattr(ctx, "generated_at", None)
     if generated is not None:
         facts.append(("Read", escape(generated.strftime("%H:%M:%S UTC"))))
-    items = "".join(
+    items = (
+        f"<span class='strip-fact'>{lane_band(ctx)}</span>"
+        f"<span class='strip-fact'><span class='k'>Execution</span>"
+        f"<span class='v{mode_tone}'>{escape(mode_text)}</span></span>"
+        f"<span class='strip-fact'><span class='k'>Terminal</span>"
+        f"<span class='v'>{escape(terminal_text)}</span></span>"
+    )
+    items += "".join(
         f"<span class='strip-fact'><span class='k'>{escape(k)}</span>"
         f"<span class='v'>{v}</span></span>"
         for k, v in facts

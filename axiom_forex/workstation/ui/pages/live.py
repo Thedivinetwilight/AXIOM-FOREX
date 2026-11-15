@@ -32,14 +32,18 @@ from ..components import (
     button_link,
     cell,
     chip,
+    deck,
     empty_state,
     facts,
     field,
+    jump_nav_bar,
     layout,
     notice,
     page_head,
+    readout,
     section,
     table,
+    workgrid,
 )
 from . import runner as runner_page
 from .common import duration_ms, feed_cell, live_latency_facts, live_orders_table
@@ -132,19 +136,29 @@ def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
     continuous = dict(view.get("continuous") or {})
     nonce = fmt.attr(getattr(ctx, "action_nonce", ""))
     if not continuous.get("available"):
-        return section(
+        return deck(
             "Continuous LIVE Autopilot",
-            notice(
+            id="continuous",
+            lane="live",
+            state="not wired into this process",
+            note="continuous, not one-shot",
+            readouts=[
+                readout("Session", "not available", foot="no live bridge", small=True),
+                readout("Order sending", chip("not sending", "muted"), foot="no adapter reached", small=True),
+                readout("Orders recorded", "0", foot="nothing was attempted", small=True),
+                readout("Broker positions", "not read", foot="no terminal touched", small=True),
+                readout("Quote feed", "not measured", foot="no broker quote", small=True),
+            ],
+            body=notice(
                 "No continuous live session is wired into this workstation",
                 fmt.text(str(continuous.get("message") or ""))
                 or "This process cannot run a continuous live session. The PAPER loop, the "
                 "manual arming path and the one-shot intent bridge below are unaffected.",
                 tone="muted",
-            )
+            ),
+            foot="Continuous means a loop decides repeatedly. This workstation has none here, "
+            "so no button on this page pretends it does. "
             + button_link("/autopilot", "PAPER command center", small=True),
-            note="Continuous means a loop decides repeatedly. This workstation has none here, "
-            "so no button on this page pretends it does.",
-            id="continuous",
         )
 
     state = str(continuous.get("state") or "IDLE")
@@ -163,65 +177,38 @@ def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
     timeframe = str(continuous.get("timeframe") or strategy.get("timeframe") or "")
     candidate = str(strategy.get("candidate_id") or continuous.get("candidate_id") or "")
 
-    kpis = "".join(
-        [
-            "<div><span class='k'>Session</span><span class='v'>"
-            + chip(state, "danger" if sending else ("ok" if running else "muted"), dot=running)
-            + "</span><span class='f'>"
-            + ("a loop is deciding now" if running else "no loop is deciding")
-            + "</span></div>",
-            "<div><span class='k'>Order sending</span><span class='v'>"
-            + (chip("SENDING REAL ORDERS", "danger", dot=True) if sending else chip("not sending", "muted"))
-            + "</span><span class='f'>broker adapter preflight decides every order</span></div>",
-            "<div><span class='k'>Orders recorded</span><span class='v'>"
-            + fmt.text(len(orders))
-            + "</span><span class='f'>"
-            + fmt.text(f"{len(unresolved)} unresolved")
-            + "</span></div>",
-            "<div><span class='k'>Broker positions</span><span class='v'>"
-            + fmt.text(continuous.get("open_positions", len(positions)))
-            + "</span><span class='f'>reported by the terminal, not by PAPER</span></div>",
-            "<div><span class='k'>Quote feed</span><span class='v'>"
-            + feed_cell(feed)
-            + "</span><span class='f'>what the strategy read, and how old</span></div>",
-        ]
-    )
-
     account = dict(view.get("account") or {})
     fingerprint = str(account.get("fingerprint") or view.get("account_fingerprint") or "")
-    body = (
-        "<div class='kpi'>" + kpis + "</div>"
-        + facts(
-            [
-                ("What would run", fmt.text(candidate) or "no candidate selected"),
-                (
-                    "Account this session would trade",
-                    chip(str(view.get("account_mode") or "unknown").upper(), "danger" if str(view.get("account_mode") or "").upper() == "REAL" else "warn")
-                    + " "
-                    + (
-                        chip("fingerprint confirmed", "ok", dot=True)
-                        if view.get("armed") and fingerprint
-                        else chip("not confirmed by an arm", "muted")
-                    )
-                    + f" <code>{fmt.text(fingerprint or 'not read')}</code>",
-                ),
-                (
-                    "Session mode",
-                    chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper", dot=True),
-                ),
-                ("Pair and broker symbol", f"{fmt.text(pair) or '—'} · {fmt.text(symbol)}"),
-                ("Timeframe", fmt.text(timeframe) or "not resolved"),
-                (
-                    "Plan matches the selection",
-                    {True: "yes", False: "no", None: "not known"}.get(match, "not known"),
-                ),
-                ("Armed on this account", chip("ARMED", "danger", dot=True) if continuous.get("armed") else chip("Not armed", "muted")),
-                ("Feed detail", fmt.text(str(feed.get("detail") or "not measured"))),
-            ]
-        )
+    body = facts(
+        [
+            ("What would run", fmt.text(candidate) or "no candidate selected"),
+            (
+                "Account this session would trade",
+                chip(str(view.get("account_mode") or "unknown").upper(), "danger" if str(view.get("account_mode") or "").upper() == "REAL" else "warn")
+                + " "
+                + (
+                    chip("fingerprint confirmed", "ok", dot=True)
+                    if view.get("armed") and fingerprint
+                    else chip("not confirmed by an arm", "muted")
+                )
+                + f" <code>{fmt.text(fingerprint or 'not read')}</code>",
+            ),
+            (
+                "Session mode",
+                chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper", dot=True),
+            ),
+            ("Pair and broker symbol", f"{fmt.text(pair) or '—'} · {fmt.text(symbol)}"),
+            ("Timeframe", fmt.text(timeframe) or "not resolved"),
+            (
+                "Plan matches the selection",
+                {True: "yes", False: "no", None: "not known"}.get(match, "not known"),
+            ),
+            ("Armed on this account", chip("ARMED", "danger", dot=True) if continuous.get("armed") else chip("Not armed", "muted")),
+            ("Feed detail", fmt.text(str(feed.get("detail") or "not measured"))),
+        ]
     )
     if blockers:
-        body += "<h3 class='small muted' style='margin:18px 0 6px'>What stops it, and where to fix it</h3>"
+        body += "<h3 style='margin:10px 0 5px'>What stops it, and where to fix it</h3>"
         body += blockers_with_fix(blockers)
     else:
         body += notice(
@@ -240,28 +227,18 @@ def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
         controls.append(
             action_form("autopilot-live-start", nonce, "Start the live session", tone="danger", described_by="continuous-note")
         )
-    if controls:
-        body += "<div class='actions' style='margin-top:12px'>" + "".join(controls) + "</div>"
-    body += (
-        "<p class='small muted' id='continuous-note' style='margin-top:8px'>Starting begins the "
-        "loop this page already wired: every signal passes that path's gate, risk limits, account "
-        "check and unresolved-order lockout. Stopping disarms the plan and stops new submissions; "
-        "any open position stays open in the terminal. Arming happens below, with the phrase.</p>"
-    )
 
+    record = ""
     if orders:
-        body += "<h3 class='small muted' style='margin:18px 0 6px'>Orders the live path recorded</h3>"
-        body += live_orders_table(
+        record += "<h3 style='margin:12px 0 5px'>Orders the live path recorded</h3>"
+        record += live_orders_table(
             orders,
             caption="Every order this session attempted, with the path's own answer and whether "
             "the request is still unresolved at the broker.",
         )
-    if any(value is not None for value in latency.values()):
-        body += "<h3 class='small muted' style='margin:18px 0 6px'>Measured latency</h3>"
-        body += live_latency_facts(latency)
     if positions:
-        body += "<h3 class='small muted' style='margin:18px 0 6px'>Broker positions</h3>"
-        body += table(
+        record += "<h3 style='margin:12px 0 5px'>Broker positions</h3>"
+        record += table(
             (("Ticket", False), ("Symbol", False), ("Volume", False), ("Profit", False)),
             [
                 [
@@ -274,35 +251,83 @@ def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
             ],
             caption="Open positions the terminal reports. Stopping the session never closes them.",
         )
+    if record:
+        body += record
 
-    return section(
-        "Continuous LIVE Autopilot",
-        body,
-        note="The continuous lane: a loop decides repeatedly, and every order it proposes goes "
-        "through the guarded runner and broker adapter this page builds. It is not the one-shot "
-        "bridge below, and it is never started for you.",
-        tools=chip("continuous" if running else "idle", "danger" if running else "muted"),
-        id="continuous",
+    readouts = [
+        readout(
+            "Session",
+            chip(state, "danger" if sending else ("ok" if running else "muted"), dot=running),
+            foot="a loop is deciding now" if running else "no loop is deciding",
+        ),
+        readout(
+            "Order sending",
+            chip("SENDING REAL ORDERS", "danger", dot=True) if sending else chip("not sending", "muted"),
+            foot="adapter preflight decides every order",
+            tone="live" if sending else "",
+        ),
+        readout(
+            "Orders recorded",
+            fmt.text(len(orders)),
+            foot=f"{len(unresolved)} unresolved",
+            small=True,
+        ),
+        readout(
+            "Broker positions",
+            fmt.text(continuous.get("open_positions", len(positions))),
+            foot="terminal-reported, not PAPER",
+            small=True,
+        ),
+        readout("Quote feed", feed_cell(feed), foot="what the strategy read", small=True),
+    ]
+    note = (
+        "Starting begins the loop this page already wired: every signal passes that path's gate, "
+        "risk limits, account check and unresolved-order lockout. Stopping disarms the plan and "
+        "stops new submissions; any open position stays open in the terminal. Arming happens "
+        "below, with the phrase."
     )
-
+    latency_html = ""
+    if any(value is not None for value in latency.values()):
+        latency_html = (
+            "<details class='fold'><summary><span class='fold-h'>Measured latency</span>"
+            "<span class='fold-n'>how long each step of this path took</span></summary>"
+            "<div class='fold-body'>"
+            + live_latency_facts(latency)
+            + "</div></details>"
+        )
+    return deck(
+        "Continuous LIVE Autopilot",
+        id="continuous",
+        lane="live",
+        state="guarded loop · one runner and one broker adapter",
+        note="continuous, not one-shot",
+        actions="".join(controls),
+        readouts=readouts,
+        body=body,
+        foot=f"<span id='continuous-note'>{fmt.text(note)}</span>",
+    ) + latency_html
 
 def _live_status_banner(view: Mapping[str, Any]) -> str:
-    """One line, worded as an answer: will the next signal send a real order?"""
+    """One line, worded as an answer: will the next signal send a real order?
+
+    It is a single row, not a card: the question a real-account page has to answer
+    before anything else is whether the next signal reaches a broker.
+    """
 
     if not view.get("configured"):
         return (
             "<div class='live-banner live-banner--live-off' role='status' data-state='Not sending'>"
-            "<div><strong>No real order can be sent right now</strong>"
-            "<p class='small muted' style='margin:4px 0 0'>There is no MetaTrader 5 trading "
-            "adapter wired in, so nothing on this page can reach a broker at all.</p></div>"
-            f"<div class='spacer'></div>{chip('Not sending', 'ok', dot=True)}</div>"
+            "<span class='lb-title'>No real order can be sent right now</span>"
+            "<span class='lb-note'>There is no MetaTrader 5 trading adapter wired in, so "
+            "nothing on this page can reach a broker at all.</span>"
+            f"<span class='spacer'></span>{chip('Not sending', 'ok', dot=True)}</div>"
         )
     if view.get("next_signal_sends_real_order"):
-        title, label, tone = "The next strategy signal WILL send a real order", "Sending", "danger"
+        title, label, tone, state = "The next strategy signal WILL send a real order", "Sending", "danger", "live-on"
     elif view.get("armed"):
-        title, label, tone = "Armed, but no session is running", "Armed", "warn"
+        title, label, tone, state = "Armed, but no session is running", "Armed", "warn", "armed"
     else:
-        title, label, tone = "No real order can be sent right now", "Not sending", "ok"
+        title, label, tone, state = "No real order can be sent right now", "Not sending", "ok", "off"
     sentence = str(
         (dict(view.get("summary") or {})).get("sentence")
         or (
@@ -319,11 +344,11 @@ def _live_status_banner(view: Mapping[str, Any]) -> str:
         )
     )
     return (
-        f"<div class='live-banner live-banner--live-{'on' if view.get('next_signal_sends_real_order') else ('armed' if view.get('armed') else 'off')}'"
+        f"<div class='live-banner live-banner--live-{state}'"
         f" role='status' data-state='{escape(label)}'>"
-        f"<div><strong>{escape(title)}</strong>"
-        f"<p class='small muted' style='margin:4px 0 0'>{escape(sentence)}</p></div>"
-        f"<div class='spacer'></div>{chip(label, tone, dot=True)}</div>"
+        f"<span class='lb-title'>{escape(title)}</span>"
+        f"<span class='lb-note'>{escape(sentence)}</span>"
+        f"<span class='spacer'></span>{chip(label, tone, dot=True)}</div>"
     )
 
 
@@ -1089,14 +1114,15 @@ def render_live(ctx: Any) -> str:
     configured = bool(view.get("configured"))
     armed = bool(view.get("armed"))
     scalper = dict(view.get("scalper_live") or {})
+    continuous = dict(view.get("continuous") or {})
 
     head = page_head(
         "LIVE · real MetaTrader 5 account. Nothing here is a simulated fill.",
         "Live execution",
-        "One page for the real-account path: the continuous guarded session first, then the "
-        "manual review and arming that authorises it, then the one-shot AX-SCALPER intent. "
-        "Arming writes the plan and sends nothing; every order still passes the adapter's own "
-        "preflight, and PAPER results never authorise anything here.",
+        "The continuous guarded session first, then the manual review and arming that "
+        "authorises it, then the one-shot AX-SCALPER intent. Arming writes the plan and sends "
+        "nothing; every order still passes the adapter's own preflight, and PAPER results never "
+        "authorise anything here.",
         badges=_state_chip(armed, configured)
         + chip("LIVE · REAL BROKER", "danger", dot=True)
         + chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper"),
@@ -1107,17 +1133,70 @@ def render_live(ctx: Any) -> str:
         ),
     )
 
-    banner = (
-        _live_status_banner(view)
-        + "<nav class='anchor-nav' aria-label='Live workflow'>"
-        "<a href='#continuous'>1 · Continuous session</a>"
-        "<a href='#plan'>2 · Plan &amp; arming</a>"
-        "<a href='#session'>3 · Manual session</a>"
-        "<a href='#one-shot'>4 · One-shot intent</a>"
-        "<a href='#account'>5 · Account</a>"
-        "<a href='#stop'>6 · Broker-side stop</a>"
-        "</nav>"
-        + "<details class='disclosure'><summary>Before you use this page</summary>"
+    index = jump_nav_bar(
+        [
+            ("continuous", "1 · Continuous session"),
+            ("plan", "2 · Plan & arming"),
+            ("session", "3 · Manual session"),
+            ("one-shot", "4 · One-shot intent"),
+            ("account", "5 · Account"),
+            ("stop", "6 · Broker-side stop"),
+        ]
+    )
+
+    lifecycle = section(
+        "LIVE workflow at a glance",
+        _lifecycle(view, scalper),
+        note="Each step is answered by the runtime, not by this layout.",
+        id="lifecycle",
+        plain=True,
+    )
+    status = section(
+        "Status",
+        facts(
+            [
+                ("Adapter", chip("configured", "ok") if configured else chip("not configured", "muted")),
+                ("Armed", chip("ARMED", "danger", dot=True) if armed else chip("Not armed", "muted")),
+                (
+                    "Session",
+                    chip(str(view.get("session_state") or continuous.get("state") or "NOT RUNNING"),
+                         "ok" if view.get("session_running") or continuous.get("state") == "RUNNING" else "muted"),
+                ),
+                ("Orders sent", fmt.text(view.get("orders_sent", 0))),
+                ("Unresolved", fmt.text(len(view.get("unresolved") or ())) or "0"),
+                ("Sending real orders", chip("yes", "danger", dot=True) if continuous.get("order_sending") else chip("no", "muted")),
+                ("Broker-reported P&L availability", "see the account section"),
+                ("PAPER", "The PAPER command center is on /autopilot"),
+            ]
+        ),
+        plain=True,
+        id="status",
+    )
+    limits = section(
+        "What this page cannot say",
+        facts(
+            [
+                ("PAPER results", "not a live readiness verdict; they are on /autopilot"),
+                ("P&L", "only the broker's own open-position profit, when it reports one"),
+                ("Retries", "an unknown outcome stops the session; nothing is re-sent"),
+                ("Position management", "this page cannot close or modify a broker position"),
+            ]
+        ),
+        plain=True,
+        id="limits",
+    )
+    elsewhere = section(
+        "PAPER is a different page",
+        "<p class='small'>The PAPER command center is on <a href='/autopilot'>/autopilot</a>: "
+        "simulated fills on this machine, its own ledger, and no route to a broker. Nothing "
+        "here promotes a paper result, and nothing there can arm, submit or close a real "
+        "order.</p>",
+        plain=True,
+        id="paper-handoff",
+    )
+
+    before = (
+        "<details class='disclosure'><summary>Before you use this page</summary>"
         "<p>Everything here acts on a <em>real</em> MetaTrader 5 account. Paper mode is the "
         "default and nothing on this page changes that by itself. Arming writes a plan and "
         "authorises the adapter without sending anything; starting a session can send a real "
@@ -1126,25 +1205,38 @@ def render_live(ctx: Any) -> str:
         "anything on the paper pages. The PAPER command center is on "
         "<a href='/autopilot'>/autopilot</a>; this page never promotes its results.</p></details>"
     )
+
+    warning = (
+        notice(
+            "SIMULATED / SAMPLE DATA in the banner is about the terminal, not about this page",
+            "If the launcher was started with --simulate there is no real terminal, and the "
+            "adapter refuses to arm. Check the banner above before reading any figure here.",
+            tone="muted",
+        )
+        if ctx.terminal.simulated
+        else ""
+    )
+
+    deck_html = continuous_live_section(view, ctx)
+
     if not configured:
-        limits = [
-            ("No MetaTrader 5 trading adapter is wired in", "This workstation cannot send a real order at all. Start it against your own terminal and the adapter, or keep using PAPER."),
+        limits_rows = [
+            (
+                "No MetaTrader 5 trading adapter is wired in",
+                "This workstation cannot send a real order at all. Start it against your own "
+                "terminal and the adapter, or keep using PAPER.",
+            ),
             ("Order entry", "there is no order form on this page, at any mode"),
             ("Arming", "refused: without an adapter there is nothing to arm"),
-            ("The PAPER command center is on /autopilot", "its fills are simulated on this machine"),
+            (
+                "The PAPER command center is on /autopilot",
+                "its fills are simulated on this machine",
+            ),
         ]
-        return head + banner + layout(
-            continuous_live_section(view, ctx)
-            + section(
-                "What is missing",
-                facts(limits),
-                note="No MetaTrader 5 adapter is configured on this workstation, so there is "
-                "no live trading adapter to send with: nothing here can reach a broker. "
-                "Everything on the PAPER side keeps working, and nothing here pretends "
-                "otherwise.",
-                id="limits",
-                plain=True,
-            )
+        main = (
+            _live_status_banner(view)
+            + deck_html
+            + before
             + section(
                 "The exact plan, and arming it",
                 (
@@ -1165,29 +1257,19 @@ def render_live(ctx: Any) -> str:
                 ),
                 id="plan",
             )
+            + _scalper_live_section(view, nonce)
             + broker_stop_settings_section(view, nonce)
-            + _scalper_live_section(view, nonce),
-            section(
-                "LIVE workflow at a glance",
-                _lifecycle(view, scalper),
-                note="Each step is answered by the runtime, not by this layout.",
-                id="lifecycle",
+            + section(
+                "What is missing",
+                facts(limits_rows),
+                note="No MetaTrader 5 adapter is configured on this workstation, so there is no "
+                "live trading adapter to send with: nothing here can reach a broker. Everything "
+                "on the PAPER side keeps working, and nothing here pretends otherwise.",
+                id="missing",
                 plain=True,
             )
-            + section(
-                "Status",
-                facts(
-                    [
-                        ("Adapter", chip("not configured", "muted")),
-                        ("Armed", chip("Not armed", "muted")),
-                        ("Orders sent", "0"),
-                        ("Broker account", "not read: no adapter, so no account was touched"),
-                    ]
-                ),
-                plain=True,
-                id="status",
-            ),
         )
+        return head + index + workgrid(main, lifecycle + status + elsewhere)
 
     positions = [dict(item) for item in (view.get("positions") or ())]
     pnl_rows = [
@@ -1196,62 +1278,39 @@ def render_live(ctx: Any) -> str:
         ("Unresolved broker requests", fmt.text(len(view.get("unresolved") or ()))),
     ]
 
-    aside = (
-        section(
-            "LIVE workflow at a glance",
-            _lifecycle(view, scalper),
-            note="Each step is answered by the runtime, not by this layout.",
-            id="lifecycle",
-            plain=True,
-        )
+    main = (
+        _live_status_banner(view)
+        + warning
+        + stop_warnings(view)
+        + deck_html
+        + before
+        + _plan_section(view, nonce)
+        + _session_section(view, nonce)
+        + _scalper_live_section(view, nonce)
+        + _account_section(view)
+        + broker_stop_settings_section(view, nonce)
+        + _last_path_section(view)
         + section(
-            "Status",
-            facts(
-                [
-                    ("Adapter", chip("configured", "ok") if configured else chip("not configured", "muted")),
-                    ("Armed", chip("ARMED", "danger", dot=True) if armed else chip("Not armed", "muted")),
-                    ("Session", chip(str(view.get("session_state") or "NOT RUNNING"), "ok" if view.get("session_running") else "muted")),
-                    ("Orders sent", fmt.text(view.get("orders_sent", 0))),
-                    ("Unresolved", fmt.text(len(view.get("unresolved") or ())) or "0"),
-                    ("Broker-reported P&L availability", "see the account section"),
-                    ("PAPER", "The PAPER command center is on /autopilot"),
-                ]
+            "Broker-reported P&L and positions",
+            facts(pnl_rows)
+            + (
+                table(
+                    (("Ticket", False), ("Symbol", False), ("Volume", False), ("Profit", False)),
+                    [
+                        [
+                            cell(fmt.text(item.get("ticket") or ""), label="Ticket", mono=True),
+                            cell(fmt.text(item.get("symbol") or ""), label="Symbol"),
+                            cell(fmt.text(item.get("volume") or ""), label="Volume", mono=True),
+                            cell(fmt.text(item.get("profit") or ""), label="Profit", mono=True),
+                        ]
+                        for item in positions
+                    ],
+                    caption="Open positions the terminal reports. This page cannot close them.",
+                )
+                if positions
+                else ""
             ),
-            plain=True,
-            id="status",
-        )
-        + section(
-            "What this page cannot say",
-            facts(
-                [
-                    ("PAPER results", "not a live readiness verdict; they are on /autopilot"),
-                    ("P&L", "only the broker's own open-position profit, when it reports one"),
-                    ("Retries", "an unknown outcome stops the session; nothing is re-sent"),
-                    ("Position management", "this page cannot close or modify a broker position"),
-                ]
-            ),
-            plain=True,
-            id="limits",
+            id="totals",
         )
     )
-
-    main = banner + (
-        notice(
-            "SIMULATED / SAMPLE DATA in the banner is about the terminal, not about this page",
-            "If the launcher was started with --simulate there is no real terminal, and the "
-            "adapter refuses to arm. Check the banner above before reading any figure here.",
-            tone="muted",
-        )
-        if ctx.terminal.simulated
-        else ""
-    )
-    main += stop_warnings(view)
-    main += continuous_live_section(view, ctx)
-    main += _plan_section(view, nonce)
-    main += _session_section(view, nonce)
-    main += _account_section(view)
-    main += _scalper_live_section(view, nonce)
-    main += broker_stop_settings_section(view, nonce)
-    main += _last_path_section(view)
-    main += section("Broker-reported P&L and positions", facts(pnl_rows), id="totals", plain=True)
-    return head + layout(main, aside)
+    return head + index + workgrid(main, lifecycle + status + limits + elsewhere)
