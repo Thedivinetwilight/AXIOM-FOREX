@@ -100,6 +100,80 @@ def _state_chip(armed: bool, configured: bool) -> str:
     return chip("ARMED", "danger", dot=True) if armed else chip("Not armed", "muted")
 
 
+def stop_warnings(view: Mapping[str, Any]) -> str:
+    """Risk the operator must see, which arming does not clear.
+
+    An open position this deployment placed without a broker-side stop is the
+    state the order path refuses to add to, so it is said first and in the
+    danger tone, with the tickets named.  These warnings block no *close*: a
+    position without a stop has to stay closable.
+    """
+
+    warnings = [dict(item) for item in (view.get("warnings") or ())]
+    if not warnings:
+        return ""
+    urgent = any(item.get("urgent") for item in warnings)
+    items = "".join(
+        "<li><strong>{}</strong>{}<div class='small muted'>{}</div></li>".format(
+            escape(str(item.get("message") or "")),
+            (
+                f" <code>{escape(', '.join(str(ticket) for ticket in item.get('tickets') or ()))}</code>"
+                if item.get("tickets")
+                else ""
+            ),
+            escape(str(item.get("hint") or "")),
+        )
+        for item in warnings
+    )
+    return notice(
+        "Unprotected exposure" if urgent else "Worth reading",
+        f"<ul class='list' role='list'>{items}</ul>",
+        tone="danger" if urgent else "warn",
+        role="alert",
+    )
+
+
+def broker_stop_state(view: Mapping[str, Any]) -> str:
+    """The broker's own answer about the stop on the positions it holds.
+
+    "Verified by broker" is claimed only when the broker reports a stop on every
+    position this deployment placed; nothing, or a missing one, is said plainly.
+    """
+
+    facts = dict(view.get("broker_stop") or {})
+    if not facts.get("available"):
+        return chip("not checked", "muted") + (
+            " <span class='small muted'>{}</span>".format(
+                escape(str(facts.get("detail") or "no broker position has been read"))
+            )
+        )
+    points = int(facts.get("configured_points") or 0)
+    declared = str(facts.get("declared") or "unspecified")
+    unprotected = [dict(item) for item in (facts.get("unprotected") or ())]
+    if points <= 0:
+        return chip("not configured", "danger", dot=True) + (
+            " <span class='small muted'>no usable distance for this symbol — live entries "
+            "are refused until one is declared under Broker-side stop settings</span>"
+        )
+    if unprotected:
+        tickets = ", ".join(escape(str(item.get("ticket") or "")) for item in unprotected)
+        return chip("unprotected", "danger", dot=True) + (
+            " <span class='small muted'>{} ({} pt) requested · ticket(s) {} report no "
+            "stop loss</span>".format(escape(declared), points, tickets)
+        )
+    checked = int(facts.get("positions_checked") or 0)
+    if checked == 0:
+        return chip("configured", "muted", dot=True) + (
+            " <span class='small muted'>{} ({} pt) · no open position to verify right "
+            "now</span>".format(escape(declared), points)
+        )
+    return chip("verified by broker", "ok", dot=True) + (
+        " <span class='small muted'>{} ({} pt) on {} open position(s)</span>".format(
+            escape(declared), points, checked
+        )
+    )
+
+
 def _account_kind_notice(view: Mapping[str, Any]) -> str:
     kind = str(view.get("account_mode") or "").upper()
     if kind == "REAL":
@@ -330,6 +404,7 @@ def _plan_section(view: Mapping[str, Any], nonce: str) -> str:
 
 
 def _session_section(view: Mapping[str, Any], nonce: str) -> str:
+    protective = dict(view.get("protective_stop") or {})
     controls: list[str] = []
     if view.get("armed"):
         controls.append(action_form("live-stop", nonce, "EMERGENCY STOP — stop sending and disarm", tone="danger"))
@@ -348,6 +423,16 @@ def _session_section(view: Mapping[str, Any], nonce: str) -> str:
             ("Orders sent", fmt.text(view.get("orders_sent", 0))),
             ("Stopped because", fmt.text(view.get("stopped_reason") or "—")),
             ("Unresolved broker requests", fmt.text(len(view.get("unresolved") or [])) or "0"),
+            ("Broker-side stop", broker_stop_state(view)),
+            (
+                "Plan protective stop",
+                (
+                    f"<code>{fmt.text(protective.get('pips'))}</code> pips "
+                    if protective.get("pips")
+                    else "not stated "
+                )
+                + f"<span class='small muted'>{fmt.text(str(protective.get('note') or ''))}</span>",
+            ),
         ]
     ) + "<div class='actions' style='margin-top:12px'>" + "".join(controls) + "</div>"
     body += notice(
@@ -907,6 +992,7 @@ def render_live(ctx: Any) -> str:
         if ctx.terminal.simulated
         else ""
     )
+    main += stop_warnings(view)
     main += _session_section(view, nonce)
     main += _account_section(view)
     main += _plan_section(view, nonce)

@@ -23,7 +23,7 @@ from axiom_forex.strategies.catalog.panel import (
 from axiom_forex.workstation import guide
 from axiom_forex.workstation.app import GET_ROUTES, POST_ACTIONS, WorkstationApp
 from axiom_forex.workstation.setup import SetupWizard
-from axiom_forex.workstation.views import render_page
+from axiom_forex.workstation.ui.render import render_page
 
 from tests.test_catalog_panel import (
     NOW,
@@ -559,26 +559,30 @@ def test_the_guide_calls_a_running_session_ready_and_gives_it_a_stop_action():
 
 
 def test_the_guided_page_is_the_home_page_and_its_actions_are_allowlisted():
-    from axiom_forex.workstation import views
+    from axiom_forex.workstation.ui import NAV, NAV_GROUPS
 
     assert GET_ROUTES["/"] == ("start", "Start paper trading")
-    # The sidebar leads with the page that *runs* the paper test, and the guided
-    # start page stays the home route and the second entry.  Autopilot used to sit
-    # at the bottom of "Advanced", which put the page the whole revamp is built
-    # around behind a group heading for operators who already know the system.
-    assert views.NAV[0][0] == "autopilot"
-    assert views.NAV[1][:2] == ("start", "/")
-    # Essential paper pages first, setup next, everything else behind "Advanced".
-    assert [title for title, _keys in views.NAV_GROUPS] == [
-        "Paper trading",
+    # The rail leads with the page that *runs* the paper test, and the two ways a
+    # session can run sit together before the paper-only pages.  The guided start
+    # page stays the home route; it no longer has to be the second entry, because
+    # ``live`` is now named next to ``autopilot`` rather than hidden under
+    # "Advanced" behind pages an operator has already learned.
+    assert NAV[0][0] == "autopilot"
+    assert NAV[1][:2] == ("live", "/live")
+    assert ("start", "/") in [entry[:2] for entry in NAV]
+    # What runs a session first, what monitors and sets it up next, and the
+    # rarely-visited pages last.
+    assert [title for title, _keys in NAV_GROUPS] == [
+        "Run",
+        "Monitor",
         "Set up",
         "Advanced",
     ]
-    assert views.NAV_GROUPS[0][1][:2] == ("autopilot", "start")
+    assert NAV_GROUPS[0][1][:2] == ("autopilot", "live")
     # Every navigation entry is in exactly one group, and every group names real
-    # entries: a link nobody grouped would never be drawn in the sidebar.
-    grouped = [key for _title, keys in views.NAV_GROUPS for key in keys]
-    assert grouped == [entry[0] for entry in views.NAV]
+    # entries: a link nobody grouped would never be drawn in the rail.
+    grouped = [key for _title, keys in NAV_GROUPS for key in keys]
+    assert grouped == [entry[0] for entry in NAV]
     # The classic overview is still reachable, and reachable on purpose.
     assert GET_ROUTES["/overview"] == ("overview", "Overview")
     # The page only posts actions the workstation already had.
@@ -688,16 +692,14 @@ def test_a_blocked_paper_runner_states_its_own_reason_on_the_start_page(tmp_path
     assert steps["paper"]["state"] == "blocked"
 
 
-def test_every_navigation_link_is_grouped_rendered_and_has_an_icon():
-    from axiom_forex.workstation import views
+def test_every_navigation_link_is_grouped_and_served():
+    from axiom_forex.workstation.ui import NAV, NAV_GROUPS
+    from axiom_forex.workstation.ui.render import PAGES
 
-    keys = [key for key, _href, _label in views.NAV]
-    grouped = [key for _title, group in views.NAV_GROUPS for key in group]
-    # A link that is not grouped would silently disappear from the sidebar.
+    keys = [key for key, _href, _label in NAV]
+    grouped = [key for _title, group in NAV_GROUPS for key in group]
+    # A link that is not grouped would silently disappear from the rail.
     assert sorted(grouped) == sorted(keys)
     assert len(set(grouped)) == len(grouped)
-    # Every one is served: by the legacy table, or by the redesign's registry.
-    from axiom_forex.workstation.ui.render import PAGES as REDESIGNED
-
-    assert all(key in views.ICONS for key in keys)
-    assert all(key in views.PAGES or key in REDESIGNED for key in keys)
+    # Every one is served by the one registry, and nothing is drawn by a legacy map.
+    assert all(key in PAGES for key in keys)

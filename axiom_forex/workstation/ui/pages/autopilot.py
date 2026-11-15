@@ -486,6 +486,23 @@ def _positions_section(paper: Mapping[str, Any]) -> str:
 
 def _pnl_section(ctx: Any) -> str:
     account = common.account_view(ctx)
+    if not account or account.get("available") is False:
+        # No ledger reading is not a ledger of zeros: say what could not be read.
+        return section(
+            "Paper P&L",
+            notice(
+                "The paper ledger could not be read",
+                fmt.text(
+                    str(account.get("error") or account.get("message") or "")
+                    or "No paper account is wired into this process, so no paper figure is "
+                    "shown and none is estimated."
+                ),
+                tone="warn",
+            ),
+            tools=button_link("/performance", "Open Performance", small=True),
+            id="pnl",
+            plain=True,
+        )
     rows = [
         ("Open positions", f"{int((account.get('counts') or {}).get('open_positions') or 0):,}"),
         ("Closed trades", f"{int((account.get('counts') or {}).get('closed_trades') or 0):,}"),
@@ -630,6 +647,33 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
         controls.append(
             action_form("connect", nonce, "Connect (observe only)")
         )
+    symbol_choices = [
+        (
+            str(item.get("broker_symbol") or ""),
+            str(item.get("broker_symbol") or "")
+            + (f" · {item.get('pair')}" if item.get("pair") else ""),
+        )
+        for item in (scalper.get("symbols") or ())
+        if isinstance(item, Mapping) and item.get("broker_symbol")
+    ]
+    picker = ""
+    if symbol_choices:
+        # The exact names the terminal reports: nothing is guessed, and the
+        # observer only ever watches a symbol the operator chose here.
+        picker = action_form(
+            "scalper-paper-select-symbol",
+            nonce,
+            "Watch this exact symbol",
+            fields=field(
+                "symbol",
+                "Terminal-verified symbol",
+                kind="select",
+                value=str(config.get("symbol") or ""),
+                options=symbol_choices,
+                hint="Exactly the broker name, as the terminal reports it.",
+                field_id="scalper-symbol",
+            ),
+        )
 
     start_note = ""
     if state != "RUNNING" and not scalper.get("start_allowed") and not scalper.get("observation_start_allowed") and not scalper.get("resume_exact_allowed"):
@@ -679,15 +723,27 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
         + "".join(controls)
         + "</div>"
         + start_note
+        + picker
         + "<h3 class='small muted' style='margin:18px 0 6px'>Strategy review — evidence and policy decision</h3>"
         + (
             facts(
                 [
-                    ("Result", chip(str(review.get("status") or "NOT_APPROVED"), "ok" if review.get("trade_admission_open") else "warn")),
+                    (
+                        "Result",
+                        chip(
+                            str(
+                                review.get("status")
+                                or review.get("decision")
+                                or "NOT_APPROVED"
+                            ),
+                            "ok" if review.get("trade_admission_open") else "warn",
+                        ),
+                    ),
                     ("Reason", fmt.text(review.get("reason") or review.get("message") or "—")),
                     ("Evidence", fmt.text(review.get("evidence") or "—")),
                 ]
             )
+            + _review_candidates(review)
             if review
             else empty_state("No strategy review", "No review has been recorded for this observer.")
         )
@@ -719,8 +775,10 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     body += notice(
         "This PAPER page cannot arm, submit, or close a broker order.",
         "AX-SCALPER → LIVE is blocked here by design: it does not transfer, approve, or arm "
-        "anything. LIVE remains a separate workflow on <a href='/live'>/live</a>, where the "
-        "plan is reviewed, the account confirmed and the phrase typed.",
+        "anything, and the typed intent contract is not an execution route — it is a "
+        "document, and nothing on this page sends it. LIVE remains a separate workflow on "
+        "<a href='/live'>/live</a>, where the plan is reviewed, the account confirmed and "
+        "the phrase typed.",
         tone="muted",
     )
 
@@ -735,12 +793,55 @@ def _scalper_section(view: Mapping[str, Any], nonce: str) -> str:
 
 
 # -------------------------------------------------------------------- LIVE
+def _feed_cell(feed: Mapping[str, Any]) -> str:
+    """The bridge's own feed: fresh, stale, or not measured -- never assumed."""
+
+    if not feed:
+        return "not measured"
+    fresh = feed.get("fresh")
+    if fresh is None:
+        return chip("not measured", "muted")
+    age = feed.get("age_seconds")
+    age_text = "age unknown" if age is None else f"{float(age):.1f}s old"
+    return (
+        chip("fresh", "ok", dot=True) if fresh else chip("stale", "danger", dot=True)
+    ) + (
+        " <span class='small muted'>{} · {} · {}</span>".format(
+            fmt.text(age_text),
+            fmt.text(str(feed.get("source") or "")),
+            fmt.text(str(feed.get("symbol") or "")),
+        )
+    )
+
+
+def _ms(value: Any) -> str:
+    """A duration the live path measured, or the words for one it did not."""
+
+    if value is None or value == "":
+        return "not measured by this path"
+    try:
+        return f"{float(value):.1f} ms"
+    except (TypeError, ValueError):
+        return "not measured by this path"
+
+
 def _handoff_section(ctx: Any, view: Mapping[str, Any]) -> str:
     handoff = dict(view.get("handoff") or {})
     live = dict(view.get("live") or {})
     requirements = [str(item) for item in (handoff.get("requirements") or ())]
     proposed = [dict(item) for item in (live.get("proposed") or ())]
     per_order = str(handoff.get("per_order_checks") or "")
+
+    state = str(live.get("state") or "IDLE")
+    sending = bool(live.get("order_sending"))
+    running = state in {"RUNNING", "STARTING"} or bool(live.get("running"))
+    # The bridge's own refusals decide whether the control may be drawn; the
+    # handoff's are advisory (what taking this to LIVE would still require), so
+    # they are shown when the bridge reports none of its own.
+    own_blockers = [dict(item) for item in (live.get("blockers") or ())]
+    blockers_list = own_blockers or [dict(item) for item in (handoff.get("blockers") or ())]
+    orders = [dict(item) for item in (live.get("orders") or ())]
+    latency = dict(live.get("latency") or {})
 
     body = notice(
         "LIVE is never automatic",
@@ -749,7 +850,60 @@ def _handoff_section(ctx: Any, view: Mapping[str, Any]) -> str:
         "are on <a href='/live'>/live</a>; this list is what is still missing.",
         tone="warn",
     )
-    body += blockers(runner_page.blocker_items(live.get("blockers") or handoff.get("blockers") or ()))
+    if not live.get("available"):
+        body += notice(
+            "The live bridge is not wired into this workstation",
+            fmt.text(str(live.get("message") or ""))
+            or "This process cannot start a live session from here. The Live execution page "
+            "keeps its own review, arming and start controls.",
+            tone="muted",
+        )
+    if live.get("message"):
+        body += notice(
+            "The live path says",
+            fmt.text(str(live.get("message"))),
+            tone="danger" if sending else ("warn" if own_blockers else "ok"),
+        )
+    if live.get("available"):
+        # The bridge's own state, in the two words that matter: is this loop able
+        # to send a real order right now, and is the plan the one the paper test
+        # selected?  Nothing here is inferred from the paper side.
+        open_positions = int(live.get("open_positions") or 0)
+        position_rows = (
+            [
+                ("Open positions in the terminal", f"{open_positions:,}"),
+                (
+                    "Those positions",
+                    "Stopping the session never closes them; only the terminal or the broker can.",
+                ),
+            ]
+            if open_positions
+            else [("Open positions in the terminal", "none")]
+        )
+        body += facts(
+            [
+                ("LIVE session", chip(state, "danger" if sending else "muted", dot=sending)),
+                (
+                    "Sending real orders",
+                    chip("SENDING REAL ORDERS", "danger", dot=True)
+                    if sending
+                    else chip("not sending", "muted"),
+                ),
+                (
+                    "Plan matches the selection",
+                    {True: "yes", False: "no", None: "not known"}.get(
+                        live.get("plan_matches_selection"), "not known"
+                    ),
+                ),
+                *position_rows,
+                ("Feed", _feed_cell(live.get("feed") or {})),
+                (
+                    "Feed detail",
+                    fmt.text(str(dict(live.get("feed") or {}).get("detail") or "not measured")),
+                ),
+            ]
+        )
+    body += blockers(runner_page.blocker_items(blockers_list))
     if requirements:
         body += (
             "<h3 class='small muted' style='margin:18px 0 6px'>What a live order would still require</h3>"
@@ -766,24 +920,78 @@ def _handoff_section(ctx: Any, view: Mapping[str, Any]) -> str:
     if per_order:
         body += f"<p class='small muted' style='margin-top:10px'>{fmt.text(per_order)}</p>"
 
+    if orders:
+        body += (
+            "<h3 class='small muted' style='margin:18px 0 6px'>Orders the live path recorded</h3>"
+            + table(
+                (("Request", False), ("At", False), ("Status", False), ("Refusal", False),
+                 ("Detail", False), ("Unresolved", False)),
+                [
+                    [
+                        cell(fmt.text(item.get("request_id") or ""), label="Request", mono=True),
+                        cell(fmt.text(item.get("at") or ""), label="At", mono=True),
+                        cell(fmt.text(item.get("status") or ""), label="Status"),
+                        cell(fmt.text(item.get("refusal") or "—"), label="Refusal"),
+                        cell(fmt.text(item.get("detail") or "—"), label="Detail"),
+                        cell(fmt.text("yes" if item.get("unresolved") else "no"), label="Unresolved"),
+                    ]
+                    for item in orders
+                ],
+                caption="Every order the live path attempted in this session, with its own answer.",
+            )
+        )
+    if latency:
+        body += (
+            "<h3 class='small muted' style='margin:18px 0 6px'>Measured latency</h3>"
+            + facts(
+                [
+                    (
+                        "Decision",
+                        _ms(latency.get("decision_ms")),
+                    ),
+                    ("Submission call", _ms(latency.get("submit_ms"))),
+                    ("Session start", _ms(latency.get("start_ms"))),
+                    ("Reading this page", _ms(latency.get("view_ms"))),
+                ]
+            )
+            + "<p class='small muted'>Measured on this machine, in this process. Not a fill "
+            "time, not a broker measurement, and not a promise about execution speed.</p>"
+        )
+
     controls = []
-    if live.get("available") and live.get("enabled"):
-        action = "autopilot-live-stop" if live.get("running") else "autopilot-live-start"
-        label = "Stop the live session" if live.get("running") else "Start the live session"
+    if running:
         controls.append(
             action_form(
-                action,
+                "autopilot-live-stop",
                 ctx.action_nonce,
-                label,
-                tone="danger" if not live.get("running") else "warn",
+                "Stop the live session",
+                tone="warn",
                 described_by="handoff-note",
             )
         )
+    elif live.get("available") and not own_blockers:
+        controls.append(
+            action_form(
+                "autopilot-live-start",
+                ctx.action_nonce,
+                "Start the live session",
+                tone="danger",
+                described_by="handoff-note",
+            )
+        )
+    elif live.get("available"):
+        first = own_blockers[0]
+        body += (
+            "<p class='small'><strong>Start is disabled:</strong> "
+            f"<code>{fmt.text(first.get('reason') or 'a prerequisite is missing')}</code> — "
+            f"{fmt.text(first.get('message') or '')}</p>"
+        )
     body += (
         "<p class='small muted' id='handoff-note' style='margin-top:10px'>Starting the live "
-        "session here only begins the loop /live already wired: it sends nothing, arms "
-        "nothing, and picks no strategy, symbol, size or limit. Without that wiring there is "
-        "no control at all.</p>"
+        "session here only begins the loop /live already wired: every signal still passes "
+        "that path's own gate, risk limits, account check and unresolved-order lockout. "
+        "Stopping it disarms the plan and stops new submissions; any open position stays "
+        "open in the terminal. Without that wiring there is no control at all.</p>"
     )
     if controls:
         body += "<div class='actions' style='margin-top:8px'>" + "".join(controls) + "</div>"
@@ -940,11 +1148,16 @@ def _stored_section(view: Mapping[str, Any], nonce: str = "") -> str:
         )
     if not parts:
         return ""
+    note = (
+        "The book that survives a restart. It is read, never merged into the running "
+        "loop's own list."
+    )
+    if stored.get("available") is not False and positions and not stored.get("blocked"):
+        note += " Starting the paper loop resumes them exactly as they are stored."
     return section(
         "Open simulated positions, as stored on disk",
         "".join(parts),
-        note="The book that survives a restart. It is read, never merged into the running "
-        "loop's own list.",
+        note=note,
         id="stored",
     )
 
@@ -963,6 +1176,31 @@ def _seconds(value: Any) -> str:
         return f"{float(value):.3f}"
     except (TypeError, ValueError):
         return fmt.text(value)
+
+
+def _review_candidates(review: Mapping[str, Any]) -> str:
+    """Each candidate the review looked at, and why it was or was not admitted."""
+
+    candidates = [dict(item) for item in (review.get("candidates") or ())]
+    if not candidates:
+        return ""
+    return "<h4 class='small muted' style='margin:14px 0 6px'>Every candidate the review saw</h4>" + table(
+        (("Candidate", False), ("Family", False), ("Eligible", False), ("Reason", False)),
+        [
+            [
+                cell(fmt.text(item.get("name") or "—"), label="Candidate"),
+                cell(fmt.text(item.get("family") or "—"), label="Family"),
+                cell(
+                    chip("eligible", "ok") if item.get("eligible") else chip("not eligible", "warn"),
+                    label="Eligible",
+                ),
+                cell(fmt.text(item.get("reason") or "—"), label="Reason"),
+            ]
+            for item in candidates
+        ],
+        caption="Nothing is admitted without recorded evidence; a refusal names what is missing.",
+        dense=True,
+    )
 
 
 def _recovery_items(recovery: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

@@ -21,11 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from axiom_forex.paper_runner.live_workflow import LiveTrading
-from axiom_forex.workstation.views import (
-    _broker_stop_cell,
-    _live_blockers,
-    _live_session_card,
-)
+from axiom_forex.workstation.ui.pages import live as live_page
 
 MAGIC = 26081001
 
@@ -162,11 +158,12 @@ def test_a_configured_and_protected_book_warns_about_nothing():
 
 
 def card(view):
-    return _live_session_card(
+    return live_page._session_section(
         {
             "protective_stop": {"pips": "20", "note": "a limit AXIOM watches"},
             **view,
-        }
+        },
+        "nonce",
     )
 
 
@@ -175,6 +172,9 @@ def test_the_page_separates_the_plan_limit_from_the_broker_stop():
     assert "Plan protective stop" in html
     assert "Broker-side stop" in html
     assert "verified by broker" in html
+    # Two different things, in two different rows: the plan's own pips limit and
+    # what the broker reports on the positions it holds.
+    assert "a limit AXIOM watches" in html
 
 
 @pytest.mark.parametrize(
@@ -186,34 +186,75 @@ def test_the_page_separates_the_plan_limit_from_the_broker_stop():
     ],
 )
 def test_the_stop_cell_says_what_is_actually_known(kwargs, expected):
-    html = _broker_stop_cell({"broker_stop": facts(**kwargs)})
+    html = live_page.broker_stop_state({"broker_stop": facts(**kwargs)})
     assert expected in html
 
 
 def test_the_stop_cell_never_claims_a_check_that_did_not_happen():
-    html = _broker_stop_cell({"broker_stop": LiveTrading()._broker_stop_facts()})
+    html = live_page.broker_stop_state({"broker_stop": LiveTrading()._broker_stop_facts()})
     assert "not checked" in html
     assert "verified" not in html
 
 
 def test_an_unprotected_position_reaches_the_page_as_a_danger_notice():
-    page = _live_blockers(
-        {
-            "blockers": [],
-            "warnings": warnings(positions=[position(7011)]),
-        }
-    )
+    page = live_page.stop_warnings({"warnings": warnings(positions=[position(7011)])})
     assert "notice--danger" in page
     assert "Unprotected exposure" in page
     assert "7011" in page
-    # An urgent warning must never sit above "nothing stands in the way".
-    assert "Every arming precondition holds" not in page
-    assert "No arming precondition is missing" in page
-    assert "An entry is still refused while the warning above stands" in page
+    assert "role='alert'" in page
+    # The warning says the entry gate is closed, and that the gate is re-checked
+    # for every order rather than only on this page.
+    assert "No new entry will be sent" in page
+    assert "will not invent a stop" in page
+
+
+def _served_page_holding_one_unprotected_position():
+    from axiom_forex.workstation.app import WorkstationApp
+    from tests.test_workstation_ui import simulated_wizard
+
+    class _Live:
+        """The live path's own view, wired into the workstation unchanged."""
+
+        def view(self):
+            return {
+                "configured": True,
+                "armed": True,
+                "mode": "LIVE",
+                "live_effective": True,
+                "session_running": False,
+                "account_mode": "DEMO",
+                "positions": [{"symbol": "EURUSD.pro", "side": "BUY", "volume": "0.10"}],
+                "plan": {"present": False},
+                "protective_stop": {"pips": "20", "note": "a limit AXIOM watches"},
+                "broker_stop": facts(positions=[position(7011)]),
+                "warnings": warnings(positions=[position(7011)]),
+            }
+
+    app = WorkstationApp(wizard=simulated_wizard())
+    app.live = _Live()
+    return app.page("/live")
+
+
+def test_an_unprotected_position_reaches_the_served_page_as_a_danger_notice():
+    status, html = _served_page_holding_one_unprotected_position()
+
+    assert int(status) == 200
+    assert "notice--danger" in html
+    assert "Unprotected exposure" in html
+    assert "7011" in html
+    assert "No new entry will be sent" in html
+    # The two stops are still two separate rows, and the broker's own answer is
+    # not dressed up as "verified" while a position has no stop.
+    assert "Plan protective stop" in html
+    assert "a limit AXIOM watches" in html
+    assert "verified by broker" not in html
 
 
 def test_only_an_unconfigured_distance_is_a_softer_notice():
-    page = _live_blockers({"blockers": [], "warnings": warnings(points=0)})
+    page = live_page.stop_warnings({"warnings": warnings(points=0)})
     assert "Unprotected exposure" not in page
-    # Nothing is unprotected, so the ordinary "you may arm" sentence is still true.
-    assert "Every arming precondition holds" in page
+    assert "notice--warn" in page
+    assert "Worth reading" in page
+    assert "will be refused" in page
+    # A protected, configured book warns about nothing at all.
+    assert live_page.stop_warnings({"warnings": []}) == ""

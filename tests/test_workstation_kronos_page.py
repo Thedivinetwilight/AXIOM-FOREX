@@ -118,7 +118,7 @@ def app_with_kronos(tmp_path, **kwargs) -> WorkstationApp:
 
 def test_kronos_has_its_own_route_and_a_navigation_entry():
     assert GET_ROUTES["/kronos"] == ("kronos", "Kronos forecast")
-    from axiom_forex.workstation.views import NAV
+    from axiom_forex.workstation.ui import NAV
 
     assert any(key == "kronos" and href == "/kronos" for key, href, _label in NAV)
     # It is a separate page from provider setup and from the live path.

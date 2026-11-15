@@ -2,7 +2,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from axiom_forex.workstation.app import POST_ACTIONS, WorkstationApp
-from axiom_forex.workstation.views import _render_scalper_paper_card
+from axiom_forex.workstation.ui.pages.autopilot import render_scalper_panel
+
+
+def _render_scalper_paper_card(view, nonce):
+    """The panel the Autopilot page draws for one scalper status, in isolation."""
+
+    return render_scalper_panel({"scalper_paper": dict(view)}, nonce)
 
 
 class FakeScalper:
@@ -68,10 +74,10 @@ def test_start_stop_handlers_require_nonce_and_return_visible_result():
 def test_autopilot_card_has_explicit_paper_label_and_handled_actions():
     html = _render_scalper_paper_card(FakeScalper().status(), "nonce-value")
     assert "AX-SCALPER PAPER" in html
-    assert "MT5 live quote" in html
+    assert "live MT5 quote" in html
     assert "Start blocked — no PAPER session launched" in html
     assert "action='/actions/scalper-paper-start'" not in html
-    assert "cannot send or close broker orders" in html
+    assert "cannot arm, submit, or close a broker order" in html
     assert "AX-SCALPER → LIVE is blocked" in html
     assert "typed intent contract is not an execution route" in html
     assert "does not transfer, approve, or arm" in html
@@ -84,7 +90,7 @@ def test_connected_without_admission_offers_observation_only_not_paper_decisions
     view["config"] = {"symbol": "EURUSD.pro", "risk": {"max_quote_age_ms": 1500}}
     html = _render_scalper_paper_card(view, "nonce-value")
     assert "Start quote observation only" in html
-    assert "no strategies attached" in html
+    assert "No strategy is enabled in this PAPER observer" in html
     assert "action='/actions/scalper-paper-observe'" in html
     assert "Start admitted PAPER decisions" not in html
 
@@ -100,7 +106,8 @@ def test_replayable_observer_offers_exact_resume_and_keeps_legacy_books_blocked(
                 }])
     html = _render_scalper_paper_card(view, "nonce-value")
     assert "Verify exact replay and resume PAPER observer" in html
-    assert "compare the complete event ledger" in html
+    # The stored ledger is what blocks the resume, and it says so as a blocker.
+    assert "exact_replay_verification_available" in html
     assert "action='/actions/scalper-paper-observe'" in html
 
 
@@ -112,6 +119,8 @@ def test_strategy_review_is_visible_and_symbol_picker_offers_exact_verified_name
     html = _render_scalper_paper_card(view, "n")
     assert "Strategy review" in html and "NO TRADE" in html
     assert "Minimum total / OOS trades" in html
+    # The candidate the review refused is named, with its own reason.
+    assert "Momentum" in html and "no independent OOS evidence" in html
     assert "scalper-paper-select-symbol" in html and "EURUSD.pro" in html
     assert "LIVE remains a separate workflow" in html
 

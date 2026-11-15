@@ -375,8 +375,8 @@ def test_the_autopilot_tables_name_their_columns(tmp_path):
         headers = _headers(_page(app))
         decisions = next(h for c, h in headers.items() if c.startswith("Why every candidate"))
         assert decisions[:3] == ["Candidate", "Symbol", "TF"]
-        steps = next(h for c, h in headers.items() if c.startswith("What the autopilot did"))
-        assert steps[:3] == ["Step", "Ok", "Took (ms)"]
+        steps = next(h for c, h in headers.items() if c.startswith("Every step the run took"))
+        assert steps[:3] == ["Step", "Result", "Took (ms)"]
         strategies = next(h for c, h in headers.items() if c.startswith("One row per symbol"))
         assert "Trades measured" in strategies and "trades_in_evaluation" not in strategies
     finally:

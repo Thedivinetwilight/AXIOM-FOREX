@@ -675,7 +675,7 @@ def test_the_catalog_offer_caps_only_what_it_draws(tmp_path):
 
 
 def test_the_catalog_page_says_how_many_pairs_it_is_not_drawing(tmp_path):
-    from axiom_forex.workstation import views
+    from axiom_forex.workstation.ui.render import render_page
     from tests.test_catalog_view import _app as catalog_app
 
     pairs = [(f"PAIR{index:03d}", "EUR", "USD") for index in range(100)]
@@ -683,7 +683,7 @@ def test_the_catalog_page_says_how_many_pairs_it_is_not_drawing(tmp_path):
     panel = CatalogPanel(root=tmp_path, terminal_provider=lambda: BulkTerminal(specs))
     app = catalog_app(panel)
 
-    html = views.render_page(app._context("quick-setup", "Quick setup"))
+    html = render_page(app._context("quick-setup", "Quick setup"))
     text = " ".join(html.split())
 
     assert "100 currency pair(s) of 351 reported symbol(s)" in text

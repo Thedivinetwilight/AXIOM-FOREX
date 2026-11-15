@@ -1,8 +1,9 @@
-"""Page dispatch: the new pages, one registry, and nothing implicit.
+"""Page dispatch: one registry, one renderer, and nothing implicit.
 
-``PAGES`` is the whole of the redesigned surface.  A page that is not in it yet
-falls back to the legacy renderer, which is the transitional step of a
-page-by-page replacement; the fallback disappears with ``views.py`` itself.
+``PAGES`` is the whole of the served surface: every route in ``app.GET_ROUTES``
+has exactly one entry here, and there is no second map and no fallback beside it.
+An unknown page key renders the observation page rather than raising into the
+server, because that is what the 404 path in ``app.page`` asks for.
 """
 
 from __future__ import annotations
@@ -57,11 +58,7 @@ _REDESIGNED = frozenset(PAGES)
 
 def render_page(ctx: PageContext) -> str:
     page = str(getattr(ctx, "page", ""))
-    renderer = PAGES.get(page)
-    if renderer is None:  # transitional
-        from .. import views as legacy
-
-        return legacy.render_page(ctx)
+    renderer = PAGES.get(page) or PAGES["overview"]
     return shell.document(ctx, renderer(ctx))
 
 

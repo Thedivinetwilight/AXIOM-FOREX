@@ -174,11 +174,16 @@ def test_host_start_stop_persists_fills_as_separate_verified_paper_ledger(tmp_pa
     assert started["ok"] and started["mode"] == "PAPER"
     assert "observation-only" in started["message"].lower()
     assert host.desk.strategies == ()
+    # Wait for the thing the assertions are about: a tick the source has actually
+    # accepted.  Waiting only for ``read`` returned true while the loop still held
+    # the tick, which made this fail under load with a real acceptance pending.
     deadline = time.monotonic() + 2
-    while session.terminal.reads == 0 and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if int(host.status()["quote"]["accepted_ticks_by_symbol"][SYMBOL]) > 0:
+            break
         time.sleep(.005)
-    assert session.terminal.reads > 0
     live_status = host.status()
+    assert session.terminal.reads > 0
     assert live_status["strategy_review"]["eligible_count"] == 0
     assert live_status["quote"]["accepted_ticks_by_symbol"][SYMBOL] > 0
     assert live_status["quote"]["realized_pnl"] == "0.00"

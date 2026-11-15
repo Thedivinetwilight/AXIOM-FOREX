@@ -16,7 +16,7 @@ from pathlib import Path
 
 from axiom_forex.strategies.catalog.autopilot import BLOCKED, Autopilot
 from axiom_forex.strategies.catalog.selection import validation_boundaries
-from axiom_forex.workstation import views
+from axiom_forex.workstation.ui.render import render_page
 from tests.test_catalog_autopilot import (
     FakeReport,
     TIMEFRAME,
@@ -47,7 +47,9 @@ def _autopilot(tmp_path: Path, report: bool = False) -> tuple[Autopilot, object]
 
 
 def _page(app) -> str:
-    return views.render_page(app._context("autopilot", "Autopilot"))
+    """The served page: the one registry, never a legacy composition."""
+
+    return render_page(app._context("autopilot", "Autopilot"))
 
 
 def _text(html: str) -> str:
@@ -96,10 +98,11 @@ def test_the_page_offers_one_start_and_one_stop_and_a_blocked_live_card(tmp_path
 def test_the_forecast_input_is_off_by_default_and_says_it_can_only_veto(tmp_path):
     _autopilot_instance, app = _autopilot(tmp_path)
     text = _text(_page(app))
-    assert "Mode: OFF" in text
+    assert "Mode OFF" in text
     assert "Can create a trade no" in text
     assert "Can only veto yes" in text
-    assert "never required" in text
+    # It is never a requirement: it can cancel an entry and nothing else.
+    assert "never creates a trade" in text
 
 
 def test_a_running_page_shows_the_reasons_the_positions_and_the_measured_latency(tmp_path):
@@ -146,10 +149,12 @@ def test_the_actions_go_through_the_page_and_report_back(tmp_path):
         status, redirect, _message = app.act("autopilot-stop", {"nonce": [app.nonce]})
         assert int(status) == HTTPStatus.SEE_OTHER
         assert autopilot.status()["state"] == "STOPPED"
-        # The result is shown once, and it says nothing was closed.
+        # The page answers the click: the loop is stopped, the stop control is gone
+        # again, and nothing claims a position was closed.
         text = _text(_page(app))
-        assert "The last autopilot action" in text
-        assert "No simulated position is open." in text or "still open" in text
+        assert "Start paper autopilot" in text
+        assert "Stop the paper loop" not in text
+        assert "No simulated position is open" in text or "still open" in text
     finally:
         autopilot.stop()
 
@@ -235,9 +240,10 @@ def test_a_blocked_bridge_shows_the_reason_and_offers_no_start(tmp_path):
     html = _page(app)
     text = _text(html)
 
-    assert "The selected strategy on the existing LIVE path" in text
+    assert "Taking this to LIVE: what is missing" in text
     assert "Start is disabled" in text
     assert "mode_not_live" in text
+    assert "Start the live session" not in text
     assert "action='/actions/autopilot-live-start'" not in html
     assert "SENDING REAL ORDERS" not in text
 

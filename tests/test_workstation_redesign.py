@@ -19,7 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from axiom_forex.workstation import launch, views
+from axiom_forex.workstation import launch
+from axiom_forex.workstation.ui import NAV, PAGE_SCOPES
 from axiom_forex.workstation.app import (
     GET_ROUTES,
     POST_ACTIONS,
@@ -202,7 +203,11 @@ def test_every_route_renders_one_consistent_accessible_frame(tmp_path):
 
 
 def test_all_literal_and_builder_form_targets_are_registered_actions():
-    source = (REPO / "axiom_forex/workstation/views.py").read_text(encoding="utf-8")
+    # Every form target the served pages write, literal or through the builder.
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((REPO / "axiom_forex/workstation/ui").rglob("*.py"))
+    )
     literal_targets = set(re.findall(r"/actions/([a-z0-9-]+)", source))
     builder_targets = {
         match
@@ -214,15 +219,35 @@ def test_all_literal_and_builder_form_targets_are_registered_actions():
     assert builder_targets <= POST_ACTIONS
     # The route table, page map and navigation cannot drift apart.
     assert set(PAGE_PATHS) == {key for key, _title in GET_ROUTES.values()}
-    assert {key for key, _href, _label in views.NAV} == set(PAGE_PATHS)
-    # Every route is still served: the redesign's registry first, the legacy map
-    # for whatever it has not taken over yet.
+    assert {key for key, _href, _label in NAV} == set(PAGE_PATHS)
+    # Every route is served by the one registry, and no legacy map remains beside it.
     from axiom_forex.workstation.ui.render import PAGES as REDESIGNED
 
     routes = {key for key, _title in GET_ROUTES.values()}
-    assert set(views.PAGES) | set(REDESIGNED) == routes
+    assert set(REDESIGNED) == routes
     assert len(GET_ROUTES) == 16
-    assert set(views.PAGE_SCOPES) == set(PAGE_PATHS)
+    assert set(PAGE_SCOPES) == set(PAGE_PATHS)
+
+
+def test_no_legacy_page_module_remains_and_every_route_uses_the_one_registry():
+    """One registry, one renderer per route, and no second page map behind it."""
+
+    import importlib.util
+
+    from axiom_forex.workstation.ui import render as registry
+
+    assert importlib.util.find_spec("axiom_forex.workstation.views") is None
+    assert not (REPO / "axiom_forex/workstation/views.py").exists()
+    # The dispatcher reads PAGES and nothing else: no import of a legacy module,
+    # no transitional branch to a second renderer.
+    source = Path(registry.__file__).read_text(encoding="utf-8")
+    assert "import views" not in source
+    assert "legacy" not in source
+    # Each route is served by a function defined in the ui.pages package, and the
+    # keys are exactly the routes the server dispatches.
+    assert set(registry.PAGES) == {key for key, _title in GET_ROUTES.values()}
+    for page, renderer in registry.PAGES.items():
+        assert renderer.__module__.startswith("axiom_forex.workstation.ui.pages"), page
 
 
 # Every declared action that no render state above can show, with the state that

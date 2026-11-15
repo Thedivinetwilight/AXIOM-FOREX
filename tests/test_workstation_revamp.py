@@ -47,7 +47,11 @@ from axiom_forex.paper_runner.catalog_paper import (
     STATE_VERSION,
     CatalogPaperTest,
 )
-from axiom_forex.workstation import views
+from axiom_forex.workstation.ui import components, shell
+from axiom_forex.workstation.ui.pages import autopilot as autopilot_page
+from axiom_forex.workstation.ui.pages import runner as runner_page
+from axiom_forex.workstation.ui.pages import start as start_page
+from axiom_forex.workstation.ui.render import render_page
 from axiom_forex.workstation.app import GET_ROUTES, POST_ACTIONS
 from axiom_forex.workstation.context import PAGE_PATHS
 from axiom_forex.workstation.probes import probe_environment, prerequisite_help
@@ -348,7 +352,7 @@ def test_no_page_skips_a_heading_level(state):
 def test_the_execution_modes_are_headed_by_an_h2_above_the_two_options():
     """``/mode`` drew two ``h3`` options directly under the page's ``h1``."""
 
-    cards = views.card("A heading", "<p>body</p>")
+    cards = components.section("A heading", "<p>body</p>")
     assert "<h2" in cards
     app = _chrome_apps()["connected"]
     status, html = app.page("/mode")
@@ -446,39 +450,6 @@ def test_the_stylesheet_shrinks_to_one_column_on_a_narrow_window():
 # ---------------------------------------------------------------------------
 
 
-def test_the_runner_counters_are_read_as_a_sentence_in_a_fixed_order():
-    text = views._runner_counts_text(
-        {"closes": 0, "cycles": 1, "stale_quotes_skipped": 0, "signals": 2, "fills": 3}
-    )
-
-    # The order is the lifecycle, not the dictionary's: cycles, signals, entries,
-    # exits, then the reasons a cycle did nothing.
-    assert text.index("cycles run 1") < text.index("signals 2")
-    assert text.index("signals 2") < text.index("entry fills 3")
-    assert text.index("entry fills 3") < text.index("exit fills 0")
-    # No raw dict, no braces, no quotes -- the earlier page printed
-    # "Counts: closes 0, cycles 1, ..." as if that were prose.
-    for token in ("{", "}", "'", "[", "]"):
-        assert token not in text
-    assert text.startswith("cycles run 1")
-
-
-def test_a_counter_this_build_does_not_know_is_named_not_dropped():
-    text = views._runner_counts_text({"cycles": 4, "quote_retries": 7})
-
-    assert "cycles run 4" in text
-    # Humanised, in its own place, and never silently missing.
-    assert "quote retries 7" in text
-    assert text.endswith("quote retries 7")
-    # Unknown keys come after the known ones, sorted, so two renders agree.
-    other = views._runner_counts_text({"alpha_beta": 1, "cycles": 4, "zeta": 2})
-    assert other.endswith("alpha beta 1, zeta 2")
-
-
-def test_no_counters_is_said_in_words():
-    assert views._runner_counts_text({}) == "nothing has run yet"
-
-
 def _pnl_context(account):
     class Ctx:
         extra = {"account": account}
@@ -520,12 +491,12 @@ def test_the_autopilot_money_card_never_turns_an_unknown_into_zero():
         },
     }
 
-    html = views._autopilot_paper_pnl_card(_pnl_context(account))
+    html = autopilot_page._pnl_section(_pnl_context(account))
     text = _text(html)
 
     assert "Paper P&amp;L" in html or "Paper P&L" in text
     # The measured zero is a zero ...
-    assert "Realised P&amp;L (after costs)" in html
+    assert "Net P&amp;L after costs" in html
     # ... and the two the ledger cannot support say so, with the ledger's reason,
     # instead of borrowing a zero or the fixture's balance.
     assert text.count("Unavailable") >= 2
@@ -534,12 +505,12 @@ def test_the_autopilot_money_card_never_turns_an_unknown_into_zero():
     # One reading serves the page, and it links to the full figures.
     assert "href='/performance'" in html
     # The broker is never blended in.
-    assert "broker account's balance" in text
+    assert "is a broker balance" in text
 
 
 def test_the_autopilot_money_card_says_so_when_there_is_no_ledger():
     for account in ({}, {"available": False, "error": "no_platform"}):
-        html = views._autopilot_paper_pnl_card(_pnl_context(account))
+        html = autopilot_page._pnl_section(_pnl_context(account))
         text = _text(html)
 
         assert "could not be read" in text
@@ -585,12 +556,12 @@ def _chrome_apps():
 
 
 def test_the_navigation_leads_with_the_autopilot_page():
-    assert views.NAV[0][0] == "autopilot"
-    assert views.NAV[0][1] == "/autopilot"
-    assert views.NAV_GROUPS[0][1][0] == "autopilot"
+    assert shell.NAV[0][0] == "autopilot"
+    assert shell.NAV[0][1] == "/autopilot"
+    assert shell.NAV_GROUPS[0][1][0] == "autopilot"
     # Nothing is hidden from the groups, and no group names an entry that is absent.
-    grouped = [key for _title, keys in views.NAV_GROUPS for key in keys]
-    assert grouped == [entry[0] for entry in views.NAV]
+    grouped = [key for _title, keys in shell.NAV_GROUPS for key in keys]
+    assert grouped == [entry[0] for entry in shell.NAV]
     # The guided start page is still the home route.
     assert GET_ROUTES["/"] == ("start", "Start paper trading")
     assert PAGE_PATHS["start"] == "/"
@@ -680,8 +651,8 @@ def test_render_shell_accepts_the_fragments_a_page_built(tmp_path):
     _autopilot_obj, app = _autopilot(tmp_path, report=True)
     ctx = app._context("autopilot", "Autopilot", path="/autopilot")
 
-    joined = views.render_shell(ctx, ["<p>one</p>", "<p>two</p>"])
-    scalars = views.render_shell(ctx, ["<p>one</p>", 3])  # type: ignore[list-item]
+    joined = shell.document(ctx, ["<p>one</p>", "<p>two</p>"])
+    scalars = shell.document(ctx, ["<p>one</p>", 3])  # type: ignore[list-item]
 
     assert "<p>one</p><p>two</p>" in joined
     assert "['<p>one</p>'" not in joined
@@ -1317,12 +1288,14 @@ def test_an_outstanding_condition_is_named_with_the_step_that_clears_it():
 def test_a_blocker_keeps_the_sentence_its_author_wrote():
     """The catalog's blockers carry ``detail``; only ``message`` was read."""
 
-    html = views._blocker_list(
-        [
-            {"reason": "no_evaluation_on_record", "detail": "Run the evaluation first."},
-            {"reason": "paper_test_not_built", "message": "Build it from a record."},
-            {"reason": "a_code_with_no_sentence"},
-        ]
+    html = components.blockers(
+        runner_page.blocker_items(
+            [
+                {"reason": "no_evaluation_on_record", "detail": "Run the evaluation first."},
+                {"reason": "paper_test_not_built", "message": "Build it from a record."},
+                {"reason": "a_code_with_no_sentence"},
+            ]
+        )
     )
     text = _text(html)
 
@@ -1391,7 +1364,7 @@ def test_the_quick_setup_page_can_be_scanned_from_the_top(tmp_path):
 
 
 def _page_for_quick_setup(app) -> str:
-    return views.render_page(app._context("quick-setup", "Quick setup"))
+    return render_page(app._context("quick-setup", "Quick setup"))
 
 
 def test_the_paper_test_counters_sit_inside_their_own_card(tmp_path):
@@ -1532,9 +1505,10 @@ def test_every_home_page_note_names_the_control_it_is_about(tmp_path):
     """
 
     from tests.test_paper_accounting import _ctx
-    from axiom_forex.workstation import guide, views
+    from axiom_forex.workstation import guide
+    from axiom_forex.workstation.ui.pages.start import _primary_controls
 
-    html = views._primary_actions(_ctx(), {"steps": [], "summary": {}}, {
+    html = start_page._primary_controls(_ctx(), {"steps": [], "summary": {}}, {
         "counts": {},
         "metric_by_key": {},
         "positions": [],
@@ -1559,7 +1533,7 @@ def test_every_home_page_note_names_the_control_it_is_about(tmp_path):
     assert "View performance" in text
 
     # A running session says so on the Stop control and closes nothing.
-    running = views._primary_actions(
+    running = start_page._primary_controls(
         _ctx(),
         {
             "steps": [

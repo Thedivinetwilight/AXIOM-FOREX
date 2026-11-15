@@ -27,7 +27,7 @@ from typing import Any, Mapping
 import pytest
 
 from axiom_forex.facade import build_fixture_platform
-from axiom_forex.workstation import views
+from axiom_forex.workstation.ui import NAV
 from axiom_forex.workstation.app import GET_ROUTES, POST_ACTIONS, WorkstationApp
 from axiom_forex.workstation.probes import probe_environment
 from axiom_forex.workstation.session import ObservationSession, locked_session
@@ -286,7 +286,7 @@ def page_html(app: WorkstationApp) -> str:
 
 def test_quick_setup_is_a_route_and_a_navigation_entry():
     assert GET_ROUTES["/quick-setup"] == ("quick-setup", "Quick setup")
-    labels = [label for _key, _path, label in views.NAV]
+    labels = [label for _key, _path, label in NAV]
     assert "Quick setup" in labels
     # The provider-terms document is kept, and moved after the short setup into
     # the "Advanced" group (the group title carries the "advanced" now).

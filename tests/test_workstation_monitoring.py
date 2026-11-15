@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from axiom_forex.facade import build_fixture_platform
-from axiom_forex.workstation import views
 from axiom_forex.workstation.app import GET_ROUTES, POST_ACTIONS, WorkstationApp
 from axiom_forex.workstation.session import locked_session
 from axiom_forex.workstation.setup import SetupWizard

@@ -26,7 +26,6 @@ from pathlib import Path
 
 from axiom_forex.strategies.catalog import audit
 from axiom_forex.strategies.catalog.candidates import catalog
-from axiom_forex.workstation import views
 from tests.test_catalog_view import _app, _page
 
 UTC = timezone.utc

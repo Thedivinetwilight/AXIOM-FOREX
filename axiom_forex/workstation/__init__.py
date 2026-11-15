@@ -21,8 +21,8 @@ Modules
     The first-run wizard state machine and its read-only guarantees.
 ``context``
     Read model shared by every page; labels real / paper / fixture data.
-``views``
-    The server-rendered UI: one design system, all states, no scripts.
+``ui``
+    The server-rendered UI: one design system, one page registry, no scripts.
 ``app``
     Stdlib HTTP server bound to loopback, read-only GETs and explicit POSTs.
 """
@@ -35,5 +35,5 @@ __all__ = [
     "probes",
     "session",
     "setup",
-    "views",
+    "ui",
 ]

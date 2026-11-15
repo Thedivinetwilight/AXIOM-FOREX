@@ -10,7 +10,6 @@ import re
 from html import unescape
 from pathlib import Path
 
-from axiom_forex.workstation import views
 from axiom_forex.workstation.app import WorkstationApp
 from axiom_forex.workstation.ui.pages.autopilot import render_scalper_panel as _render_scalper_paper_card
 from tests.test_autopilot_ui import _autopilot

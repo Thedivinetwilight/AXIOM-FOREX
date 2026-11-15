@@ -1266,9 +1266,9 @@ def test_a_running_paper_session_offers_stop_in_the_same_row(tmp_path):
         "steps": [guide.Step(key="paper", number=5, title="", why="", state=guide.RUNNING, status="RUNNING")],
         "summary": {},
     }
-    from axiom_forex.workstation import views
+    from axiom_forex.workstation.ui.pages.start import _primary_controls
 
-    html = views._primary_actions(_ctx(), model, account)
+    html = _primary_controls(_ctx(), model, account)
 
     assert "Stop paper trading" in html
     assert "catalog-paper-stop" in html

@@ -14,7 +14,6 @@ from html.parser import HTMLParser
 from axiom_forex.paper_runner.live_workflow import ARM_CONFIRMATION_PHRASE
 from axiom_forex.scalper.live_approval import APPROVAL_PHRASE
 from axiom_forex.scalper.live_bridge import REVIEW_PHRASE
-from axiom_forex.workstation import views
 from axiom_forex.workstation.app import GET_ROUTES, POST_ACTIONS
 from tests.test_workstation_ui import app_for, simulated_wizard
 

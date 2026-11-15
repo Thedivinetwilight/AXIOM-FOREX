@@ -37,7 +37,9 @@ from pathlib import Path
 import pytest
 
 from axiom_forex.facade import build_fixture_platform
-from axiom_forex.workstation import views
+from axiom_forex.workstation.ui import shell
+from axiom_forex.workstation.ui.pages import account as account_page
+from axiom_forex.workstation.ui.pages import overview as overview_page
 from axiom_forex.workstation.ui.render import render_connecting
 from axiom_forex.workstation.app import (
     CONFIRM_REFUSALS,
@@ -945,11 +947,11 @@ def test_account_mode_comes_from_the_terminal_with_a_matching_tone(mode, expecte
     )
     assert ctx.terminal.mode == mode
     assert ctx.terminal.mode_confirmed is True
-    assert f"chip--{expected_tone}" in views.mode_chip(ctx)
+    assert f"chip--{expected_tone}" in shell.account_mode_chip(ctx)
 
-    html = views.render_account(ctx)
+    html = account_page.render_account(ctx)
     assert f"Detected account mode: {mode}" in html
-    assert "never switches accounts" in html
+    assert "never switches account" in html
 
 
 def test_an_unconfirmed_mode_is_marked_unconfirmed():
@@ -958,7 +960,7 @@ def test_an_unconfirmed_mode_is_marked_unconfirmed():
     ctx = build_context(
         platform=None, wizard=wizard, page="overview", title="Overview", action_nonce="n"
     )
-    assert "unconfirmed" in views.mode_chip(ctx)
+    assert "unconfirmed" in shell.account_mode_chip(ctx)
     assert ctx.terminal.mode == "DEMO"
 
 
@@ -966,7 +968,7 @@ def test_no_account_mode_is_shown_when_nothing_is_connected():
     ctx = build_context(
         platform=None, wizard=live_wizard(), page="overview", title="Overview", action_nonce="n"
     )
-    assert "No account mode" in views.mode_chip(ctx)
+    assert "No account mode" in shell.account_mode_chip(ctx)
     assert ctx.terminal.mode == "UNKNOWN"
 
 
@@ -1024,7 +1026,7 @@ def test_error_state_names_the_reason_and_offers_an_explicit_retry():
             error={"reason": "terminal_unavailable", "hint": "Open MetaTrader 5 first."},
         ),
     )
-    html = views.render_overview(errored)
+    html = overview_page.render_overview(errored)
     assert "terminal_unavailable" in html
     assert "Open MetaTrader 5 first." in html
     assert "Try again" in html
@@ -1067,7 +1069,7 @@ def test_pages_contain_no_scripts_and_no_remote_assets():
             assert "<script" not in html.lower()
             assert "http://" not in html.replace("http-equiv", "").lower()
             assert "https://" not in html.lower()
-            for _, href, _ in views.NAV:
+            for _, href, _ in shell.NAV:
                 assert f"href='{href}'" in html, (path, href)
 
 
@@ -1161,8 +1163,6 @@ def test_layout_is_responsive_and_respects_reduced_motion():
 
     assert "@media (max-width:860px)" in redesign
     assert "prefers-reduced-motion" in redesign
-    # The legacy sheet, used only by the pages not yet rebuilt, stays responsive too.
-    assert "@media (max-width:860px)" in views.STYLES
 
 
 # ---------------------------------------------------------------------------
