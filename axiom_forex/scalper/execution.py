@@ -32,7 +32,7 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
 from app.execution.broker import TradingBlocked
 
-from .config import CostTerms, InstrumentSpec, PAPER
+from .config import LIVE, CostTerms, InstrumentSpec, PAPER
 from .guardian import Guardian, OpenPositionRisk, Proposal, RiskDecision
 from .signals import Signal
 from .ticks import Tick
@@ -45,6 +45,9 @@ ACCEPTED = "accepted"
 REJECTED = "rejected"
 UNKNOWN_OUTCOME = "unknown_outcome"
 BLOCKED = "blocked"
+
+#: A live venue handed to a trader that was not told to expect one.
+LIVE_VENUE_NOT_PERMITTED = "live_venue_not_permitted"
 
 #: Refusal reasons raised before anything is sent.
 SIGNAL_EXPIRED = "signal_expired"
@@ -504,10 +507,19 @@ class Trader:
         specs: Mapping[str, InstrumentSpec],
         signal_ttl_ms: int = 750,
         engine: str = "scalper",
+        live_venue_ok: bool = False,
     ) -> None:
-        if venue.mode != PAPER:
-            # Enforced here as well as in configuration: a venue that is not paper is
-            # never reachable from this class, whatever it is called.
+        # A venue that is not paper is never reachable from this class unless the
+        # caller has taken explicit responsibility for it *and* the venue says, in
+        # its own words, that it reaches a broker.  The default is unchanged: the
+        # paper desk constructs its trader with no flag and stays paper-only.
+        if venue.mode == PAPER:
+            pass
+        elif venue.mode == LIVE and live_venue_ok and getattr(venue, "live_execution", False):
+            pass
+        elif venue.mode == LIVE:
+            raise TradingBlocked(LIVE_VENUE_NOT_PERMITTED)
+        else:
             raise TradingBlocked(PAPER_ONLY)
         self._venue = venue
         self._guardian = guardian

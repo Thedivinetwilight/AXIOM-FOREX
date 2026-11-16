@@ -75,6 +75,11 @@ DEMO_CLOSE_FORBIDDEN = "demo_test_cannot_close"
 #: The identity a demo-test request must carry.  It is not a strategy id.
 DEMO_TEST_STRATEGY_ID = "axiom-demo-execution-test"
 
+#: The AX-SCALPER LIVE lane's own account rule: the terminal must say REAL, and
+#: the account it names must be the one the run was configured for.
+REAL_ACCOUNT_REQUIRED = "real_account_required"
+ACCOUNT_IDENTITY_MISMATCH = "account_identity_mismatch"
+
 #: Reasons that mean "the broker may have an order we cannot account for".
 BLOCKING_REASONS = frozenset({UNRESOLVED_ORDER, "live_order_outcome_unknown"})
 
@@ -201,6 +206,8 @@ class LiveLeg:
         ledger_positions: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
         rollover_cutoffs: Sequence[datetime] = (),
         clock: Callable[[], datetime] | None = None,
+        expected_account: Any = None,
+        require_real_account: bool = False,
     ) -> None:
         self.router = router
         self.adapter = adapter
@@ -216,6 +223,12 @@ class LiveLeg:
         self.ledger_positions = ledger_positions
         self.rollover_cutoffs = tuple(rollover_cutoffs or ())
         self.clock = clock or _utc_now
+        #: The real-money account this lane is allowed to trade, when the caller
+        #: declared one.  ``require_real_account`` turns that declaration into a
+        #: blocker: an unverified, demo, contest or mismatched account is refused
+        #: before the gate is consulted, every time, not once at start-up.
+        self.expected_account = expected_account
+        self.require_real_account = bool(require_real_account)
         self.history: list[dict[str, Any]] = []
         self.booked: list[dict[str, Any]] = []
         self.booking_failures: list[dict[str, Any]] = []
@@ -404,6 +417,28 @@ class LiveLeg:
                     "never re-sent automatically.",
                 )
             )
+        if self.require_real_account and not demo_test:
+            from ..scalper.live_account import verify_real_account
+
+            verdict = verify_real_account(status, self.expected_account)
+            if not verdict.ok:
+                reasons = set(verdict.reasons or ())
+                account_reason = (
+                    REAL_ACCOUNT_REQUIRED
+                    if reasons & {"real_account_required", "account_mode_unknown",
+                                  "account_mode_not_confirmed"}
+                    else ACCOUNT_IDENTITY_MISMATCH
+                )
+                blockers.append(
+                    LiveBlocker(
+                        account_reason,
+                        f"This lane trades a verified real-money account only: "
+                        f"{verdict.detail or 'the terminal did not identify it'}.",
+                        "Sign the terminal in to the exact real account this run was "
+                        "configured for, then connect again. AXIOM never switches "
+                        "accounts by itself.",
+                    )
+                )
         if demo_test:
             # A demo execution test is not a strategy, so it never claims an
             # approval; it must instead be the demo identity, close nothing, and
