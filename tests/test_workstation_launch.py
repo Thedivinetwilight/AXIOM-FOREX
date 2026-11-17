@@ -336,12 +336,15 @@ def test_print_prerequisites_sees_a_valid_document(tmp_path, capsys):
     """The report and the session must agree about whether settings exist."""
 
     path = write_settings(tmp_path)
+    settings, failure = launch._load_settings(path)
+    assert failure == ""
+    expected_report = launch.probe_environment(settings=settings, settings_path=None)
     exit_code = launch.main(["--settings", str(path), "--print-prerequisites"])
 
     out = capsys.readouterr().out
-    # On a non-Windows box the prerequisite check still fails, but not for
-    # settings: the document is found, parsed, and its values used.
-    assert exit_code == 1
-    assert "Everything needed to connect was found." not in out
+    # The valid settings document is not itself a failed prerequisite.  Whether
+    # the machine is ready depends on this interpreter's platform/packages/terminal.
+    assert exit_code == (0 if expected_report.ready_to_connect else 1)
+    assert ("Everything needed to connect was found." in out) == expected_report.ready_to_connect
     assert "Create mt5_settings.local.json" not in out
     assert "Local settings" not in out

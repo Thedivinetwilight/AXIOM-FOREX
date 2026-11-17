@@ -46,6 +46,8 @@ broker positions, confirm none belong to this run, then start again).
 from __future__ import annotations
 
 import json
+import ctypes
+import os
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -104,6 +106,60 @@ STATE_PERSISTENCE_FAILED = "run_state_persistence_failed"
 RUN_STATE_SCHEMA = "axiom-scalper-live-run-v2"
 
 
+def _fsync_directory(path: Path) -> None:
+    """Flush the rename's parent directory on POSIX and Windows.
+
+    ``os.open(directory, O_RDONLY)`` works on POSIX but Windows rejects directory
+    handles through the CRT.  Windows needs a native handle opened with
+    ``FILE_FLAG_BACKUP_SEMANTICS``; silently skipping this flush would weaken the
+    run-state durability guarantee on the machine that can actually trade.
+    """
+
+    if os.name != "nt":
+        directory_fd = open_file(path, O_RDONLY)
+        try:
+            fsync(directory_fd)
+        finally:
+            close(directory_fd)
+        return
+
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    flush_file_buffers = kernel32.FlushFileBuffers
+    flush_file_buffers.argtypes = (wintypes.HANDLE,)
+    flush_file_buffers.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    # GENERIC_WRITE, share read/write/delete, OPEN_EXISTING,
+    # FILE_FLAG_BACKUP_SEMANTICS (required for a directory handle).
+    handle = create_file(str(path.resolve()), 0x40000000, 0x1 | 0x2 | 0x4,
+                         None, 3, 0x02000000, None)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle in (None, invalid_handle):
+        error = ctypes.get_last_error()
+        raise OSError(error, "Could not open run-state directory for durable flush", str(path))
+    try:
+        if not flush_file_buffers(handle):
+            error = ctypes.get_last_error()
+            raise OSError(error, "Could not flush run-state directory", str(path))
+    finally:
+        close_handle(handle)
+
+
 class RunStateStoreError(RuntimeError):
     """Durable run state could not be read or committed atomically."""
 
@@ -134,11 +190,7 @@ class JsonRunStateStore:
                 handle.flush()
                 fsync(handle.fileno())
             replace_file(tmp, self.path)
-            directory_fd = open_file(parent, O_RDONLY)
-            try:
-                fsync(directory_fd)
-            finally:
-                close(directory_fd)
+            _fsync_directory(parent)
         except Exception as exc:
             try:
                 tmp.unlink(missing_ok=True)
