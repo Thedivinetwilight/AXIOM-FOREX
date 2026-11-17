@@ -34,6 +34,11 @@ the integration: verify protection in MT5. Do not use this build for autonomous
 real trading until the recovery gap and the machine-side checks below have been
 resolved and independently verified.
 
+Run-state snapshots now bind account type and currency in addition to server
+and fingerprint. Older v2 snapshots lack those fields and are deliberately
+refused; preserve the original file and broker records for exact reconciliation.
+Do not delete or rewrite a snapshot to bypass this check.
+
 ## Local LIVE configuration
 
 The ignored file is `scalper_live_settings.local.json` in the repository root.

@@ -1150,7 +1150,7 @@ def test_json_run_state_store_round_trips_and_recovers_from_disk(real):
     assert started["ok"] is True, started
     saved = store.load()
     assert saved == run.snapshot()
-    assert saved["schema"] == "axiom-scalper-live-run-v2"
+    assert saved["schema"] == "axiom-scalper-live-run-v3"
     assert saved["position_book"]["open_positions"] == []
     assert "guardian" in saved
 
@@ -1448,6 +1448,51 @@ def test_recovery_refuses_a_different_account_identity(real):
     assert restored["ok"] is False
     assert fresh.state == RECOVERY_REQUIRED
     assert "account identity differs" in restored["recovery"]["detail"]
+
+
+@pytest.mark.parametrize("field,value", [("account_mode", "DEMO"), ("currency", "EUR")])
+def test_recovery_refuses_account_mode_or_currency_mismatch(real, field, value):
+    run, _, _ = build_run(real)
+    snapshot = run.snapshot()
+    snapshot["account_identity"][field] = value
+    fresh, _, _ = build_run(real)
+    outcome = fresh.recover(state=snapshot)
+    assert not outcome["ok"]
+    assert "account identity differs" in outcome["recovery"]["detail"]
+    assert real["fake"].send_requests == []
+
+
+def test_account_change_does_not_relabel_original_durable_run(real):
+    run, _, _ = build_run(real)
+    assert run.start()["ok"]
+    original = run.state_store.load()["account_identity"]
+    real["fake"].trade_mode = 0
+    real["harness"].adapter.refresh_account()
+    assert not run._account().ok
+    run.on_tick(symbol=PAIR, bid=Decimal("1.10000"), ask=Decimal("1.10002"),
+                source_time=START, now_ms=int(START.timestamp() * 1000))
+    assert run.state_store.load()["account_identity"] == original
+    assert run.snapshot()["account_identity"] == original
+    assert original["account_mode"] == "REAL"
+    assert original["currency"] == "USD"
+    assert real["fake"].send_requests == []
+
+
+def test_legacy_run_missing_account_type_and_currency_is_preserved_and_blocked(real):
+    store = JsonRunStateStore(real["tmp"] / "legacy-run-state.json")
+    run, _, _ = build_run(real, state_store=store)
+    old = run.snapshot()
+    old["schema"] = "axiom-scalper-live-run-v2"
+    old["account_identity"].pop("currency")
+    old["account_identity"].pop("account_mode")
+    store.save(old)
+    before = store.path.read_bytes()
+    fresh, _, _ = build_run(real, state_store=store)
+    outcome = fresh.recover()
+    assert not outcome["ok"]
+    assert "account identity differs" in outcome["recovery"]["detail"]
+    assert store.path.read_bytes() == before
+    assert real["fake"].send_requests == []
 
 
 def test_recovery_refuses_a_different_strategy(real):

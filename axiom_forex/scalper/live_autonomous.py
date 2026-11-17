@@ -104,7 +104,7 @@ DURABLE_STATE_REQUIRED = "durable_run_state_required"
 STATE_PERSISTENCE_FAILED = "run_state_persistence_failed"
 ADMISSION_REVOKED = "admission_revoked"
 LIVE_SESSION_CONFLICT = "another_live_session_running"
-RUN_STATE_SCHEMA = "axiom-scalper-live-run-v2"
+RUN_STATE_SCHEMA = "axiom-scalper-live-run-v3"
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1334,6 +1334,8 @@ class AutonomousScalper:
         expected_account = {
             "server": current_account.server,
             "fingerprint": current_account.fingerprint,
+            "currency": current_account.currency,
+            "account_mode": current_account.mode,
         }
         if not current_account.ok:
             problems.append("current real account is not verified")
@@ -1654,15 +1656,20 @@ class AutonomousScalper:
     def snapshot(self) -> dict[str, Any]:
         """Return the complete versioned state required for an exact restart."""
 
-        account = self._account()
+        # Persist the run's declared identity, never the newly selected terminal
+        # account after a mismatch or disconnect. This lane is currently REAL-only;
+        # a future multi-mode lane must bind its observed type at explicit arm.
+        expected = self.expected_account
         book_state = self.book.snapshot()
         return {
             "schema": RUN_STATE_SCHEMA,
             "mode": LIVE,
             "state": self.state,
             "account_identity": {
-                "server": account.server,
-                "fingerprint": account.fingerprint,
+                "server": "" if expected is None else expected.server,
+                "fingerprint": "" if expected is None else expected.fingerprint,
+                "currency": "" if expected is None else expected.currency,
+                "account_mode": "REAL",
             },
             "symbols": dict(self.symbols),
             "instrument_specs": {
