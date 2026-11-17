@@ -2030,7 +2030,10 @@ class AutonomousScalper:
             return UNRESOLVED_ORDER
         if self.book.close_blockers or self.book.pending_closes:
             return CLOSE_UNCONFIRMED
-        if self.book.verify_protection().get("missing"):
+        protection = self.book.verify_protection(update=False)
+        if protection.get("pending_modification"):
+            return "protection_reconciliation_required"
+        if protection.get("missing"):
             return PROTECTION_UNVERIFIED
         if len(self.book.open_positions) >= self.max_open_positions:
             return POSITION_LIMIT

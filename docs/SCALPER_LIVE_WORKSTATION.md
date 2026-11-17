@@ -25,12 +25,14 @@ account before using the runner. AXIOM does not switch accounts.
 unresolved autonomous request returns a refusal, the workstation host discards
 the recovery runtime, so the `/live` reconciliation control cannot always
 reach that request after restart. Preserve the state and broker records; do not
-resend, delete or rewrite them to get past the blocker. The autonomous panel
-also does not yet present a complete durable order-outcome history or a
-broker-sourced P&L accounting view, and the current position table must not be
-used as independent proof of broker protection. Verify protection in MT5. Do not
-use this build for autonomous real trading until these gaps and the machine-side
-checks below have been resolved and independently verified.
+resend, delete or rewrite them to get past the blocker. The broker monitor
+shows account-bound broker positions and locally recorded orders when available;
+its open-position profit is not a complete accounting of closed P&L or costs.
+An unreadable position makes the position list and profit unavailable rather
+than silently omitting it. Broker read-back is not independent verification of
+the integration: verify protection in MT5. Do not use this build for autonomous
+real trading until the recovery gap and the machine-side checks below have been
+resolved and independently verified.
 
 ## Local LIVE configuration
 

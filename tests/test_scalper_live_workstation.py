@@ -455,6 +455,27 @@ def test_broker_monitor_reports_account_bound_readback_and_unavailable_profit(tm
     assert adapter.send_calls == 0
 
 
+def test_broker_monitor_reports_incomplete_position_read_as_unavailable(tmp_path):
+    from axiom_forex.brokers.mt5.orders import parse_positions
+    from tests.fake_mt5 import make_position
+
+    host, adapter, _ = _host(tmp_path)
+    adapter.status = lambda: {"connected": True, "account_mode": "REAL", "account_mode_confirmed": True,
+                              "account_fingerprint": account_fingerprint(LOGIN),
+                              "redacted_account": {"server": SERVER, "currency": "USD"}}
+    valid = make_position(ticket=1, symbol=SYMBOL, side="BUY", volume=0.1)
+    invalid = make_position(ticket=2, symbol=SYMBOL, side="SELL", volume=0.1)
+    invalid["volume"] = None
+    adapter.positions = lambda: parse_positions([valid, invalid])
+    adapter.repository = SimpleNamespace(list_orders=lambda: [])
+    monitor = host._broker_monitor(host._configuration_review())
+    assert monitor["positions"] == []
+    assert monitor["positions_reason"] == "broker_positions_unavailable"
+    assert not monitor["pnl"]["available"]
+    assert monitor["pnl"]["reason"] == "broker_positions_unavailable"
+    assert adapter.send_calls == 0
+
+
 def test_broker_monitor_does_not_report_other_account_as_real(tmp_path):
     host, adapter, _ = _host(tmp_path)
     # The fixture remains DEMO even if it happens to have matching identity.

@@ -963,6 +963,19 @@ def test_unknown_protection_change_survives_shutdown_and_recovers_by_readback(re
     requested_stop = Decimal(pending[0]["stop_price"])
     assert requested_stop > position.stop_price
 
+    # An ordinary entry check must not silently adopt a timed-out SLTP even
+    # when the broker later echoes it. Explicit recovery owns that transition.
+    broker_row = next(
+        row for row in real["fake"].positions if int(row["ticket"]) == int(fill.ticket)
+    )
+    original_stop = broker_row["sl"]
+    broker_row["sl"] = float(requested_stop)
+    run.state = "RUNNING"
+    assert run._entry_block(PAIR, int(START.timestamp() * 1000)) == "protection_reconciliation_required"
+    assert run.book.snapshot()["pending_protection_modifications"] == pending
+    assert position.stop_price != requested_stop
+    broker_row["sl"] = original_stop
+
     stopped = run.stop(reason="test_shutdown")
     saved = run.state_store.load()
     assert stopped["state_persisted"] is True

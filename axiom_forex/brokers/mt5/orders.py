@@ -30,7 +30,6 @@ from .terminal import (
     MT5Terminal,
     _decimal,
     _field,
-    _sequence,
     _utc,
 )
 
@@ -66,7 +65,7 @@ class MT5Position:
     side: str
     volume: Decimal
     price_open: Decimal
-    price_current: Decimal
+    price_current: Decimal | None
     stop_loss: Decimal | None
     take_profit: Decimal | None
     swap: Decimal | None
@@ -102,35 +101,63 @@ class MT5Position:
 
 
 def parse_positions(raw: Any, symbols: Sequence[str] | None = None) -> list[MT5Position]:
+    # A partial list is not a flat account. Fail the entire read rather than
+    # silently omitting an exposure or inventing its side/identity.
+    if raw is None or isinstance(raw, (str, bytes, dict)):
+        raise MT5Error("mt5_positions_unreadable")
+    try:
+        entries = list(raw)
+    except TypeError as exc:
+        raise MT5Error("mt5_positions_unreadable") from exc
     wanted = {symbol.upper() for symbol in symbols} if symbols else None
     positions: list[MT5Position] = []
-    for entry in _sequence(raw):
+    seen: set[int] = set()
+    for entry in entries:
         symbol = str(_field(entry, "symbol", "") or "")
+        if not symbol:
+            raise MT5Error("mt5_position_unreadable", "missing_symbol")
         if wanted is not None and symbol.upper() not in wanted:
             continue
-        type_value = _field(entry, "type", POSITION_TYPE_BUY)
         volume = _decimal(_field(entry, "volume"))
         price_open = _decimal(_field(entry, "price_open"))
-        if volume is None or price_open is None or not symbol:
-            # An unreadable position cannot be reconciled; surfacing it as a
-            # gap is better than dropping it silently.
+        try:
+            ticket_raw = _field(entry, "ticket", 0)
+            ticket = int(ticket_raw or 0)
+            if isinstance(entry, MT5Position):
+                type_value = {"BUY": POSITION_TYPE_BUY, "SELL": POSITION_TYPE_SELL}.get(entry.side, -1)
+            else:
+                type_raw = _field(entry, "type", -1)
+                type_value = int(type_raw)
+                if _decimal(type_raw) != Decimal(type_value):
+                    raise ValueError("non_integral_position_type")
+            if _decimal(ticket_raw) != Decimal(ticket):
+                raise ValueError("non_integral_position_ticket")
+            magic = int(_field(entry, "magic", 0) or 0)
+            identifier = int(_field(entry, "identifier", 0) or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MT5Error("mt5_position_unreadable", "invalid_identity") from exc
+        if (ticket <= 0 or ticket in seen or type_value not in (POSITION_TYPE_BUY, POSITION_TYPE_SELL)
+                or volume is None or volume <= 0 or price_open is None or price_open <= 0):
+            raise MT5Error("mt5_position_unreadable", "invalid_or_duplicate_position")
+        seen.add(ticket)
+        if isinstance(entry, MT5Position):
+            positions.append(entry)
             continue
         positions.append(
             MT5Position(
-                ticket=int(_field(entry, "ticket", 0) or 0),
+                ticket=ticket,
                 symbol=symbol,
-                side="BUY" if int(type_value) == POSITION_TYPE_BUY else "SELL",
+                side="BUY" if type_value == POSITION_TYPE_BUY else "SELL",
                 volume=volume,
                 price_open=price_open,
-                price_current=_decimal(_field(entry, "price_current"), Decimal(0))
-                or Decimal(0),
+                price_current=_decimal(_field(entry, "price_current")),
                 stop_loss=_decimal(_field(entry, "sl")),
                 take_profit=_decimal(_field(entry, "tp")),
                 swap=_decimal(_field(entry, "swap")),
                 profit=_decimal(_field(entry, "profit")),
-                magic=int(_field(entry, "magic", 0) or 0),
+                magic=magic,
                 comment=str(_field(entry, "comment", "") or ""),
-                identifier=int(_field(entry, "identifier", 0) or 0),
+                identifier=identifier,
                 time=_utc(_field(entry, "time")),
             )
         )

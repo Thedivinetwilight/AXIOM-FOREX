@@ -761,6 +761,41 @@ def test_positions_are_parsed(harness):
     assert positions[0].volume == Decimal("0.1")
 
 
+@pytest.mark.parametrize("change", [
+    {"symbol": ""}, {"volume": None}, {"volume": 0}, {"volume": "NaN"},
+    {"price_open": None}, {"price_open": 0}, {"ticket": 0},
+    {"ticket": "bad"}, {"ticket": 12.5}, {"type": None}, {"type": 2}, {"type": 0.5},
+])
+def test_unreadable_position_makes_entire_broker_read_unavailable(change):
+    from axiom_forex.brokers.mt5.terminal import MT5Error
+
+    valid = make_position(ticket=11, symbol="EURUSD.pro", side="BUY", volume=0.1)
+    invalid = make_position(ticket=12, symbol="EURUSD.pro", side="SELL", volume=0.2)
+    invalid.update(change)
+    terminal = MT5Terminal(mt5_settings(), module=SimpleNamespace(
+        positions_get=lambda **kw: (SimpleNamespace(**valid), SimpleNamespace(**invalid))))
+    with pytest.raises(MT5Error, match="mt5_position_unreadable"):
+        open_positions(terminal)
+
+
+def test_missing_broker_current_price_is_unavailable_not_zero():
+    from axiom_forex.brokers.mt5.orders import parse_positions
+
+    row = make_position(ticket=11, symbol="EURUSD.pro", side="BUY", volume=0.1)
+    row["price_current"] = None
+    assert parse_positions([row])[0].audit_view()["price_current"] is None
+
+
+def test_duplicate_and_invalid_position_collections_are_unavailable():
+    from axiom_forex.brokers.mt5.orders import parse_positions
+    from axiom_forex.brokers.mt5.terminal import MT5Error
+
+    row = make_position(ticket=11, symbol="EURUSD.pro", side="BUY", volume=0.1)
+    for data in ([row, row], None, "invalid", {"not": "a position list"}, 7):
+        with pytest.raises(MT5Error, match="mt5_position"):
+            parse_positions(data)
+
+
 def test_netting_conflict_rules():
     position = make_position(ticket=1, symbol="EURUSD.pro", side="BUY", volume=0.1)
     parsed = open_positions(
