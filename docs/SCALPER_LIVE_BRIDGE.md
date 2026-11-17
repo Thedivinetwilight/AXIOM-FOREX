@@ -1,5 +1,11 @@
 # Guarded AX-SCALPER one-shot LIVE bridge
 
+> Historical implementation reference: the current workstation disables new
+> one-shot submissions and uses the separate continuous REAL-only controls on
+> `/live`. Its old branch-specific updater commands below are not instructions
+> for the current feature branch. See `SCALPER_LIVE_WORKSTATION.md` for current
+> blockers, including the unresolved autonomous restart-reconciliation gap.
+
 This document describes the **only** AX-SCALPER route to a real MetaTrader 5
 order. It is deliberately separate from the PAPER command centre on
 `/autopilot`, and it does not promote a PAPER result. A real deployment has no

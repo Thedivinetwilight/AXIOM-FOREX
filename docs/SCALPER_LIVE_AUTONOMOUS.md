@@ -5,6 +5,14 @@ existing guarded MT5 adapter and order route. The controls do not connect,
 switch accounts, or send on page load. Nothing here claims profitability or
 that a strategy has been admitted.
 
+**Not yet ready for autonomous real trading:** some unresolved requests cannot
+be reconciled through the workstation after restart because a refused recovery
+runtime is discarded. The autonomous page also lacks a complete durable
+outcome history and broker-sourced P&L view. Its position table is not independent
+proof of current broker protection. Preserve all state, verify positions in MT5,
+and do not resend or bypass the blocker. See `SCALPER_LIVE_WORKSTATION.md` for
+the current limitations and safe update steps.
+
 ## Guarded path
 
 ```text

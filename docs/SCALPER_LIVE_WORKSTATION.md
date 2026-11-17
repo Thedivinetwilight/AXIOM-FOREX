@@ -16,9 +16,21 @@ those conditions are true, the page explains the blocker and Start stays
 unavailable. Do not bypass an admission refusal or use this as a profitability
 claim.
 
-The currently reported terminal account is DEMO. This lane will refuse it. Sign
-in to the intended REAL account in MetaTrader 5 yourself and confirm the server
-and account before using the runner. AXIOM does not switch accounts.
+A previous report described the terminal account as DEMO; its current state has
+not been checked during this change. This lane refuses DEMO. Sign in to the
+intended REAL account in MetaTrader 5 yourself and confirm the server and
+account before using the runner. AXIOM does not switch accounts.
+
+**Integration remains incomplete.** In particular, when restart recovery of an
+unresolved autonomous request returns a refusal, the workstation host discards
+the recovery runtime, so the `/live` reconciliation control cannot always
+reach that request after restart. Preserve the state and broker records; do not
+resend, delete or rewrite them to get past the blocker. The autonomous panel
+also does not yet present a complete durable order-outcome history or a
+broker-sourced P&L accounting view, and the current position table must not be
+used as independent proof of broker protection. Verify protection in MT5. Do not
+use this build for autonomous real trading until these gaps and the machine-side
+checks below have been resolved and independently verified.
 
 ## Local LIVE configuration
 
@@ -114,12 +126,13 @@ explicit Start; no balance is entered or copied into this file.
    phrase `ARM AX-SCALPER LIVE`. Arm changes no broker position and sends no
    order. **Start AX-SCALPER LIVE** is a separate action requiring the same
    candidate, fingerprint and `START AX-SCALPER LIVE`.
-6. The page monitors quote age, decisions/refusals, runner state, durable
-   requests, managed positions and available P&L. **Stop new entries** leaves
-   open positions in the broker and keeps their existing protective orders.
-   Close and protection requests use the same guarded MT5 route. An unknown
-   order result is reconciled by its original durable request id and is never
-   resubmitted.
+6. The page reports quote age, decisions/refusals, runner state and managed
+   positions, with the monitoring limitations noted above. **Stop new entries**
+   does not close broker positions. The local manager attempts to continue only
+   while its account, quote and execution guards pass; broker protection must be
+   checked independently. Close and protection requests use the guarded MT5
+   route. An unknown outcome must be reconciled by its original durable request
+   id and never resubmitted; the restart limitation above can block this.
 
 Do not close the workstation while this process is the only manager of open
 positions unless you have verified their broker-side protection and accepted
@@ -135,13 +148,16 @@ settings and PAPER data first. From the intended feature-branch clone:
 ```powershell
 git status --short --branch
 git fetch origin
-git log --oneline HEAD..origin/arena/ddec41f3-axiom-forex
-git merge --ff-only origin/arena/ddec41f3-axiom-forex
-.\.venv\Scripts\python.exe -m pip install -e .
+git log --oneline HEAD..origin/arena/5a98c3d9-axiom-forex
+git merge --ff-only origin/arena/5a98c3d9-axiom-forex
+.\.venv\Scripts\python.exe -m pip install -e ".[evidence]"
 .\.venv\Scripts\python.exe -m pip install MetaTrader5
 .\.venv\Scripts\python.exe -m axiom_forex.workstation.launch
 ```
 
+This merges the named remote tip only if the current branch can fast-forward;
+it does not switch branches. The existing `scripts/update-workstation.cmd` is
+pinned to a different historical branch and should not be used for this update.
 If Git reports local changes or the fast-forward is not possible, stop and
 preserve them; do not reset, clean, or copy over an existing settings or state
 file. The package-install commands do not connect to MT5. After launch, use the
