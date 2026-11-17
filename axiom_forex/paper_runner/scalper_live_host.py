@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ..scalper.admission import AdmissionError
+from ..scalper.admission import AdmissionError, evidence_digest, load_policy
 from ..scalper.config import LIVE, ScalperConfig
 from ..scalper.execution import Trader
 from ..scalper.guardian import Guardian, GuardianLimits
@@ -554,10 +554,19 @@ class ScalperLiveAutonomousHost:
         if not policy_version:
             return False, self._refuse("admission_policy_digest_unavailable", "The signed-admission policy could not be fingerprinted.")
         artifact_path = Path(str(candidate.get("artifact_path") or ""))
-        artifact_digest = self._sha256_file(artifact_path)
-        if artifact_digest != digest:
-            return False, self._refuse("evidence_digest_changed", "The candidate evidence changed after it was evaluated.")
         policy_path = Path(str(preview["review"].get("policy_path") or ""))
+        try:
+            # Admission's identity hashes canonical signed claims *and policy*,
+            # not the raw file. Keep a separate byte hash for lifecycle checks.
+            artifact_bytes = artifact_path.read_bytes()
+            artifact_document = json.loads(artifact_bytes)
+            policy = load_policy(policy_path, expected_currency=preview["config"]["account_currency"])
+            current_digest = evidence_digest(artifact_document, policy)
+            artifact_digest = hashlib.sha256(artifact_bytes).hexdigest()
+        except (OSError, ValueError, TypeError, AdmissionError):
+            return False, self._refuse("admission_binding_unavailable", "The evidence or policy could not be re-read and fingerprinted.")
+        if current_digest != digest or self._sha256_file(policy_path) != policy_version:
+            return False, self._refuse("evidence_digest_changed", "The candidate evidence or policy changed after it was evaluated.")
         fingerprints = {
             str(self.settings_path): self._sha256_file(self.settings_path),
             str(policy_path): policy_version,

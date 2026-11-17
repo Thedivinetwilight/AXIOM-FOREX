@@ -125,7 +125,10 @@ class _Admission:
         self.artifact = artifact
         self.policy = policy
         strategy = default_strategies()[0]
-        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        from axiom_forex.scalper.admission import evidence_digest, load_policy
+
+        digest = evidence_digest(json.loads(artifact.read_text(encoding="utf-8")),
+                                 load_policy(policy, expected_currency="USD"))
         self.review = {
             "candidates": [{
                 "fingerprint": strategy.fingerprint, "candidate_id": strategy.fingerprint,
@@ -166,7 +169,8 @@ def _host(tmp_path: Path):
     artifact = tmp_path / "signed-evidence.fixture.json"
     artifact.write_text('{"fixture":true}', encoding="utf-8")
     policy = tmp_path / "policy.fixture.json"
-    policy.write_text('{"fixture-policy":true}', encoding="utf-8")
+    from tests.test_scalper_admission import policy_payload
+    policy.write_text(json.dumps(policy_payload(bytes(32))), encoding="utf-8")
     adapter = _Adapter()
     platform_calls = []
     host = ScalperLiveAutonomousHost(
@@ -366,3 +370,23 @@ def test_timed_out_started_action_reports_unknown_in_progress(tmp_path):
     finally:
         release.set()
         host.close()
+
+
+def test_runner_accepts_production_admission_digest_not_raw_file_hash(tmp_path):
+    host, _adapter, _ = _host(tmp_path)
+    candidate = default_strategies()[0].fingerprint
+    ok, prepared = host._prepare_candidate(candidate)
+    assert ok, prepared
+    semantic_digest = prepared[4]
+    artifact = Path(host.admission_host.review["candidates"][0]["artifact_path"])
+    assert semantic_digest != hashlib.sha256(artifact.read_bytes()).hexdigest()
+    assert prepared[6][str(artifact)] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+
+def test_runner_refuses_changed_evidence_after_admission_review(tmp_path):
+    host, _adapter, _ = _host(tmp_path)
+    artifact = Path(host.admission_host.review["candidates"][0]["artifact_path"])
+    artifact.write_text('{"fixture":"changed"}', encoding="utf-8")
+    ok, refusal = host._prepare_candidate(default_strategies()[0].fingerprint)
+    assert not ok
+    assert refusal["reason"] == "evidence_digest_changed"
