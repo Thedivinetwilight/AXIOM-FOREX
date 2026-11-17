@@ -1373,8 +1373,8 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             cell(fmt.text(item.get("side") or "—"), label="Side"),
             cell(fmt.text(item.get("lots") or item.get("quantity") or "—"), label="Lots", num=True),
             cell(fmt.text(item.get("entry_price") or "—"), label="Entry", num=True),
-            cell(fmt.text(item.get("stop_price") or "—"), label="Broker stop", num=True),
-            cell(fmt.text(item.get("unrealized_pnl") or "unavailable"), label="Unrealized P&L", num=True),
+            cell(fmt.text(item.get("stop_price") if item.get("stop_price") is not None else "unavailable"), label="Local managed stop", num=True),
+            cell(fmt.text(item.get("unrealized_pnl") if item.get("unrealized_pnl") is not None else "unavailable"), label="Local unrealized P&L", num=True),
         ] for item in positions
     ]
     recovery = dict(run.get("recovery") or {})
@@ -1403,13 +1403,44 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             + "<p class='small'>Required values: exact terminal-verified symbol; broker margin fraction; commission and whether observed or estimated; slippage points and state; swap state; every validated risk limit; and exact REAL server, login, currency and account fingerprint. The runner validates units and ranges and refuses missing fields.</p>"
             + "</div></details>"
         ),
-        foot="Stop prevents new entries and never closes a position. If positions remain open, this process stays connected and keeps managing them from fresh quotes.",
+        foot="Stop prevents new entries and never closes a position. Local management continues only while the process and all required guards remain healthy.",
     )
+    monitor = dict(scalper.get("broker_monitor") or {})
+    broker_pnl = dict(monitor.get("pnl") or {})
+    broker_rows = [
+        [cell(fmt.text(item.get(key) if item.get(key) is not None else "unavailable"), label=label, num=numeric)
+         for key, label, numeric in (("ticket", "Ticket", False), ("symbol", "Symbol", False),
+                                     ("side", "Side", False), ("volume", "Lots", True),
+                                     ("stop_loss", "Broker SL", True), ("take_profit", "Broker TP", True),
+                                     ("profit", "Broker profit", True))]
+        for item in (monitor.get("positions") or ())
+    ]
+    order_rows = [
+        [cell(fmt.text(item.get(key) if item.get(key) is not None else "unavailable"), label=label)
+         for key, label in (("request_id", "Request ID"), ("state", "State"),
+                            ("provider_symbol", "Symbol"), ("side", "Side"),
+                            ("volume", "Lots"), ("strategy_id", "Strategy"),
+                            ("updated_at", "Updated"))]
+        for item in (monitor.get("orders") or ())
+    ]
+    pnl_text = (f"{broker_pnl.get('total')} {broker_pnl.get('currency')}"
+                if broker_pnl.get("available") else "Unavailable · " + str(broker_pnl.get("reason") or "not reported"))
+    broker_monitor = facts([( "Observed at", fmt.text(monitor.get("observed_at") or "unavailable")),
+                            ("Broker open-position P&L", fmt.text(pnl_text)),
+                            ("Accounting basis", fmt.text(broker_pnl.get("basis") or "unavailable"))])
+    broker_monitor += table((("Ticket", False), ("Symbol", False), ("Side", False), ("Lots", True),
+                             ("Broker SL", True), ("Broker TP", True), ("Broker profit", True)), broker_rows,
+                            caption="Account-wide MT5 position read-back; not all positions are necessarily managed by AX-SCALPER. Values are broker reports, not proof that a stop matches a local intent.",
+                            empty=empty_state("Broker positions not shown", fmt.text(monitor.get("positions_reason") or ("No open positions were reported." if monitor.get("available") else "Broker read-back unavailable."))))
+    broker_monitor += table((("Request ID", False), ("State", False), ("Symbol", False), ("Side", False),
+                             ("Lots", False), ("Strategy", False), ("Updated", False)), order_rows,
+                            caption="Account-bound durable MT5 order records. Older records without strategy identity are not attributed to AX-SCALPER.",
+                            empty=empty_state("Order history not shown", fmt.text(monitor.get("orders_reason") or ("No account-bound durable orders were reported." if monitor.get("available") else "Order history unavailable."))))
     return top + section("Live activity and managed positions", activity + table(
-        (("Position", False), ("Symbol", False), ("Side", False), ("Lots", True), ("Entry", True), ("Broker stop", True), ("Unrealized P&L", True)),
-        position_rows, caption="Positions managed by this exact AX-SCALPER run. P&L is shown only if the run reports it.",
+        (("Position", False), ("Symbol", False), ("Side", False), ("Lots", True), ("Entry", True), ("Local managed stop", True), ("Local unrealized P&L", True)),
+        position_rows, caption="Local managed state, not independent broker confirmation. P&L is shown only if reported by the run.",
         empty=empty_state("No managed position", "Open positions are never inferred from a PAPER ledger.")),
-        note="The broker is authoritative for order and position state. Unknown outcomes stay latched and are queried by the same request id.", id="scalper-activity")
+        note="The broker is authoritative for order and position state. Unknown outcomes stay latched and are queried by the same request id.", id="scalper-activity") + section("Broker read-back and durable orders", broker_monitor, id="scalper-broker-readback")
 
 
 def legacy_live_stop_section(view: Mapping[str, Any], nonce: str) -> str:

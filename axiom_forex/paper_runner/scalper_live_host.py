@@ -178,6 +178,7 @@ class ScalperLiveAutonomousHost:
             "run": dict(runtime.get("run") or {}),
             "latest_tick": tick,
             "last_result": last_result,
+            "broker_monitor": dict(result.get("monitor") or {}),
             "open_positions": list((runtime.get("run") or {}).get("open_positions") or ()),
             "pending_submission": (runtime.get("run") or {}).get("pending_submission"),
             "order_sending": state == RUNNING,
@@ -274,8 +275,73 @@ class ScalperLiveAutonomousHost:
         return {"ok": True, "state": str(run_view.get("state") or self._state),
                 "reason": self._reason, "armed": self._armed_by_host,
                 "run": run_view, "preview": preview, "adapter_status": adapter_status,
+                "monitor": self._broker_monitor(preview),
                 "runtime": {"run": run_view}, "latest_tick": dict(self._last_tick),
                 "last_result": dict(self._last_result)}
+
+    def _broker_monitor(self, preview: Mapping[str, Any]) -> dict[str, Any]:
+        """Read account-wide broker positions and durable orders, never infer attribution."""
+        view: dict[str, Any] = {
+            "available": False, "positions": [], "orders": [],
+            "positions_reason": "verified_real_account_required",
+            "orders_reason": "verified_real_account_required",
+            "pnl": {"available": False, "reason": "verified_real_account_required",
+                    "basis": "MT5 account-wide open-position profit only; excludes closed P&L and costs not reported in profit"},
+        }
+        try:
+            account = dict((preview.get("config") or {}).get("expected_account") or {})
+            expected = ExpectedAccount(**account)
+            self.adapter.refresh_account()
+            status = dict(self.adapter.status() or {})
+            if not verify_real_account(status, expected).ok:
+                return view
+        except Exception:
+            return view
+        view["available"] = True
+        view["observed_at"] = datetime.now(UTC).isoformat()
+        view["account_fingerprint"] = expected.fingerprint
+        view["currency"] = expected.currency
+        try:
+            rows = [dict(item.audit_view()) for item in self.adapter.positions()]
+            view["positions"] = rows
+            view["positions_reason"] = ""
+            try:
+                profits = [Decimal(str(row.get("profit"))) for row in rows]
+                if rows and all(value.is_finite() for value in profits):
+                    view["pnl"] = {"available": True, "total": str(sum(profits, Decimal(0))),
+                                   "currency": expected.currency, "basis": view["pnl"]["basis"]}
+                else:
+                    view["pnl"]["reason"] = "no_open_positions" if not rows else "broker_profit_unavailable"
+            except (InvalidOperation, TypeError, ValueError):
+                view["pnl"]["reason"] = "broker_profit_unavailable"
+        except Exception:
+            # Unknown is not flat and missing profit is not zero.
+            view["positions_reason"] = "broker_positions_unavailable"
+            view["pnl"]["reason"] = "broker_positions_unavailable"
+        try:
+            records = self.adapter.repository.list_orders()
+            view["orders"] = [{key: row.get(key) for key in (
+                                  "request_id", "state", "provider_symbol", "side", "volume",
+                                  "strategy_id", "sent_at", "updated_at", "order_ticket",
+                                  "booked", "retcode_name", "close_position_id")}
+                              for row in records
+                              if str(row.get("broker_id") or "").lower() == "mt5_terminal"
+                              and self.adapter._record_account_fingerprint(row) == expected.fingerprint
+                              and str(row.get("account_server") or "") == expected.server]
+            view["orders_reason"] = ""
+        except Exception:
+            view["orders_reason"] = "durable_order_history_unavailable"
+        try:
+            self.adapter.refresh_account()
+            if not verify_real_account(dict(self.adapter.status() or {}), expected).ok:
+                raise ValueError("account_changed")
+        except Exception:
+            return {"available": False, "positions": [], "orders": [],
+                    "positions_reason": "account_changed_or_unavailable_during_read",
+                    "orders_reason": "account_changed_or_unavailable_during_read",
+                    "pnl": {"available": False, "reason": "account_changed_or_unavailable_during_read",
+                            "basis": "MT5 account-wide open-position profit only"}}
+        return view
 
     def _do_arm(self, *, candidate_id: str, confirmation: str,
                 account_confirmation: str) -> dict[str, Any]:

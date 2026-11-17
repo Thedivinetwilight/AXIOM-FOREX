@@ -1859,6 +1859,7 @@ class MT5TradingAdapter:
         record = {
             "broker_id": BROKER_ID,
             "request_id": intent.request_id,
+            "strategy_id": intent.strategy_id,
             "simulation_id": "",
             "state": "SUBMITTING",
             "side": side,

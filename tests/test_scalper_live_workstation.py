@@ -426,3 +426,40 @@ def test_candidate_binding_refuses_tampered_raw_data(tmp_path):
     ok, refusal = host._prepare_candidate(default_strategies()[0].fingerprint)
     assert not ok
     assert refusal["reason"] == "evidence_data_binding_invalid"
+
+
+def test_broker_monitor_reports_account_bound_readback_and_unavailable_profit(tmp_path):
+    host, adapter, _ = _host(tmp_path)
+    adapter.status = lambda: {"connected": True, "account_mode": "REAL", "account_mode_confirmed": True,
+                              "account_fingerprint": account_fingerprint(LOGIN),
+                              "redacted_account": {"server": SERVER, "currency": "USD"}}
+    adapter.positions = lambda: [SimpleNamespace(audit_view=lambda: {
+        "ticket": 7, "symbol": SYMBOL, "side": "BUY", "volume": Decimal("0.1"),
+        "stop_loss": Decimal("1.09"), "take_profit": None, "profit": None,
+    })]
+    adapter.repository = SimpleNamespace(list_orders=lambda: [
+        {"broker_id": "mt5_terminal", "request_id": "ours", "state": "FILLED",
+         "account_fingerprint": account_fingerprint(LOGIN), "account_server": SERVER},
+        {"broker_id": "mt5_terminal", "request_id": "other", "state": "FILLED",
+         "account_fingerprint": "another", "account_server": SERVER},
+    ])
+    adapter._record_account_fingerprint = lambda row: row.get("account_fingerprint", "")
+    preview = host._configuration_review()
+    monitor = host._broker_monitor(preview)
+    assert monitor["available"]
+    assert monitor["positions"][0]["stop_loss"] == Decimal("1.09")
+    assert not monitor["pnl"]["available"]
+    assert monitor["pnl"]["reason"] == "broker_profit_unavailable"
+    assert [row["request_id"] for row in monitor["orders"]] == ["ours"]
+    assert "account_login" not in monitor["orders"][0]
+    assert adapter.send_calls == 0
+
+
+def test_broker_monitor_does_not_report_other_account_as_real(tmp_path):
+    host, adapter, _ = _host(tmp_path)
+    # The fixture remains DEMO even if it happens to have matching identity.
+    monitor = host._broker_monitor(host._configuration_review())
+    assert not monitor["available"]
+    assert not monitor["pnl"]["available"]
+    assert monitor["positions_reason"] == "verified_real_account_required"
+    assert adapter.send_calls == 0
