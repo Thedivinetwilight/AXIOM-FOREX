@@ -179,6 +179,7 @@ class ScalperLiveAutonomousHost:
             "latest_tick": tick,
             "last_result": last_result,
             "broker_monitor": dict(result.get("monitor") or {}),
+            "saved_recovery": dict(result.get("saved_recovery") or {}),
             "open_positions": list((runtime.get("run") or {}).get("open_positions") or ()),
             "pending_submission": (runtime.get("run") or {}).get("pending_submission"),
             "order_sending": state == RUNNING,
@@ -276,8 +277,49 @@ class ScalperLiveAutonomousHost:
                 "reason": self._reason, "armed": self._armed_by_host,
                 "run": run_view, "preview": preview, "adapter_status": adapter_status,
                 "monitor": self._broker_monitor(preview),
+                "saved_recovery": self._saved_recovery_view(),
                 "runtime": {"run": run_view}, "latest_tick": dict(self._last_tick),
                 "last_result": dict(self._last_result)}
+
+    def _saved_recovery_view(self) -> dict[str, Any]:
+        """Show untrusted stored request identities without adopting or modifying state."""
+        try:
+            state = self.state_store.load()
+        except Exception:
+            return {"present": True, "error": "stored_run_state_unreadable",
+                    "requests": [], "note": "Stored identities are unavailable. Preserve the state and broker records; do not resend."}
+        if state is None:
+            return {"present": False}
+        rows: list[dict[str, str]] = []
+        damaged = False
+        entry = state.get("pending_submission")
+        if entry is not None:
+            if isinstance(entry, Mapping):
+                rows.append({"kind": "entry", "request_id": str(entry.get("request_id") or ""),
+                             "position_id": ""})
+            else:
+                damaged = True
+        book = state.get("position_book")
+        if not isinstance(book, Mapping):
+            damaged = True
+        else:
+            for key, kind in (("pending_closes", "close"),
+                              ("pending_protection_modifications", "protection")):
+                pending = book.get(key)
+                if not isinstance(pending, list):
+                    damaged = True
+                    continue
+                for item in pending:
+                    if not isinstance(item, Mapping):
+                        damaged = True
+                        continue
+                    rows.append({"kind": kind, "request_id": str(item.get("request_id") or ""),
+                                 "position_id": str(item.get("position_id") or "")})
+        damaged = damaged or any(not row["request_id"] for row in rows)
+        return {"present": True, "requests": rows,
+                "error": "stored_run_state_unreadable" if damaged else "",
+                "note": ("Stored request list is incomplete or damaged; preserve state and broker records; do not resend."
+                         if damaged else "Unverified stored identities only; viewing does not reconcile or adopt them.")}
 
     def _broker_monitor(self, preview: Mapping[str, Any]) -> dict[str, Any]:
         """Read account-wide broker positions and durable orders, never infer attribution."""

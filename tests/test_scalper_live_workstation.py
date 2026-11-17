@@ -484,3 +484,57 @@ def test_broker_monitor_does_not_report_other_account_as_real(tmp_path):
     assert not monitor["pnl"]["available"]
     assert monitor["positions_reason"] == "verified_real_account_required"
     assert adapter.send_calls == 0
+
+
+def test_stored_requests_visible_without_adoption_or_orders(tmp_path):
+    from axiom_forex.workstation.ui.pages.live import autonomous_scalper_section
+
+    host, adapter, _ = _host(tmp_path)
+    state = {"pending_submission": {"request_id": "entry-original"},
+             "position_book": {"pending_closes": [{"request_id": "close-original", "position_id": "77"}],
+                               "pending_protection_modifications": [{"request_id": "protect-original", "position_id": "77"}]}}
+    host.state_store.path.write_text(json.dumps(state), encoding="utf-8")
+    before = host.state_store.path.read_bytes()
+    try:
+        view = host.view()
+        assert [item["request_id"] for item in view["saved_recovery"]["requests"]] == [
+            "entry-original", "close-original", "protect-original"]
+        html = autonomous_scalper_section({"scalper_autonomous": view}, "nonce")
+        assert all(value in html for value in ("entry-original", "close-original", "protect-original"))
+        assert "Unverified stored requests" in html
+        assert host.state_store.path.read_bytes() == before
+        assert adapter.send_calls == 0
+        assert host._runtime is None
+    finally:
+        host.close()
+
+
+def test_damaged_stored_recovery_is_visible_and_preserved(tmp_path):
+    host, adapter, _ = _host(tmp_path)
+    host.state_store.path.write_text("{damaged", encoding="utf-8")
+    before = host.state_store.path.read_bytes()
+    try:
+        view = host.view()
+        assert view["saved_recovery"]["error"] == "stored_run_state_unreadable"
+        assert host.state_store.path.read_bytes() == before
+        assert adapter.send_calls == 0
+    finally:
+        host.close()
+
+
+def test_partially_damaged_recovery_does_not_hide_readable_request_ids(tmp_path):
+    host, adapter, _ = _host(tmp_path)
+    host.state_store.path.write_text(json.dumps({
+        "pending_submission": {"request_id": "original-entry"},
+        "position_book": {"pending_closes": [None, {"request_id": "original-close"}],
+                          "pending_protection_modifications": "damaged"},
+    }), encoding="utf-8")
+    before = host.state_store.path.read_bytes()
+    try:
+        stored = host.view()["saved_recovery"]
+        assert stored["error"] == "stored_run_state_unreadable"
+        assert [row["request_id"] for row in stored["requests"]] == ["original-entry", "original-close"]
+        assert host.state_store.path.read_bytes() == before
+        assert adapter.send_calls == 0
+    finally:
+        host.close()

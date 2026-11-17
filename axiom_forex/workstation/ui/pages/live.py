@@ -1230,6 +1230,7 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     positions = [dict(item) for item in (run.get("open_positions") or scalper.get("open_positions") or ())]
     pending_entry = run.get("pending_submission") or scalper.get("pending_submission")
     pending_closes = [dict(item) for item in (run.get("pending_closes") or ())]
+    saved_recovery = dict(scalper.get("saved_recovery") or {})
     adapter_armed = bool(scalper.get("adapter_armed"))
     active = state in {"RUNNING", "PAUSED", "ARMED", "RECOVERY_REQUIRED"}
     selected_id = str(scalper.get("candidate_id") or "")
@@ -1336,6 +1337,18 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             controls += action_form("ax-scalper-live-reconcile-close", nonce,
                                     f"Reconcile pending close · {position_id}",
                                     fields=f"<input type='hidden' name='position_id' value='{fmt.attr(position_id)}'>")
+
+    if saved_recovery.get("error") or saved_recovery.get("requests"):
+        stored_rows = [
+            [cell(fmt.text(item.get("kind") or "unavailable"), label="Kind"),
+             cell(fmt.text(item.get("request_id") or "unavailable"), label="Original request ID"),
+             cell(fmt.text(item.get("position_id") or "not recorded"), label="Position")]
+            for item in saved_recovery.get("requests", ()) if isinstance(item, Mapping)
+        ]
+        controls += notice("Stored recovery state", fmt.text(saved_recovery.get("note") or "Preserve this state."), tone="warn")
+        controls += table((("Kind", False), ("Original request ID", False), ("Position", False)), stored_rows,
+                          caption="Unverified stored requests; never resend. Restart recovery may require offline reconciliation.",
+                          empty=empty_state("Stored requests unavailable", "Preserve the state and reconcile with broker records."))
 
     decisions = list(run.get("decisions") or ())
     latest_decision = decisions[-1] if decisions else {}
