@@ -1767,7 +1767,7 @@ class PositionBook:
 
     # -- verification and reconciliation ---------------------------------
 
-    def verify_protection(self) -> dict[str, Any]:
+    def verify_protection(self, *, update: bool = True) -> dict[str, Any]:
         verified: list[str] = []
         missing: list[str] = []
         for position_id, position in list(self._open.items()):
@@ -1792,7 +1792,7 @@ class PositionBook:
                 point=position.point,
                 side=position.side,
             )
-            if ok and has_pending:
+            if update and ok and has_pending:
                 position = replace(
                     position,
                     stop_price=expected_stop,
@@ -1801,7 +1801,8 @@ class PositionBook:
                 self._protection_pending.pop(position_id, None)
                 self._protection_target_pending.pop(position_id, None)
                 self._protection_request_ids.pop(position_id, None)
-            self._open[position_id] = replace(position, protection_verified=ok)
+            if update:
+                self._open[position_id] = replace(position, protection_verified=ok)
             (verified if ok else missing).append(position_id)
         return {
             "verified": verified,

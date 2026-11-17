@@ -460,7 +460,9 @@ class AutonomousScalper:
                     "explained.",
                 }
             )
-        protection = self.book.verify_protection()
+        # A status/readiness read must not adopt an ambiguous SL/TP mutation.
+        # Only explicit recovery/management can commit that change durably.
+        protection = self.book.verify_protection(update=False)
         if protection.get("missing"):
             blockers.append(
                 {
@@ -469,6 +471,12 @@ class AutonomousScalper:
                     "hint": "Verify the exact broker-side stop for each listed ticket. No new entry is permitted while protection is unconfirmed.",
                 }
             )
+        if protection.get("pending_modification"):
+            blockers.append({
+                "reason": "protection_reconciliation_required",
+                "message": "A protection request remains pending durable reconciliation.",
+                "hint": "Reconcile the exact request and broker read-back before any new entry.",
+            })
         if self.book.close_blockers or self.book.pending_closes:
             blockers.append(
                 {

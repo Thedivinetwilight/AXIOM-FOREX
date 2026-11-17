@@ -1470,3 +1470,20 @@ def test_real_account_refuses_incomplete_or_inconsistent_declaration(expected):
     verdict = verify_real_account(status(), expected)
     assert not verdict.ok
     assert "expected_account_not_declared" in verdict.reasons
+
+
+def test_status_read_does_not_adopt_or_clear_pending_protection(real):
+    run, venue, _ = build_run(real)
+    fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
+    real["fake"].protection_script = [None]
+    requested_target = Decimal("1.11500")
+    run.book.modify_protection(position_id=fill.ticket, stop_price=position.stop_price,
+                               target_price=requested_target,
+                               now_ms=int(START.timestamp() * 1000) + 100,
+                               reason="test_pending")
+    real["fake"].positions[0]["tp"] = float(requested_target)
+    before = run.book.snapshot()
+    status = run.status()
+    assert run.book.snapshot() == before
+    assert before["pending_protection_modifications"]
+    assert any(item["reason"] == "protection_reconciliation_required" for item in status["blockers"])
