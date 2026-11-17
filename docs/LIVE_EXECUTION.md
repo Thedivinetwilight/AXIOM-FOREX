@@ -111,8 +111,10 @@ After your strategy signals, the same objects paper uses decide, and then:
 6. **Never re-send** — an in-doubt order blocks every later submission until it is
    reconciled from broker history. Nothing retries automatically.
 7. **Book the broker's answer** — a confirmed fill is booked into the same ledger
-   paper uses, at the terminal's own price and the filled volume. A fill that
-   cannot be booked stops the loop instead of being dropped.
+   paper uses, at the terminal's own price and filled size. MT5 reports volume in
+   lots; before booking, the live leg translates it exactly into the catalog's
+   quantity unit (`LOTS` or `BASE_UNITS`). A fill that cannot be converted and
+   booked stops the loop instead of being dropped.
 
 ## What the page tells you
 
@@ -338,6 +340,20 @@ the plan fingerprint and bindings, quote freshness, expiry, mode, connection,
 arming, unresolved orders and broker protections. Submission calls the existing
 `LiveLeg` once; a duplicate or in-doubt request is queried, never re-sent. The
 one-shot plan is disarmed after a broker outcome or refusal.
+
+Autonomous existing-position SL/TP updates are a separate position-management
+action, not a second order route: `PositionBook` persists the exact requested
+pair before `BrokerVenue` asks the same `LiveLeg` blockers and router to dispatch
+`TRADE_ACTION_SLTP` to the attached MT5 adapter. LIVE confirmation, arming,
+account fingerprint, strategy, symbol and exact ticket/side/size/entry/protection
+checks remain in force. A terminal retcode alone never confirms a change; both
+fields must be read back from the same broker position, and the confirmed state
+must then be durably written. Unknown outcomes are non-resendable, disarm the
+adapter, and block subsequent LIVE actions until exact read-back/recovery.
+Restart recovery compares the durable requested pair with that exact ticket and
+never submits the modification again. This internal management route is not
+wired to a workstation control, and it has only been exercised against the fake
+MT5 terminal in tests.
 
 No genuine AX-SCALPER candidate passes independent replay in this deployment by
 default, and no real approval is shipped. The card reports broker-reported

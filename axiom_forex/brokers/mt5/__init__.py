@@ -52,6 +52,8 @@ from .orders import (
     MT5OrderRefused,
     MT5OrderOutcomeUnknown,
     MT5Position,
+    MT5ProtectionOutcome,
+    TRADE_ACTION_SLTP,
     build_market_request,
     cancel_pending_order,
     check_order,
@@ -60,6 +62,7 @@ from .orders import (
     netting_conflict,
     open_positions,
     send_order,
+    send_protection_modification,
 )
 from .reconcile import (
     MT5_BLOCKING_STATES,

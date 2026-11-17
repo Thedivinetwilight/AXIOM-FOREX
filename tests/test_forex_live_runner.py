@@ -18,7 +18,9 @@ real order is involved, and nothing here is a claim about any market.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,6 +40,7 @@ from axiom_forex.paper_runner.live_run import LiveRunConfig, LiveRunRefused, run
 from axiom_forex.paper_runner.provider import build_provider_platform
 from axiom_forex.paper_runner.runner import PaperStrategyRunner, RunnerConfig
 from axiom_forex.execution.mode_router import ExecutionRouter
+from app.universe.specs import QuantityUnit
 from tests.fake_mt5 import FakeMT5
 from tests.paper_provider_support import (
     BROKER_SYMBOL,
@@ -76,13 +79,14 @@ def setup_doc(tmp_path):
     return write_setup(tmp_path)
 
 
-def build_platform(setup, terminal, *, repository=None):
+def build_platform(setup, terminal, *, repository=None, spec=None):
     report = build_catalogue(terminal, [symbol_request(setup, PAIR)])
     assert report.complete, [item.audit_view() for item in report.refused]
     platform, refusal = build_provider_platform(
         setup=setup,
         resolved=report.resolved_for(PAIR),
         repository=repository or ForexRepository(":memory:"),
+        spec=spec,
         terminal=terminal,
     )
     assert refusal is None, refusal.audit_view()
@@ -105,7 +109,7 @@ def make_live_leg(platform, adapter, repository, audit, mode, *, strategy_id="tr
     )
 
 
-def make_runner(platform, feed, *, mode, live=None):
+def make_runner(platform, feed, *, mode, live=None, quantity=Decimal("0.10")):
     chosen = candidate_for()
     return PaperStrategyRunner(
         lane=lane_from_platform(platform),
@@ -115,7 +119,7 @@ def make_runner(platform, feed, *, mode, live=None):
         config=RunnerConfig(
             run_id="live-runner",
             symbol=PAIR,
-            quantity=Decimal("0.10"),
+            quantity=quantity,
             pause_seconds=0,
             max_cycles=40,
         ),
@@ -161,6 +165,109 @@ def test_a_live_runner_sends_one_order_and_books_the_fill(terminal, setup_doc):
         # Nothing was simulated: the paper engine never filled anything.
         assert platform.paper_execution.fills() == ()
         assert view["counters"]["fills"] >= 1
+    finally:
+        harness.adapter.disconnect(reason="test")
+        harness.repository.close()
+
+
+def test_base_unit_catalog_fill_round_trips_through_broker_lots_into_ledger_units(
+    terminal, tmp_path
+):
+    setup = write_setup(tmp_path, execution={"quantity": "10000"})
+    report = build_catalogue(terminal, [symbol_request(setup, PAIR)])
+    assert report.complete, [item.audit_view() for item in report.refused]
+    resolved = report.resolved_for(PAIR)
+    base_spec = replace(
+        resolved.spec,
+        min_quantity=Decimal(1000),
+        quantity_step=Decimal(1000),
+        max_quantity=Decimal(1000000),
+        quantity_unit=QuantityUnit.BASE_UNITS,
+    )
+    platform = build_platform(
+        setup,
+        terminal,
+        repository=ForexRepository(":memory:"),
+        spec=base_spec,
+    )
+    harness = build_harness(settings_overrides={"max_price_drift_points": 5000})
+    try:
+        harness.arm()
+        mode = Mode("LIVE", True)
+        leg = make_live_leg(platform, harness.adapter, harness.repository, harness.audit, mode)
+        runner = make_runner(
+            platform,
+            ReplayBarFeed(bars=make_bars(mid_series(), platform.spec)),
+            mode=mode,
+            live=leg,
+            quantity=Decimal(10000),
+        )
+        runner.restore()
+        assert runner.start()["state"] == "RUNNING"
+        view = runner.run(max_steps=40)
+
+        assert view["live_orders"] == 1, view["last_live_outcome"]
+        assert len(harness.fake.send_requests) == 1
+        assert Decimal(str(harness.fake.send_requests[0]["volume"])) == Decimal("0.1")
+        booked = next(iter(platform.portfolio.positions.values()))
+        assert booked.quantity == Decimal(10000)
+        assert booked.base_units == Decimal(10000)
+        assert Decimal(leg.booked[0]["quantity"]) == Decimal(10000)
+        assert leg.booked[0]["quantity_unit"] == QuantityUnit.BASE_UNITS.value
+        assert leg.booked[0]["broker_volume_lots"] == "0.1"
+
+        invalid_fill = leg._book(
+            SimpleNamespace(action="OPEN", request=SimpleNamespace(side="BUY")),
+            SimpleNamespace(
+                volume_filled=Decimal("0.015"),
+                price=Decimal("1.1002"),
+                order_ticket=7999,
+            ),
+        )
+        assert invalid_fill["booked"] is False
+        assert invalid_fill["detail"] == "invalid_quantity"
+        assert "mt5:7999" not in platform.portfolio.positions
+
+        # The close plan is expressed in catalog units, the adapter sends lots,
+        # and a broker fill is translated back before the partial close is booked.
+        from axiom_forex.brokers.mt5.symbols import to_broker_volume
+        from axiom_forex.scalper.live_venue import BrokerPlanFactory
+
+        close_plan = BrokerPlanFactory(
+            platform=platform, strategy_id="base-unit-close-test", clock=lambda: START
+        )(
+            ticket="7001",
+            quote=SimpleNamespace(
+                source_time=START,
+                received_at=START,
+                bid=Decimal("1.1000"),
+                ask=Decimal("1.1002"),
+                tick_id="base-units-close-quote",
+            ),
+            quantity=Decimal(5000),
+            request_id="base-units-close-request",
+        )
+        assert close_plan.request.quantity == Decimal(5000)
+        assert close_plan.request.close_intent.quantity_unit == QuantityUnit.BASE_UNITS.value
+        broker_close_volume, conversion = to_broker_volume(
+            base_spec, close_plan.request.quantity, terminal.symbol_info(BROKER_SYMBOL)
+        )
+        assert conversion.valid and broker_close_volume == Decimal("0.05")
+
+        close_booking = leg._book(
+            close_plan,
+            SimpleNamespace(
+                volume_filled=broker_close_volume,
+                price=Decimal("1.1000"),
+                order_ticket=7002,
+                deal_ticket=8002,
+            ),
+        )
+        assert close_booking["booked"] is True, close_booking
+        assert Decimal(close_booking["quantity"]) == Decimal(5000)
+        assert close_booking["broker_volume_lots"] == "0.05"
+        assert platform.portfolio.positions["mt5:7001"].quantity == Decimal(5000)
+        assert platform.portfolio.closed_trades[-1].quantity == Decimal(5000)
     finally:
         harness.adapter.disconnect(reason="test")
         harness.repository.close()

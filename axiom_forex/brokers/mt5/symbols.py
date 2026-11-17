@@ -8,7 +8,8 @@ two so that:
   because a quote with the wrong grid cannot be evaluated;
 * an order is accepted only when the *contract* terms agree exactly -- digits,
   tick size, contract size, minimum volume, volume step -- and the catalog's
-  maximum does not exceed the broker's.
+  maximum does not exceed the broker's. Catalog BASE_UNITS quantities are
+  compared in broker lots only after exact contract-size conversion.
 
 When they disagree the catalog is wrong (or stale) and trading stops with
 ``mt5_symbol_spec_mismatch`` and the precise diff, which is exactly the
@@ -98,34 +99,66 @@ def cross_check(spec: CurrencyPairSpec, info: MT5SymbolInfo) -> SymbolCrossCheck
         errors.append("mt5_symbol_tick_mismatch")
 
     trading_ok = data_ok
+    contract_size = spec.contract_size_decimal()
     if not compare(
         "contract_size",
-        spec.contract_size_decimal().normalize(),
+        contract_size.normalize(),
         info.trade_contract_size.normalize(),
     ):
         trading_ok = False
         errors.append("mt5_symbol_contract_size_mismatch")
-    if not compare(
-        "min_quantity",
-        spec.min_quantity_decimal().normalize(),
-        info.volume_min.normalize(),
+
+    # Catalog quantities are expressed in their declared unit, while MT5's
+    # minimum, step and maximum are always lots. Compare like with like; for a
+    # BASE_UNITS catalog, the exact conversion is base units / contract size.
+    try:
+        quantity_unit = QuantityUnit(spec.quantity_unit_value)
+    except (TypeError, ValueError):
+        quantity_unit = None
+
+    def catalog_volume_in_lots(quantity: Decimal) -> Decimal | None:
+        if quantity_unit == QuantityUnit.LOTS:
+            return quantity
+        if quantity_unit != QuantityUnit.BASE_UNITS or contract_size <= 0:
+            return None
+        lots = quantity / contract_size
+        return lots if lots * contract_size == quantity else None
+
+    minimum_lots = catalog_volume_in_lots(spec.min_quantity_decimal())
+    if minimum_lots is None:
+        trading_ok = False
+        errors.append("mt5_symbol_min_volume_mismatch")
+        differences.append(("min_quantity", str(spec.min_quantity), str(info.volume_min)))
+    elif not compare(
+        "min_quantity", minimum_lots.normalize(), info.volume_min.normalize()
     ):
         trading_ok = False
         errors.append("mt5_symbol_min_volume_mismatch")
-    if not compare(
-        "quantity_step",
-        spec.quantity_step_decimal().normalize(),
-        info.volume_step.normalize(),
+
+    step_lots = catalog_volume_in_lots(spec.quantity_step_decimal())
+    if step_lots is None:
+        trading_ok = False
+        errors.append("mt5_symbol_volume_step_mismatch")
+        differences.append(("quantity_step", str(spec.quantity_step), str(info.volume_step)))
+    elif not compare(
+        "quantity_step", step_lots.normalize(), info.volume_step.normalize()
     ):
         trading_ok = False
         errors.append("mt5_symbol_volume_step_mismatch")
+
     max_quantity = spec.max_quantity_decimal()
-    if max_quantity is not None and max_quantity > info.volume_max:
-        trading_ok = False
-        errors.append("mt5_symbol_max_volume_exceeded")
-        differences.append(
-            ("max_quantity", str(max_quantity), str(info.volume_max))
-        )
+    if max_quantity is not None:
+        max_lots = catalog_volume_in_lots(max_quantity)
+        if max_lots is None:
+            trading_ok = False
+            errors.append("mt5_symbol_max_volume_exceeded")
+            differences.append(
+                ("max_quantity", str(max_quantity), str(info.volume_max))
+            )
+        elif max_lots > info.volume_max:
+            trading_ok = False
+            errors.append("mt5_symbol_max_volume_exceeded")
+            differences.append(("max_quantity", str(max_lots), str(info.volume_max)))
     if not info.tradable:
         trading_ok = False
         errors.append("mt5_symbol_not_fully_tradable")

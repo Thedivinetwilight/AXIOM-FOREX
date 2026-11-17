@@ -24,9 +24,9 @@ Three rules shape the design:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping
 
 from axiom_forex.risk.aggregate import CorrelationMatrix
 
@@ -607,14 +607,30 @@ class Guardian:
             protected=protected,
         )
 
-    def record_close(self, position_id: str, *, realised: Decimal, at_ms: int) -> None:
+    def record_partial_realised(self, *, realised: Decimal, at_ms: int) -> None:
+        """Book partial cash P&L without counting a position as a closed trade."""
+
+        self._realised_today += _d(realised)
+        if self._daily_loss_breached():
+            self._halt_notes.append(f"{at_ms}: daily loss limit reached — entries suspended")
+            self.suspend_entries(DAILY_LOSS_LIMIT)
+
+    def record_close(
+        self,
+        position_id: str,
+        *,
+        realised: Decimal,
+        at_ms: int,
+        total_realised: Decimal | None = None,
+    ) -> None:
         self._positions.pop(position_id, None)
         realised = _d(realised)
+        trade_realised = realised if total_realised is None else _d(total_realised)
         self._realised_today += realised
         self._closed += 1
-        if realised < 0:
+        if trade_realised < 0:
             self._loss_streak += 1
-        elif realised > 0:
+        elif trade_realised > 0:
             self._wins += 1
             self._loss_streak = 0
         if self._loss_streak >= self._limits.max_loss_streak:
@@ -715,6 +731,224 @@ class Guardian:
             return False
         loss = (self._day_start_equity - self._equity) / self._day_start_equity
         return loss >= self._limits.max_daily_loss_fraction
+
+    def _correlation_identity(self) -> dict[str, Any] | None:
+        matrix = self._correlations
+        if matrix is None:
+            return None
+        return {
+            "pairs": sorted(matrix.pairs),
+            "source": matrix.source,
+            "version": matrix.version,
+            "values": {
+                f"{first}/{second}": str(value)
+                for (first, second), value in sorted(matrix.values.items())
+            },
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        """Persist risk observations and counters that affect future admission."""
+
+        return {
+            "schema": "axiom-scalper-guardian-v1",
+            "limits": self._limits.audit_view(),
+            "engine": self._engine,
+            "declared_slippage_points": (
+                None if self._declared_slippage is None else str(self._declared_slippage)
+            ),
+            "correlations": self._correlation_identity(),
+            "balance": str(self._balance),
+            "equity": str(self._equity),
+            "peak_equity": str(self._peak_equity),
+            "day_start_equity": (
+                None if self._day_start_equity is None else str(self._day_start_equity)
+            ),
+            "day_key": self._day_key,
+            "realised_today": str(self._realised_today),
+            "loss_streak": self._loss_streak,
+            "closed": self._closed,
+            "wins": self._wins,
+            "positions": [item.audit_view() for item in self._positions.values()],
+            "suspended": list(self._suspended),
+            "emergency": self._emergency,
+            "halt_notes": list(self._halt_notes),
+            "observed_equity_at": self._observed_equity_at,
+            "last_quote_age": dict(self._last_quote_age),
+            "last_spread": {key: str(value) for key, value in self._last_spread.items()},
+            "last_slippage": None if self._last_slippage is None else str(self._last_slippage),
+            "last_fill_latency": self._last_fill_latency,
+        }
+
+    def _parse_persisted_state(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        if str(state.get("schema") or "") != "axiom-scalper-guardian-v1":
+            raise ValueError("guardian_state_schema_invalid")
+        if dict(state.get("limits") or {}) != self._limits.audit_view():
+            raise ValueError("guardian_limits_differ")
+        if str(state.get("engine") or "") != self._engine:
+            raise ValueError("guardian_engine_differ")
+        if state.get("declared_slippage_points") != (
+            None if self._declared_slippage is None else str(self._declared_slippage)
+        ):
+            raise ValueError("guardian_slippage_basis_differ")
+        if state.get("correlations") != self._correlation_identity():
+            raise ValueError("guardian_correlation_matrix_differ")
+
+        def decimal_value(value: Any, name: str, *, optional: bool = False) -> Decimal | None:
+            if value is None and optional:
+                return None
+            try:
+                parsed = Decimal(str(value))
+            except Exception as exc:
+                raise ValueError(f"guardian_{name}_invalid") from exc
+            if not parsed.is_finite():
+                raise ValueError(f"guardian_{name}_invalid")
+            return parsed
+
+        def int_value(value: Any, name: str, *, optional: bool = False) -> int | None:
+            if value is None and optional:
+                return None
+            if isinstance(value, bool):
+                raise ValueError(f"guardian_{name}_invalid")
+            try:
+                parsed = int(value)
+            except Exception as exc:
+                raise ValueError(f"guardian_{name}_invalid") from exc
+            if str(parsed) != str(value) or parsed < 0:
+                raise ValueError(f"guardian_{name}_invalid")
+            return parsed
+
+        balance = decimal_value(state.get("balance"), "balance")
+        equity = decimal_value(state.get("equity"), "equity")
+        peak = decimal_value(state.get("peak_equity"), "peak_equity")
+        day_start = decimal_value(state.get("day_start_equity"), "day_start_equity", optional=True)
+        realised = decimal_value(state.get("realised_today"), "realised_today")
+        loss_streak = int_value(state.get("loss_streak"), "loss_streak")
+        closed = int_value(state.get("closed"), "closed")
+        wins = int_value(state.get("wins"), "wins")
+        if balance < 0 or equity < 0 or peak < equity or wins > closed or loss_streak > closed:
+            raise ValueError("guardian_account_counters_invalid")
+        if day_start is not None and day_start < 0:
+            raise ValueError("guardian_day_start_invalid")
+
+        raw_positions = state.get("positions")
+        if not isinstance(raw_positions, list):
+            raise ValueError("guardian_positions_missing")
+        positions: dict[str, OpenPositionRisk] = {}
+        for row in raw_positions:
+            if not isinstance(row, Mapping):
+                raise ValueError("guardian_position_invalid")
+            position_id = str(row.get("position_id") or "")
+            symbol = str(row.get("symbol") or "")
+            pair = str(row.get("pair") or "")
+            side = str(row.get("side") or "").upper()
+            risk = decimal_value(row.get("risk_account"), "position_risk")
+            notional = decimal_value(row.get("notional_account"), "position_notional")
+            currencies = row.get("currencies")
+            if (
+                not position_id
+                or position_id in positions
+                or not symbol
+                or not pair
+                or side not in {"BUY", "SELL"}
+                or risk < 0
+                or notional <= 0
+                or not isinstance(currencies, list)
+                or any(not isinstance(value, str) or not value for value in currencies)
+                or not isinstance(row.get("protected"), bool)
+            ):
+                raise ValueError("guardian_position_identity_invalid")
+            positions[position_id] = OpenPositionRisk(
+                position_id=position_id,
+                symbol=symbol,
+                pair=pair,
+                side=side,
+                risk_account=risk,
+                notional_account=notional,
+                currencies=tuple(currencies),
+                protected=row["protected"],
+            )
+
+        suspended = state.get("suspended")
+        halt_notes = state.get("halt_notes")
+        if (
+            not isinstance(suspended, list)
+            or any(not isinstance(value, str) or not value for value in suspended)
+            or len(set(suspended)) != len(suspended)
+            or not isinstance(halt_notes, list)
+            or any(not isinstance(value, str) for value in halt_notes)
+        ):
+            raise ValueError("guardian_suspension_state_invalid")
+        last_quote_age = state.get("last_quote_age")
+        last_spread = state.get("last_spread")
+        if not isinstance(last_quote_age, Mapping) or not isinstance(last_spread, Mapping):
+            raise ValueError("guardian_quote_observations_invalid")
+        parsed_quote_age = {
+            str(key): int_value(value, "quote_age") for key, value in last_quote_age.items()
+        }
+        parsed_spread = {
+            str(key): decimal_value(value, "spread") for key, value in last_spread.items()
+        }
+        observed_equity_at = int_value(
+            state.get("observed_equity_at"), "observed_equity_at", optional=True
+        )
+        last_slippage = decimal_value(state.get("last_slippage"), "last_slippage", optional=True)
+        last_fill_latency = int_value(
+            state.get("last_fill_latency"), "last_fill_latency", optional=True
+        )
+        emergency = state.get("emergency")
+        if emergency is not None and (not isinstance(emergency, str) or not emergency):
+            raise ValueError("guardian_emergency_state_invalid")
+        day_key = state.get("day_key")
+        if day_key is not None and not isinstance(day_key, str):
+            raise ValueError("guardian_day_key_invalid")
+        return {
+            "balance": balance,
+            "equity": equity,
+            "peak_equity": peak,
+            "day_start_equity": day_start,
+            "day_key": day_key,
+            "realised_today": realised,
+            "loss_streak": loss_streak,
+            "closed": closed,
+            "wins": wins,
+            "positions": positions,
+            "suspended": list(suspended),
+            "emergency": emergency,
+            "halt_notes": list(halt_notes),
+            "observed_equity_at": observed_equity_at,
+            "last_quote_age": parsed_quote_age,
+            "last_spread": parsed_spread,
+            "last_slippage": last_slippage,
+            "last_fill_latency": last_fill_latency,
+        }
+
+    def validate_state(self, state: Mapping[str, Any]) -> None:
+        """Validate a snapshot without mutating the live guard."""
+
+        self._parse_persisted_state(state)
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Restore risk history only after its full schema and config match."""
+
+        parsed = self._parse_persisted_state(state)
+        self._balance = parsed["balance"]
+        self._equity = parsed["equity"]
+        self._peak_equity = parsed["peak_equity"]
+        self._day_start_equity = parsed["day_start_equity"]
+        self._day_key = parsed["day_key"]
+        self._realised_today = parsed["realised_today"]
+        self._loss_streak = parsed["loss_streak"]
+        self._closed = parsed["closed"]
+        self._wins = parsed["wins"]
+        self._positions = parsed["positions"]
+        self._suspended = parsed["suspended"]
+        self._emergency = parsed["emergency"]
+        self._halt_notes = parsed["halt_notes"]
+        self._observed_equity_at = parsed["observed_equity_at"]
+        self._last_quote_age = parsed["last_quote_age"]
+        self._last_spread = parsed["last_spread"]
+        self._last_slippage = parsed["last_slippage"]
+        self._last_fill_latency = parsed["last_fill_latency"]
 
     def status(self) -> dict[str, Any]:
         allowed, reasons = self.may_open()

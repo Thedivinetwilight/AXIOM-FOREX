@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 from .config import LIVE
 from .execution import (
@@ -55,6 +56,8 @@ LEG_REFUSED = "venue_leg_refused"
 UNRESOLVED_LATCHED = "venue_unresolved_order"
 MODIFICATION_UNSUPPORTED = "venue_modification_unsupported"
 NOT_AN_ENTRY = "venue_not_an_entry"
+CLOSE_QUOTE_REQUIRED = "venue_close_quote_required"
+CLOSE_OUTCOME_UNCONFIRMED = "venue_close_outcome_unconfirmed"
 
 
 def _d(value: Any) -> Decimal:
@@ -70,12 +73,14 @@ class VenueRecord:
 
     submissions: list[dict[str, Any]] = field(default_factory=list)
     closes: list[dict[str, Any]] = field(default_factory=list)
+    protection_modifications: list[dict[str, Any]] = field(default_factory=list)
     refusals: list[dict[str, Any]] = field(default_factory=list)
 
     def audit_view(self) -> dict[str, Any]:
         return {
             "submissions": [dict(item) for item in self.submissions[-20:]],
             "closes": [dict(item) for item in self.closes[-20:]],
+            "protection_modifications": [dict(item) for item in self.protection_modifications[-20:]],
             "refusals": [dict(item) for item in self.refusals[-20:]],
         }
 
@@ -121,6 +126,7 @@ class BrokerVenue:
             "mode": self.mode,
             "submitted": len(self.record.submissions),
             "closes": len(self.record.closes),
+            "protection_modifications": len(self.record.protection_modifications),
             "refusals": len(self.record.refusals),
             "unresolved": sorted(self._unresolved),
         }
@@ -149,14 +155,59 @@ class BrokerVenue:
         except Exception:
             return (None, None)
 
-    def position_ids(self) -> list[str]:
+    def position_details(self) -> list[dict[str, Any]]:
+        """Read position identity and size without turning read failures into flat."""
+
         if self._position_reader is None:
-            return []
+            raise RuntimeError("venue_position_reader_unavailable")
         try:
-            rows = list(self._position_reader() or ())
+            source_rows = list(self._position_reader() or ())
+        except Exception as exc:
+            raise RuntimeError("venue_position_read_failed") from exc
+        rows: list[dict[str, Any]] = []
+        for source in source_rows:
+            if isinstance(source, Mapping):
+                row = dict(source)
+            else:
+                audit = getattr(source, "audit_view", None)
+                if not callable(audit):
+                    raise RuntimeError("venue_position_row_unreadable")
+                row = dict(audit())
+            ticket = str(row.get("ticket") or "")
+            if not ticket:
+                raise RuntimeError("venue_position_ticket_missing")
+            row["ticket"] = ticket
+            row.setdefault("position_id", ticket)
+            side = str(row.get("side") or "").upper()
+            if side not in {"BUY", "SELL"}:
+                raw_type = row.get("type")
+                type_name = "" if isinstance(raw_type, bool) else str(raw_type or "").upper()
+                if not isinstance(raw_type, bool) and (
+                    raw_type == 0 or type_name in {"0", "BUY", "ORDER_TYPE_BUY", "POSITION_TYPE_BUY"}
+                ):
+                    side = "BUY"
+                elif not isinstance(raw_type, bool) and (
+                    raw_type == 1 or type_name in {"1", "SELL", "ORDER_TYPE_SELL", "POSITION_TYPE_SELL"}
+                ):
+                    side = "SELL"
+                else:
+                    side = ""
+            row["side"] = side
+            row["symbol"] = str(row.get("symbol") or "")
+            row["lots"] = row.get("lots", row.get("volume"))
+            row["entry_price"] = row.get("entry_price", row.get("price_open"))
+            row["stop_price"] = row.get("stop_price", row.get("stop_loss", row.get("sl")))
+            row["target_price"] = row.get(
+                "target_price", row.get("take_profit", row.get("tp"))
+            )
+            rows.append(row)
+        return rows
+
+    def position_ids(self) -> list[str]:
+        try:
+            return [row["ticket"] for row in self.position_details()]
         except Exception:
             return []
-        return [str(row.get("ticket") or "") for row in rows if row.get("ticket")]
 
     # -- submission ------------------------------------------------------
 
@@ -344,78 +395,299 @@ class BrokerVenue:
     # -- query / modify / close ------------------------------------------
 
     def query(self, request_id: str) -> Fill | None:
-        """Ask the durable record what became of one submission.  Sends nothing."""
+        """Read one exact durable outcome.  A matching position is not a fill receipt."""
 
         reader = getattr(self.leg, "last_outcome", None)
-        outcome: Mapping[str, Any] = {}
+        raw: Mapping[str, Any] = {}
         repository = getattr(getattr(self.leg, "repository", None), "get_order", None)
         if callable(repository):
             try:
-                outcome = dict(repository(request_id) or {})
+                raw = dict(repository(request_id) or {})
             except Exception:
-                outcome = {}
-        elif isinstance(reader, Mapping):
-            outcome = dict(reader)
-        if not outcome:
+                raw = {}
+        if isinstance(reader, Mapping):
+            candidate = dict(reader)
+            if str(candidate.get("request_id") or "") == str(request_id):
+                raw = {**raw, **candidate}
+        if not raw:
+            history = getattr(self.leg, "history", ())
+            for candidate in reversed(tuple(history or ())):
+                if isinstance(candidate, Mapping) and str(candidate.get("request_id") or "") == str(request_id):
+                    raw = dict(candidate)
+                    break
+        if not raw or str(raw.get("request_id") or "") != str(request_id):
             return None
-        state = str(outcome.get("state") or "").upper()
-        if state in {"SUBMITTING", "ACCEPTED", "PARTIAL", ""}:
-            # Still in doubt: report it as unknown and keep the latch closed.
+
+        leg_outcome = raw.get("leg_outcome")
+        if isinstance(leg_outcome, Mapping):
+            combined = {**raw, **dict(leg_outcome)}
+        else:
+            broker_outcome = raw.get("outcome")
+            combined = {
+                **(dict(broker_outcome) if isinstance(broker_outcome, Mapping) else {}),
+                **raw,
+            }
+        booking = combined.get("booking")
+        booking = dict(booking) if isinstance(booking, Mapping) else {}
+        state = str(combined.get("state") or "").upper()
+        submitted = bool(combined.get("submitted", True))
+        unknown = bool(combined.get("unknown")) or state in {"SUBMITTING", "UNRESOLVED", ""}
+        filled = _d(combined.get("volume_filled"))
+        requested = _d(
+            combined.get("volume_requested")
+            or combined.get("volume")
+            or combined.get("quantity")
+        )
+        price_value = (
+            booking.get("price")
+            or combined.get("price")
+        )
+        price = None if price_value is None else _d(price_value)
+        booking_id = str(booking.get("position_id") or "")
+        expected_id = str(combined.get("close_position_id") or "")
+        action = str(booking.get("action") or "").upper()
+        booked = bool(combined.get("booked")) or bool(booking.get("booked"))
+        if expected_id:
+            identity_matches = action == "CLOSE" and booking_id == expected_id
+            position_id = expected_id
+        elif action == "CLOSE":
+            identity_matches = bool(booking_id)
+            position_id = booking_id
+        else:
+            identity_matches = action == "OPEN" and bool(booking_id)
+            position_id = booking_id
+
+        if not submitted:
+            self._unresolved.discard(request_id)
             return Fill(
                 request_id=request_id,
-                status=UNKNOWN_OUTCOME,
-                filled_lots=_d(outcome.get("volume_filled")),
-                requested_lots=_d(outcome.get("volume_requested")),
+                status=BLOCKED,
+                filled_lots=Decimal(0),
+                requested_lots=requested,
                 price=None,
                 spread_points=Decimal(0),
                 slippage_points=Decimal(0),
                 latency_ms=0,
                 ticket=None,
-                reason="still_unknown",
+                reason=str(combined.get("reason") or LEG_REFUSED),
+                detail=str(combined.get("detail") or ""),
+                simulated=False,
+            )
+        if state == "REJECTED" or "REJECT" in str(combined.get("classification") or "").upper():
+            self._unresolved.discard(request_id)
+            return Fill(
+                request_id=request_id,
+                status=REJECTED,
+                filled_lots=Decimal(0),
+                requested_lots=requested,
+                price=None,
+                spread_points=Decimal(0),
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=None,
+                reason=str(combined.get("retcode_name") or combined.get("reason") or "rejected"),
                 detail=state,
                 simulated=False,
             )
+
+        if (
+            unknown
+            or state not in {"FILLED", "PARTIAL"}
+            or not booked
+            or not identity_matches
+            or not filled.is_finite()
+            or filled <= 0
+            or not requested.is_finite()
+            or requested <= 0
+            or filled > requested
+            or price is None
+            or not price.is_finite()
+            or price <= 0
+        ):
+            self._unresolved.add(request_id)
+            return Fill(
+                request_id=request_id,
+                status=UNKNOWN_OUTCOME,
+                filled_lots=filled,
+                requested_lots=requested,
+                price=price,
+                spread_points=Decimal(0),
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=None,
+                reason="close_outcome_unconfirmed" if expected_id else "outcome_unconfirmed",
+                detail=state,
+                simulated=False,
+            )
+
         self._unresolved.discard(request_id)
-        filled = _d(outcome.get("volume_filled"))
+        ticket = position_id.split(":", 1)[1] if ":" in position_id else position_id
         return Fill(
             request_id=request_id,
-            status=ACCEPTED if filled > 0 else REJECTED,
+            status=ACCEPTED,
             filled_lots=filled,
-            requested_lots=_d(outcome.get("volume_requested")),
-            price=None,
+            requested_lots=requested,
+            price=price,
             spread_points=Decimal(0),
             slippage_points=Decimal(0),
             latency_ms=0,
-            ticket=str(outcome.get("order_ticket") or outcome.get("deal_ticket") or "") or None,
-            reason=str(outcome.get("retcode_name") or state),
-            detail=state,
+            ticket=ticket,
+            reason=str(combined.get("retcode_name") or state),
+            detail="durable broker fill and ledger booking confirmed",
             simulated=False,
         )
 
     def modify_protection(
-        self, *, ticket: str, stop_price: Decimal | None, target_price: Decimal | None
+        self,
+        *,
+        ticket: str,
+        stop_price: Decimal | None,
+        target_price: Decimal | None,
+        request_id: str | None = None,
     ) -> bool:
-        """AXIOM's guarded path has no stop-modification route, and says so.
+        """Modify protection through the existing LiveLeg/router/adapter path.
 
-        Returning ``False`` is the honest answer: the position book then reports
-        the protection it could not set instead of believing it was set.
+        The position is resolved from a fresh broker read and its identity is
+        passed through the guarded leg. The returned bool is only an execution
+        hint; :class:`PositionBook` still requires its own broker read-back
+        before it updates managed protection.
         """
 
-        self.record.refusals.append(
-            {
-                "request_id": f"modify:{ticket}",
-                "reason": MODIFICATION_UNSUPPORTED,
-                "detail": "no stop-modification route exists on the guarded live path",
+        request_id = str(request_id or f"modify:{ticket}:{uuid4().hex}")
+        position_ticket = str(ticket or "")
+        if position_ticket.startswith("mt5:"):
+            position_ticket = position_ticket.split(":", 1)[1]
+        if self._unresolved:
+            detail = "an earlier broker order is unresolved"
+            self.record.refusals.append(
+                {"request_id": request_id, "ticket": position_ticket,
+                 "reason": UNRESOLVED_LATCHED, "detail": detail}
+            )
+            return False
+        if self._position_reader is None:
+            self.record.refusals.append(
+                {"request_id": request_id, "ticket": position_ticket,
+                 "reason": "venue_position_reader_unavailable"}
+            )
+            return False
+        try:
+            rows = self.position_details()
+        except Exception as exc:
+            self.record.refusals.append(
+                {"request_id": request_id, "ticket": position_ticket,
+                 "reason": "venue_position_read_failed", "detail": type(exc).__name__}
+            )
+            return False
+        matches = [row for row in rows if str(row.get("ticket") or "") == position_ticket]
+        if len(matches) != 1:
+            self.record.refusals.append(
+                {"request_id": request_id, "ticket": position_ticket,
+                 "reason": "venue_protection_position_not_unique"}
+            )
+            return False
+        position = matches[0]
+        symbol = str(position.get("symbol") or "")
+        if self._symbols and symbol.upper() not in {
+            str(item).upper() for item in self._symbols.values()
+        }:
+            self.record.refusals.append(
+                {"request_id": request_id, "ticket": position_ticket,
+                 "symbol": symbol, "reason": "venue_protection_symbol_unknown"}
+            )
+            return False
+        side = str(position.get("side") or "").upper()
+        lots = _d(position.get("lots"))
+        entry = _d(position.get("entry_price"))
+        stop = _d(stop_price)
+        target = None if target_price is None else _d(target_price)
+        if (
+            side not in {"BUY", "SELL"}
+            or lots <= 0
+            or entry <= 0
+            or stop <= 0
+            or (target is not None and target <= 0)
+        ):
+            self.record.refusals.append(
+                {"request_id": request_id, "ticket": position_ticket,
+                 "symbol": symbol, "reason": "venue_protection_request_invalid"}
+            )
+            return False
+        modify = getattr(self.leg, "modify_protection", None)
+        if not callable(modify):
+            self.record.refusals.append(
+                {
+                    "request_id": request_id,
+                    "ticket": position_ticket,
+                    "symbol": symbol,
+                    "reason": MODIFICATION_UNSUPPORTED,
+                    "detail": "the configured LiveLeg has no guarded protection action",
+                }
+            )
+            return False
+        try:
+            result = modify(
+                request_id=request_id,
+                ticket=position_ticket,
+                symbol=symbol,
+                stop_price=stop,
+                target_price=target,
+                expected_position=dict(position),
+            )
+        except Exception as exc:
+            record = {
+                "request_id": request_id,
+                "ticket": position_ticket,
+                "symbol": symbol,
+                "state": "UNRESOLVED",
+                "sent": False,
+                "unknown": True,
+                "verified": False,
+                "reason": "venue_protection_route_raised",
+                "detail": type(exc).__name__,
             }
-        )
-        return False
+            self.record.protection_modifications.append(record)
+            return False
+        if isinstance(result, Mapping):
+            record = dict(result)
+        else:
+            record = {
+                "request_id": request_id,
+                "ticket": position_ticket,
+                "symbol": symbol,
+                "state": "ACCEPTED" if result is True else "REFUSED",
+                "sent": bool(result),
+                "unknown": False,
+                "verified": False,
+                "reason": "" if result else "venue_protection_refused",
+            }
+        self.record.protection_modifications.append(record)
+        if not record.get("verified") and not record.get("sent"):
+            self.record.refusals.append(
+                {"request_id": request_id, "ticket": position_ticket,
+                 "symbol": symbol, "reason": record.get("reason", "venue_protection_refused")}
+            )
+        return bool(record.get("verified"))
+
+    def close_request_id(self, ticket: str) -> str:
+        """Prepare a unique request identity that can be fsynced before sending."""
+
+        return f"c{ticket}-{uuid4().hex}"
 
     def close(
-        self, *, ticket: str, price: Decimal, spread_points: Decimal, reason: str
+        self,
+        *,
+        ticket: str,
+        price: Decimal,
+        spread_points: Decimal,
+        reason: str,
+        quote: Tick | None = None,
+        quantity: Decimal | None = None,
+        request_id: str | None = None,
     ) -> Fill:
+        request_id = str(request_id or self.close_request_id(ticket))
         if self._unresolved:
             return Fill(
-                request_id=f"close:{ticket}",
+                request_id=request_id,
                 status=BLOCKED,
                 filled_lots=Decimal(0),
                 requested_lots=Decimal(0),
@@ -428,8 +700,47 @@ class BrokerVenue:
                 detail="an earlier submission is unresolved",
                 simulated=False,
             )
+        if quote is None:
+            fill = Fill(
+                request_id=request_id,
+                status=BLOCKED,
+                filled_lots=Decimal(0),
+                requested_lots=Decimal(0),
+                price=None,
+                spread_points=spread_points,
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=str(ticket),
+                reason=CLOSE_QUOTE_REQUIRED,
+                detail="a close needs the exact current quote used to build its gate context",
+                simulated=False,
+            )
+            self.record.refusals.append({"request_id": fill.request_id, **fill.audit_view()})
+            return fill
+        close_quantity = None if quantity is None else _d(quantity)
+        if close_quantity is not None and (
+            not close_quantity.is_finite() or close_quantity <= 0
+        ):
+            fill = Fill(
+                request_id=request_id,
+                status=BLOCKED,
+                filled_lots=Decimal(0),
+                requested_lots=Decimal(0),
+                price=None,
+                spread_points=spread_points,
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=str(ticket),
+                reason="invalid_close_quantity",
+                simulated=False,
+            )
+            self.record.refusals.append({"request_id": fill.request_id, **fill.audit_view()})
+            return fill
         try:
-            plan = self._plan_factory(ticket=str(ticket), price=_d(price), reason=reason)
+            plan = self._plan_factory(
+                ticket=str(ticket), price=_d(price), reason=reason,
+                quote=quote, quantity=close_quantity, request_id=request_id,
+            )
         except Exception as exc:
             plan = None
             detail = type(exc).__name__
@@ -437,7 +748,7 @@ class BrokerVenue:
             detail = ""
         if plan is None:
             fill = Fill(
-                request_id=f"close:{ticket}",
+                request_id=request_id,
                 status=BLOCKED,
                 filled_lots=Decimal(0),
                 requested_lots=Decimal(0),
@@ -452,12 +763,33 @@ class BrokerVenue:
             )
             self.record.refusals.append({"request_id": fill.request_id, **fill.audit_view()})
             return fill
+
+        plan_request_id = str(
+            getattr(getattr(plan, "request", None), "request_id", "") or request_id
+        )
+        if plan_request_id != request_id:
+            fill = Fill(
+                request_id=request_id,
+                status=BLOCKED,
+                filled_lots=Decimal(0),
+                requested_lots=close_quantity or Decimal(0),
+                price=None,
+                spread_points=spread_points,
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=str(ticket),
+                reason="close_request_identity_mismatch",
+                detail="the plan factory did not preserve the durably prepared request id",
+                simulated=False,
+            )
+            self.record.refusals.append({"request_id": fill.request_id, **fill.audit_view()})
+            return fill
         try:
             outcome = dict(self.leg.execute(plan) or {})
         except Exception as exc:
-            self._unresolved.add(f"close:{ticket}")
-            return Fill(
-                request_id=f"close:{ticket}",
+            self._unresolved.add(request_id)
+            fill = Fill(
+                request_id=request_id,
                 status=UNKNOWN_OUTCOME,
                 filled_lots=Decimal(0),
                 requested_lots=Decimal(0),
@@ -470,39 +802,74 @@ class BrokerVenue:
                 detail=type(exc).__name__,
                 simulated=False,
             )
+            self.record.closes.append({"request_id": fill.request_id, "reason": reason, **fill.audit_view()})
+            return fill
+
         submitted = bool(outcome.get("submitted"))
+        state = str(outcome.get("state") or "").upper()
         filled = _d(outcome.get("volume_filled"))
-        unknown = bool(outcome.get("unknown"))
-        status = (
-            UNKNOWN_OUTCOME
-            if unknown
-            else ACCEPTED
-            if submitted and filled > 0
-            else REJECTED
-            if submitted
-            else BLOCKED
-        )
-        if unknown:
-            self._unresolved.add(f"close:{ticket}")
+        requested = _d(outcome.get("volume_requested"))
+        unknown = bool(outcome.get("unknown")) or state == "UNRESOLVED"
+        booking = outcome.get("booking") if isinstance(outcome.get("booking"), Mapping) else {}
+        actual_price = _d(booking.get("price") or outcome.get("price"))
+        expected_position = str(getattr(plan, "position_id", "") or f"mt5:{ticket}")
+        booking_matches = str(booking.get("position_id") or "") == expected_position
+        booked = bool(outcome.get("booked")) and booking_matches
+        if unknown or (submitted and filled > 0 and not booked):
+            status = UNKNOWN_OUTCOME
+            self._unresolved.add(request_id)
+        elif not submitted:
+            status = BLOCKED
+        elif state == "REJECTED" or filled <= 0:
+            status = REJECTED
+        elif (
+            not booked
+            or requested <= 0
+            or filled > requested
+            or actual_price <= 0
+        ):
+            status = UNKNOWN_OUTCOME
+            self._unresolved.add(request_id)
+        else:
+            status = ACCEPTED
+
+        if status == UNKNOWN_OUTCOME and request_id not in self._unresolved:
+            self._unresolved.add(request_id)
         fill = Fill(
-            request_id=f"close:{ticket}",
+            request_id=request_id,
             status=status,
             filled_lots=filled,
-            requested_lots=_d(outcome.get("volume_requested")),
-            price=_d(price),
+            requested_lots=requested,
+            price=actual_price if actual_price > 0 else None,
             spread_points=spread_points,
             slippage_points=Decimal(0),
             latency_ms=0,
             ticket=str(ticket),
-            reason=str(outcome.get("retcode_name") or ""),
-            detail=", ".join(str(item) for item in (outcome.get("reasons") or ())),
+            reason=str(
+                outcome.get("reason")
+                or (
+                    CLOSE_OUTCOME_UNCONFIRMED
+                    if status == UNKNOWN_OUTCOME
+                    else outcome.get("retcode_name") or state
+                )
+                or ""
+            ),
+            detail=", ".join(str(item) for item in (outcome.get("reasons") or ()))
+            or str(outcome.get("detail") or ""),
             simulated=False,
         )
         self.record.closes.append({"request_id": fill.request_id, "reason": reason, **fill.audit_view()})
         return fill
 
 
-__all__ = ["BrokerVenue", "VenueRecord", "MODIFICATION_UNSUPPORTED", "NOT_AN_ENTRY"]
+__all__ = [
+    "BrokerVenue",
+    "VenueRecord",
+    "MODIFICATION_UNSUPPORTED",
+    "NOT_AN_ENTRY",
+    "CLOSE_QUOTE_REQUIRED",
+    "CLOSE_OUTCOME_UNCONFIRMED",
+]
 
 
 class BrokerPlanFactory:
@@ -571,8 +938,17 @@ class BrokerPlanFactory:
             complete=True,
         )
 
-    def __call__(self, *, order: Any = None, quote: Any = None, ticket: str = "",
-                 price: Any = None, reason: str = "") -> Any:
+    def __call__(
+        self,
+        *,
+        order: Any = None,
+        quote: Any = None,
+        ticket: str = "",
+        price: Any = None,
+        reason: str = "",
+        quantity: Any = None,
+        request_id: str = "",
+    ) -> Any:
         from app.common.types import OrderSide
         from app.risk.models import CloseIntent, OrderRequest
 
@@ -596,12 +972,29 @@ class BrokerPlanFactory:
             position = self._position(ticket)
             if position is None:
                 raise RuntimeError("close_target_not_in_ledger")
+            position_side = str(position["side"]).upper()
+            if position_side not in {"BUY", "SELL"}:
+                raise RuntimeError("close_position_side_invalid")
+            try:
+                available = Decimal(str(position["quantity"]))
+                close_quantity = available if quantity is None else Decimal(str(quantity))
+            except Exception as exc:
+                raise RuntimeError("close_quantity_invalid") from exc
+            if (
+                not available.is_finite()
+                or available <= 0
+                or not close_quantity.is_finite()
+                or close_quantity <= 0
+                or close_quantity > available
+            ):
+                raise RuntimeError("close_quantity_outside_position")
+            close_side = "SELL" if position_side == "BUY" else "BUY"
             request = OrderRequest(
-                request_id=f"scalper-close:{ticket}",
+                request_id=str(request_id or f"c{ticket}-{uuid4().hex}"),
                 provider_id=provider_id,
                 provider_symbol=broker_symbol,
-                side=position["side"],
-                quantity=position["quantity"],
+                side=OrderSide(close_side),
+                quantity=close_quantity,
                 target_mode="PAPER",
                 evaluated_at=at,
                 quote=as_quote,
@@ -609,13 +1002,18 @@ class BrokerPlanFactory:
                 close_intent=CloseIntent(
                     position_id=str(position["position_id"]),
                     account_id=str(position["account_id"]),
-                    quantity=position["quantity"],
+                    quantity=close_quantity,
                     pair=pair,
                     quantity_unit=str(position["quantity_unit"]),
                 ),
             )
-            return _Plan(request=request, context=self._context(at, bar), action="CLOSE",
-                         position_id=str(position["position_id"]), quantity=position["quantity"])
+            return _Plan(
+                request=request,
+                context=self._context(at, bar),
+                action="CLOSE",
+                position_id=str(position["position_id"]),
+                quantity=close_quantity,
+            )
 
         if order is None or quote is None:
             raise RuntimeError("entry_without_order_or_quote")
@@ -650,11 +1048,16 @@ class BrokerPlanFactory:
         if position is None:
             return None
         spec = getattr(self.platform, "spec", None)
+        raw_side = getattr(position, "side", "")
+        side = str(getattr(raw_side, "value", raw_side) or "").upper()
+        remaining = getattr(position, "remaining_quantity", None)
+        if remaining is None:
+            remaining = getattr(position, "quantity", None)
         return {
             "position_id": target,
             "account_id": str(getattr(position, "account_id", "")),
-            "side": str(getattr(position, "side", "")).upper(),
-            "quantity": getattr(position, "remaining_quantity", None) or getattr(position, "quantity", None),
+            "side": side,
+            "quantity": remaining,
             "quantity_unit": str(getattr(spec, "quantity_unit_value", "") or "LOTS"),
         }
 

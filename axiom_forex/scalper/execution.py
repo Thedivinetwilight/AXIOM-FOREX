@@ -26,14 +26,14 @@ steps that ended in nothing.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Iterable, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 
 from app.execution.broker import TradingBlocked
 
 from .config import LIVE, CostTerms, InstrumentSpec, PAPER
-from .guardian import Guardian, OpenPositionRisk, Proposal, RiskDecision
+from .guardian import Guardian, Proposal, RiskDecision
 from .signals import Signal
 from .ticks import Tick
 
@@ -154,11 +154,24 @@ class ScalperVenue(Protocol):
     def query(self, request_id: str) -> Fill | None: ...
 
     def modify_protection(
-        self, *, ticket: str, stop_price: Decimal | None, target_price: Decimal | None
+        self,
+        *,
+        ticket: str,
+        stop_price: Decimal | None,
+        target_price: Decimal | None,
+        request_id: str | None = None,
     ) -> bool: ...
 
     def close(
-        self, *, ticket: str, price: Decimal, spread_points: Decimal, reason: str
+        self,
+        *,
+        ticket: str,
+        price: Decimal,
+        spread_points: Decimal,
+        reason: str,
+        quote: Tick | None = None,
+        quantity: Decimal | None = None,
+        request_id: str | None = None,
     ) -> Fill: ...
 
     def protection(self, ticket: str) -> tuple[Decimal | None, Decimal | None]: ...
@@ -200,6 +213,7 @@ class PaperVenue:
         self._market_open = market_open
         self._orders: dict[str, Fill] = {}
         self._protection: dict[str, tuple[Decimal | None, Decimal | None]] = {}
+        self._open_lots: dict[str, Decimal] = {}
         self._submissions = 0
         self._rejects = 0
         self._partials = 0
@@ -299,6 +313,7 @@ class PaperVenue:
             reason="filled",
         )
         self._orders[order.request_id] = fill
+        self._open_lots[ticket] = lots
         if order.stop_price is not None or order.target_price is not None:
             self._protection[ticket] = (order.stop_price, order.target_price)
         return fill
@@ -323,7 +338,12 @@ class PaperVenue:
         return self._orders.get(request_id)
 
     def modify_protection(
-        self, *, ticket: str, stop_price: Decimal | None, target_price: Decimal | None
+        self,
+        *,
+        ticket: str,
+        stop_price: Decimal | None,
+        target_price: Decimal | None,
+        request_id: str | None = None,
     ) -> bool:
         if ticket not in self._protection:
             return False
@@ -334,30 +354,56 @@ class PaperVenue:
         return self._protection.get(ticket, (None, None))
 
     def close(
-        self, *, ticket: str, price: Decimal, spread_points: Decimal, reason: str
+        self,
+        *,
+        ticket: str,
+        price: Decimal,
+        spread_points: Decimal,
+        reason: str,
+        quote: Tick | None = None,
+        quantity: Decimal | None = None,
     ) -> Fill:
-        """Record a closing fill at the price the position manager resolved.
+        """Record a simulated close at the price the position manager resolved.
 
         The exit price has already crossed the spread, so this method must not cross
-        it again: charging a second spread on the way out would make every strategy
-        look worse than it is, which is as dishonest as making it look better.
+        it again.  ``quantity`` is explicit when a position manager is available;
+        legacy direct callers may omit it because the paper venue does not own a
+        position ledger.
         """
 
+        close_quantity = Decimal(0) if quantity is None else _d(quantity)
+        if quantity is not None and (not close_quantity.is_finite() or close_quantity <= 0):
+            return Fill(
+                request_id=f"close:{ticket}", status=BLOCKED,
+                filled_lots=Decimal(0), requested_lots=Decimal(0), price=None,
+                spread_points=spread_points, slippage_points=Decimal(0),
+                latency_ms=0, ticket=str(ticket), reason="invalid_close_quantity",
+                simulated=True,
+            )
         fill = Fill(
             request_id=f"close:{ticket}",
             status=ACCEPTED,
-            filled_lots=Decimal(0),
-            requested_lots=Decimal(0),
+            filled_lots=close_quantity,
+            requested_lots=close_quantity,
             price=price,
             spread_points=spread_points,
             slippage_points=_d(self._cost.slippage_points),
             latency_ms=0,
             ticket=ticket,
             reason=reason,
-            detail="closing fill is recorded by the position manager, which knows the side and size",
+            detail="simulated close recorded by the position manager",
         )
         self._closed[ticket] = fill
-        self._protection.pop(ticket, None)
+        if quantity is None:
+            self._open_lots.pop(ticket, None)
+            self._protection.pop(ticket, None)
+        else:
+            remaining = self._open_lots.get(ticket, Decimal(0)) - close_quantity
+            if remaining > 0:
+                self._open_lots[ticket] = remaining
+            else:
+                self._open_lots.pop(ticket, None)
+                self._protection.pop(ticket, None)
         return fill
 
 

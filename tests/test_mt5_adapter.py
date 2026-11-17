@@ -41,6 +41,7 @@ from axiom_forex.brokers.mt5 import (
     MT5Settings,
     MT5SubmitRefused,
     MT5TradingAdapter,
+    TRADE_ACTION_SLTP,
     RetcodeClass,
     aggregate_ticks_to_bars,
     build_market_request,
@@ -52,6 +53,7 @@ from axiom_forex.brokers.mt5 import (
     open_positions,
     reconcile_positions,
     send_order,
+    send_protection_modification,
     to_broker_volume,
 )
 from axiom_forex.brokers.mt5.terminal import MT5Terminal
@@ -505,7 +507,15 @@ def test_to_broker_volume_variants():
     lots, result = to_broker_volume(make_spec(), Decimal("0.25"), symbol_info)
     assert result.valid and lots == Decimal("0.25")
 
-    base_spec = make_spec(quantity_unit=QuantityUnit.BASE_UNITS, min_quantity=Decimal("1000"), quantity_step=Decimal("1000"), max_quantity=Decimal("1000000"))
+    base_spec = make_spec(
+        quantity_unit=QuantityUnit.BASE_UNITS,
+        min_quantity=Decimal(1000),
+        quantity_step=Decimal(1000),
+        max_quantity=Decimal(1000000),
+    )
+    cross_check_result = cross_check(base_spec, symbol_info)
+    assert cross_check_result.ok, cross_check_result.audit_view()
+
     lots, result = to_broker_volume(base_spec, Decimal("25000"), symbol_info)
     assert result.valid and lots == Decimal("0.25")
 
@@ -816,6 +826,293 @@ def test_close_volume_checks():
     assert close_volume_check(position, Decimal("0.1")) is None
     assert close_volume_check(position, Decimal("0.3")) == "close_volume_exceeds_position"
     assert close_volume_check(position, Decimal("0")) == "non_positive_quantity"
+
+
+def _protection_expected_position(harness, *, ticket=9101):
+    return {
+        "ticket": str(ticket),
+        "position_id": str(ticket),
+        "symbol": "EURUSD.pro",
+        "side": "BUY",
+        "lots": "0.10",
+        "volume": "0.10",
+        "entry_price": "1.10000",
+        "stop_price": "1.09500",
+        "target_price": "1.11000",
+        "magic": harness.settings.magic,
+    }
+
+
+def _modify_test_protection(
+    harness,
+    *,
+    request_id="protection-test-1",
+    ticket=9101,
+    stop_price=Decimal("1.10000"),
+    target_price=Decimal("1.10500"),
+    expected_position=None,
+):
+    return harness.adapter.modify_position_protection(
+        request_id=request_id,
+        ticket=ticket,
+        symbol="EURUSD.pro",
+        spec=make_spec(),
+        strategy_id="strat-1",
+        stop_price=stop_price,
+        target_price=target_price,
+        expected_position=(
+            _protection_expected_position(harness, ticket=ticket)
+            if expected_position is None
+            else expected_position
+        ),
+    )
+
+
+def _prepare_test_protection_position(harness, *, ticket=9101):
+    harness.fake.symbols["EURUSD.pro"].update(
+        {"bid": 1.10100, "ask": 1.10120, "time": int(AT.timestamp())}
+    )
+    harness.fake.positions = [
+        make_position(
+            ticket=ticket,
+            symbol="EURUSD.pro",
+            side="BUY",
+            volume=0.10,
+            price_open=1.10000,
+            price_current=1.10100,
+            magic=harness.settings.magic,
+            sl=1.09500,
+            tp=1.11000,
+        )
+    ]
+
+
+def test_sltp_action_is_classified_without_fill_volume():
+    fake = FakeMT5()
+    terminal = MT5Terminal(mt5_settings(), module=fake)
+    terminal.connect()
+    request = {
+        "action": TRADE_ACTION_SLTP,
+        "position": 9101,
+        "symbol": "EURUSD.pro",
+        "sl": 1.10000,
+        "tp": 1.10500,
+    }
+    accepted = send_protection_modification(
+        terminal, request, request_id="protection-no-volume", ticket=9101
+    )
+    assert accepted.state == "ACCEPTED"
+    assert accepted.accepted is True
+    assert accepted.unknown is False
+    assert accepted.permits_resend is False
+    assert "volume_filled" not in accepted.audit_view()
+
+    fake.protection_script = [None]
+    unknown = send_protection_modification(
+        terminal, request, request_id="protection-no-answer", ticket=9101
+    )
+    assert unknown.state == "UNRESOLVED"
+    assert unknown.unknown is True
+    assert unknown.permits_resend is False
+    terminal.disconnect()
+
+
+def test_adapter_sltp_modification_requires_broker_echo(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+
+    result = _modify_test_protection(harness)
+
+    assert result["state"] == "CONFIRMED", result
+    assert result["sent"] is True
+    assert result["verified"] is True
+    assert result["broker_stop_loss"] == "1.1"
+    assert result["broker_take_profit"] == "1.105"
+    assert harness.fake.protection_requests == [harness.fake.send_requests[0]]
+    assert harness.fake.send_requests[0]["action"] == TRADE_ACTION_SLTP
+    assert "volume" not in harness.fake.send_requests[0]
+    assert harness.repository.list_orders() == []
+    assert harness.adapter.armed is True
+
+
+def test_adapter_sltp_transport_acceptance_is_not_a_broker_echo(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+    harness.fake.mirror_protection_modifications = False
+
+    result = _modify_test_protection(harness, request_id="protection-no-echo")
+
+    assert result["state"] == "UNRESOLVED", result
+    assert result["unknown"] is True
+    assert result["verified"] is False
+    assert result["permits_resend"] is False
+    assert harness.adapter.armed is False
+    assert len(harness.fake.protection_requests) == 1
+    observed = harness.adapter.positions(symbol="EURUSD.pro")[0]
+    assert observed.stop_loss == Decimal("1.095")
+    assert observed.take_profit == Decimal("1.11")
+
+
+def test_adapter_sltp_requires_the_exact_position_ticket_and_identity(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+
+    wrong_ticket = _modify_test_protection(
+        harness, request_id="protection-wrong-ticket", ticket=9102
+    )
+    assert wrong_ticket["state"] == "REFUSED"
+    assert wrong_ticket["reason"] == "mt5_protection_position_not_unique"
+
+    expected = _protection_expected_position(harness)
+    expected["lots"] = "0.20"
+    changed_identity = _modify_test_protection(
+        harness,
+        request_id="protection-changed-identity",
+        expected_position=expected,
+    )
+    assert changed_identity["state"] == "REFUSED"
+    assert changed_identity["reason"] == "mt5_protection_position_identity_changed"
+    assert harness.fake.send_requests == []
+    assert harness.fake.protection_requests == []
+    assert harness.adapter.armed is True
+
+
+def test_adapter_sltp_refuses_widening_or_wrong_side_targets(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+
+    wider_stop = _modify_test_protection(
+        harness,
+        request_id="protection-widen-stop",
+        stop_price=Decimal("1.09000"),
+    )
+    wrong_side_target = _modify_test_protection(
+        harness,
+        request_id="protection-wrong-target-side",
+        target_price=Decimal("1.09900"),
+    )
+
+    assert wider_stop["state"] == "REFUSED"
+    assert wider_stop["reason"] == "mt5_protection_stop_widening_refused"
+    assert wrong_side_target["state"] == "REFUSED"
+    assert wrong_side_target["reason"] == "mt5_protection_target_side_invalid"
+    assert harness.fake.send_requests == []
+    assert harness.fake.protection_requests == []
+
+
+def test_adapter_sltp_request_id_cannot_be_reused_for_a_different_change(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+    result = _modify_test_protection(harness, request_id="protection-idempotent")
+    changed = _modify_test_protection(
+        harness,
+        request_id="protection-idempotent",
+        stop_price=Decimal("1.10010"),
+    )
+
+    assert result["state"] == "CONFIRMED"
+    assert changed["state"] == "REFUSED"
+    assert changed["reason"] == "mt5_protection_request_id_reused"
+    assert len(harness.fake.protection_requests) == 1
+
+
+def test_adapter_sltp_order_check_refusal_sends_nothing(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+    harness.fake.check_result = {"retcode": 10016, "comment": "invalid stops"}
+
+    result = _modify_test_protection(harness)
+
+    assert result["state"] == "REFUSED"
+    assert result["sent"] is False
+    assert result["reason"] == "mt5_protection_order_check_refused"
+    assert harness.fake.send_requests == []
+    assert harness.fake.protection_requests == []
+
+
+def test_adapter_sltp_unknown_is_not_resent_and_disarms(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+    harness.fake.protection_script = [None]
+
+    result = _modify_test_protection(harness, request_id="protection-timeout")
+    duplicate = _modify_test_protection(harness, request_id="protection-timeout")
+
+    assert result["state"] == "UNRESOLVED", result
+    assert result["unknown"] is True
+    assert result["verified"] is False
+    assert duplicate["duplicate"] is True
+    assert duplicate["sent"] is False
+    assert len(harness.fake.send_requests) == 1
+    assert harness.adapter.armed is False
+    assert harness.adapter.status()["unresolved_protection_modifications"] == [
+        "protection-timeout"
+    ]
+    with pytest.raises(MT5SubmitRefused) as rearm:
+        harness.adapter.arm_trading(
+            account_login=55500123,
+            server="Broker-Demo",
+            confirm="ENABLE LIVE TRADING 55500123",
+        )
+    assert rearm.value.reason == "mt5_unresolved_protection_modification_present"
+
+    new_request = _modify_test_protection(
+        harness, request_id="protection-after-timeout"
+    )
+    assert new_request["state"] == "REFUSED"
+    assert new_request["reason"] == "mt5_unresolved_protection_modification_present"
+    assert len(harness.fake.send_requests) == 1
+
+    # A later exact position read-back is the only reconciliation evidence; it
+    # clears the latch without sending again, after which explicit re-arming is
+    # still required.
+    harness.fake.positions[0]["sl"] = 1.10000
+    harness.fake.positions[0]["tp"] = 1.10500
+    armed = harness.adapter.arm_trading(
+        account_login=55500123,
+        server="Broker-Demo",
+        confirm="ENABLE LIVE TRADING 55500123",
+    )
+    assert armed["armed"] is True
+    assert harness.adapter.status()["unresolved_protection_modifications"] == []
+    assert harness.adapter._protection_modification_results[
+        "protection-timeout"
+    ][1]["state"] == "CONFIRMED"
+    assert len(harness.fake.send_requests) == 1
+
+
+def test_adapter_sltp_readback_failure_is_unresolved(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+    harness.fake.on_send = lambda _request: setattr(
+        harness.fake, "fail_positions_get", True
+    )
+
+    result = _modify_test_protection(harness, request_id="protection-readback-fail")
+
+    assert result["state"] == "UNRESOLVED", result
+    assert result["unknown"] is True
+    assert harness.adapter.armed is False
+    assert len(harness.fake.protection_requests) == 1
+    harness.fake.fail_positions_get = False
+    position = harness.adapter.positions(symbol="EURUSD.pro")[0]
+    assert position.stop_loss == Decimal("1.1")
+    assert position.take_profit == Decimal("1.105")
+
+
+def test_adapter_sltp_refuses_disarmed_or_switched_account(harness):
+    _prepare_test_protection_position(harness)
+    disarmed = _modify_test_protection(harness, request_id="protection-disarmed")
+    assert disarmed["state"] == "REFUSED"
+    assert disarmed["reason"] == "mt5_trading_not_armed"
+    assert harness.fake.send_requests == []
+
+    harness.arm()
+    harness.fake.account_login += 1
+    switched = _modify_test_protection(harness, request_id="protection-switched")
+    assert switched["state"] == "REFUSED"
+    assert switched["reason"] == "mt5_account_changed_since_confirmation"
+    assert harness.fake.send_requests == []
 
 
 # -- arming ----------------------------------------------------------------

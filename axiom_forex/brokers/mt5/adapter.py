@@ -31,7 +31,6 @@ Connecting, loading data, and starting the application never send an order:
 
 from __future__ import annotations
 
-import hmac
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -57,6 +56,8 @@ from .orders import (
     MT5OrderCheck,
     MT5OrderOutcome,
     MT5Position,
+    MT5ProtectionOutcome,
+    TRADE_ACTION_SLTP,
     build_market_request,
     check_order,
     close_volume_check,
@@ -65,6 +66,7 @@ from .orders import (
     open_positions,
     protective_stop_price,
     send_order,
+    send_protection_modification,
     stop_distance_points,
     stop_loss_confirmed,
 )
@@ -112,7 +114,9 @@ class MT5BrokerCapabilities:
     supports_partial_fills: bool = True
     supports_netting: bool = True
     supports_hedging: bool = True
-    order_types: frozenset[str] = frozenset({"MARKET_DEAL", "CLOSE_POSITION"})
+    order_types: frozenset[str] = frozenset(
+        {"MARKET_DEAL", "CLOSE_POSITION", "MODIFY_POSITION_PROTECTION"}
+    )
     provider: str = "official_metatrader5_python"
     requires_installed_terminal: bool = True
     calendar_source: str = "broker_symbol_and_terminal"
@@ -225,6 +229,9 @@ class MT5TradingAdapter:
         #: Last observed account fingerprint, kept across a disconnect so order
         #: records can still be attributed during reporting.
         self._fingerprint_cache: str = ""
+        #: Request-id idempotency for non-volume SL/TP actions. Unresolved
+        #: outcomes are reconciled against the position read-back, never resent.
+        self._protection_modification_results: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
 
     # -- connection -----------------------------------------------------
 
@@ -566,6 +573,7 @@ class MT5TradingAdapter:
             "armed_for_account_fingerprint": self._armed_fingerprint or "",
             "account_validated": dict(validation),
             "unresolved_orders": self.unresolved_request_ids(),
+            "unresolved_protection_modifications": self.unresolved_protection_modification_ids(),
             "unattributed_orders": self.unattributed_blocking_orders(),
             "resolved_symbols": sorted(
                 symbol for symbol, _ in self._symbol_cache.values()
@@ -600,6 +608,7 @@ class MT5TradingAdapter:
             "execution_authorised": self._armed and self.settings.trading_enabled,
             "password": self.password_store.status(),
             "unresolved_orders": self.unresolved_request_ids(),
+            "unresolved_protection_modifications": self.unresolved_protection_modification_ids(),
             "unattributed_orders": self.unattributed_blocking_orders(),
             "market_access_token_required": False,
             "last_recovery": [item.audit_view() for item in self._last_recovery],
@@ -671,6 +680,13 @@ class MT5TradingAdapter:
         unresolved = self.unresolved_request_ids()
         if unresolved:
             raise MT5SubmitRefused("mt5_unresolved_order_present", ",".join(unresolved))
+        self.reconcile_protection_modifications()
+        unresolved_protection = self.unresolved_protection_modification_ids()
+        if unresolved_protection:
+            raise MT5SubmitRefused(
+                "mt5_unresolved_protection_modification_present",
+                ",".join(unresolved_protection),
+            )
         self._armed = True
         self._armed_fingerprint = self.account_fingerprint()
         self._audit(
@@ -683,10 +699,13 @@ class MT5TradingAdapter:
         return self.status()
 
     def disarm(self, *, reason: str = "operator") -> None:
-        if self._armed:
-            self._audit("MT5_TRADING_DISARMED", allowed=False, reason=reason, live=False)
+        was_armed = self._armed
+        # Clear authorization before logging: an audit sink failure must never
+        # leave a session armed after a safety-triggered disarm request.
         self._armed = False
         self._armed_fingerprint = None
+        if was_armed:
+            self._audit("MT5_TRADING_DISARMED", allowed=False, reason=reason, live=False)
 
     # -- instruments and data -------------------------------------------
 
@@ -943,6 +962,106 @@ class MT5TradingAdapter:
                 ids.append(str(record.get("request_id", "")))
         return sorted(item for item in ids if item)
 
+    def unresolved_protection_modification_ids(self) -> list[str]:
+        """Protection changes whose exact SL/TP pair lacks broker read-back."""
+
+        return sorted(
+            request_id
+            for request_id, (_identity, result) in self._protection_modification_results.items()
+            if str(result.get("state") or "").upper() == "UNRESOLVED"
+        )
+
+    def reconcile_protection_modifications(self) -> dict[str, list[str]]:
+        """Resolve ambiguous SL/TP results only when the same position echoes both fields."""
+
+        resolved: list[str] = []
+        unresolved = self.unresolved_protection_modification_ids()
+        if not self.connected or self._status is None:
+            return {"resolved": resolved, "unresolved": unresolved}
+        try:
+            self._ensure_account_current()
+            current_fingerprint = self.account_fingerprint()
+        except Exception:
+            return {"resolved": resolved, "unresolved": unresolved}
+
+        for request_id in unresolved:
+            identity, prior = self._protection_modification_results[request_id]
+            if (
+                not current_fingerprint
+                or current_fingerprint != str(prior.get("account_fingerprint") or "")
+            ):
+                continue
+            symbol = str(identity.get("symbol") or "")
+            try:
+                position_ticket = int(identity.get("ticket") or 0)
+                expected_stop = Decimal(str(identity.get("stop_price")))
+                raw_target = identity.get("target_price")
+                expected_target = None if raw_target is None else Decimal(str(raw_target))
+                expected = identity.get("expected_position")
+                if not isinstance(expected, Mapping):
+                    continue
+                expected_volume = Decimal(str(expected.get("lots") or expected.get("volume")))
+                expected_entry = Decimal(
+                    str(expected.get("entry_price") or expected.get("price_open"))
+                )
+                expected_side = str(expected.get("side") or "").upper()
+                expected_symbol = str(expected.get("symbol") or "")
+                expected_magic = int(expected.get("magic", -1))
+                positions = self.positions(symbol=symbol)
+                matches = [item for item in positions if item.ticket == position_ticket]
+                if len(matches) != 1:
+                    continue
+                position = matches[0]
+                symbol_info = self.terminal.symbol_info(symbol)
+            except Exception:
+                continue
+            if (
+                position.symbol != expected_symbol
+                or position.side != expected_side
+                or position.volume != expected_volume
+                or abs(position.price_open - expected_entry) > symbol_info.point
+                or position.magic != expected_magic
+                or expected_magic != int(self.settings.magic)
+            ):
+                continue
+            if not self._protection_matches(
+                position,
+                stop_price=expected_stop,
+                target_price=expected_target,
+                point=symbol_info.point,
+            ):
+                continue
+            reconciled = {
+                **dict(prior),
+                "state": "CONFIRMED",
+                "unknown": False,
+                "verified": True,
+                "reason": "broker_readback_confirmed_during_reconciliation",
+                "detail": "the exact position now echoes the requested SL and TP",
+                "broker_stop_loss": (
+                    None if position.stop_loss is None else str(position.stop_loss)
+                ),
+                "broker_take_profit": (
+                    None
+                    if position.take_profit is None or position.take_profit <= 0
+                    else str(position.take_profit)
+                ),
+                "permits_resend": False,
+            }
+            self._protection_modification_results[request_id] = (identity, reconciled)
+            self._audit(
+                "MT5_PROTECTION_MODIFICATION_RECONCILED",
+                allowed=True,
+                request_id=request_id,
+                position_ticket=position_ticket,
+                symbol=symbol,
+                verified=True,
+                live=True,
+            )
+            resolved.append(request_id)
+        remaining = self.unresolved_protection_modification_ids()
+        return {"resolved": sorted(resolved), "unresolved": remaining}
+
     def recover(self) -> tuple[RecoveryResult, ...]:
         """Resolve what happened to every MT5 order left in doubt."""
 
@@ -1036,6 +1155,592 @@ class MT5TradingAdapter:
             "deals": [item.audit_view() for item in history_deals(self.terminal, start=start, end=end)],
             "orders": [item.audit_view() for item in history_orders(self.terminal, start=start, end=end)],
         }
+
+    # -- broker-side protection management -----------------------------
+
+    @staticmethod
+    def _protection_value(value: Any, *, name: str, optional: bool = False) -> Decimal | None:
+        if value is None or (optional and str(value).strip() == ""):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except Exception as exc:
+            raise MT5SubmitRefused(f"mt5_{name}_invalid") from exc
+        if not parsed.is_finite():
+            raise MT5SubmitRefused(f"mt5_{name}_invalid")
+        if optional and parsed == 0:
+            return None
+        if parsed <= 0:
+            raise MT5SubmitRefused(f"mt5_{name}_invalid")
+        return parsed
+
+    @staticmethod
+    def _protection_matches(
+        position: MT5Position,
+        *,
+        stop_price: Decimal,
+        target_price: Decimal | None,
+        point: Decimal,
+    ) -> bool:
+        observed_stop = position.stop_loss
+        if (
+            observed_stop is None
+            or not observed_stop.is_finite()
+            or observed_stop <= 0
+            or abs(observed_stop - stop_price) > point
+        ):
+            return False
+        if position.side == "BUY" and observed_stop < stop_price:
+            return False
+        if position.side == "SELL" and observed_stop > stop_price:
+            return False
+        observed_target = position.take_profit
+        if observed_target is not None and observed_target <= 0:
+            observed_target = None
+        if target_price is None:
+            return observed_target is None
+        return (
+            observed_target is not None
+            and observed_target.is_finite()
+            and abs(observed_target - target_price) <= point
+        )
+
+    def modify_position_protection(
+        self,
+        *,
+        request_id: str,
+        ticket: int,
+        symbol: str,
+        spec: CurrencyPairSpec,
+        strategy_id: str,
+        stop_price: Decimal,
+        target_price: Decimal | None,
+        expected_position: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Modify one owned position's SL/TP under the existing live adapter.
+
+        This action intentionally does not use ``send_order``: an SLTP request
+        has no fill volume.  It still uses the same terminal, account refresh,
+        trading-enabled setting, account-bound arming, strategy lifecycle,
+        symbol checks, and single ``order_send`` boundary as market orders.
+        Success is not reported until the exact position echoes both requested
+        protection fields back from ``positions_get``.
+        """
+
+        request_id = str(request_id or "").strip()
+        try:
+            position_ticket = int(ticket)
+        except (TypeError, ValueError, OverflowError):
+            position_ticket = 0
+        requested_stop = None
+        requested_target = None
+        try:
+            requested_stop = self._protection_value(
+                stop_price, name="protection_stop"
+            )
+            if requested_stop is None:
+                raise MT5SubmitRefused("mt5_protection_stop_required")
+            requested_target = self._protection_value(
+                target_price, name="protection_target", optional=True
+            )
+        except MT5SubmitRefused as exc:
+            reason = exc.reason
+            detail = exc.detail
+            return self._protection_refusal(
+                request_id=request_id,
+                ticket=position_ticket,
+                symbol=str(symbol or ""),
+                reason=reason,
+                detail=detail,
+            )
+
+        if not request_id or len(request_id) > 128 or position_ticket <= 0:
+            return self._protection_refusal(
+                request_id=request_id,
+                ticket=position_ticket,
+                symbol=str(symbol or ""),
+                reason="mt5_protection_identity_invalid",
+            )
+        symbol = str(symbol or "").strip()
+        strategy_id = str(strategy_id or "").strip()
+        expected = expected_position if isinstance(expected_position, Mapping) else {}
+        request_identity = {
+            "request_id": request_id,
+            "ticket": position_ticket,
+            "symbol": symbol,
+            "strategy_id": strategy_id,
+            "stop_price": str(requested_stop),
+            "target_price": None if requested_target is None else str(requested_target),
+            "expected_position": {
+                key: str(expected.get(key, ""))
+                for key in (
+                    "ticket", "symbol", "side", "lots", "volume", "entry_price",
+                    "price_open", "stop_price", "stop_loss", "target_price",
+                    "take_profit", "magic",
+                )
+            },
+        }
+        self.reconcile_protection_modifications()
+        previous = self._protection_modification_results.get(request_id)
+        if previous is not None:
+            previous_identity, previous_result = previous
+            if previous_identity != request_identity:
+                return self._protection_refusal(
+                    request_id=request_id,
+                    ticket=position_ticket,
+                    symbol=symbol,
+                    reason="mt5_protection_request_id_reused",
+                )
+            return {**dict(previous_result), "duplicate": True, "sent": False}
+        unresolved_protection = self.unresolved_protection_modification_ids()
+        if unresolved_protection:
+            return self._protection_refusal(
+                request_id=request_id,
+                ticket=position_ticket,
+                symbol=symbol,
+                reason="mt5_unresolved_protection_modification_present",
+                detail=",".join(unresolved_protection),
+            )
+
+        fingerprint = ""
+        order_send_attempted = False
+        try:
+            validation = self.settings.validate()
+            if not validation.valid:
+                raise MT5SubmitRefused("mt5_settings_invalid", validation.reason)
+            self.settings.assert_trading_allowed()
+            if not self.connected or self._status is None:
+                raise MT5SubmitRefused("mt5_not_connected")
+            if not self._armed:
+                raise MT5SubmitRefused("mt5_trading_not_armed")
+
+            account_validation = self._ensure_account_current()
+            fingerprint = self.account_fingerprint()
+            if self._armed_fingerprint and fingerprint != self._armed_fingerprint:
+                raise MT5SubmitRefused(
+                    "mt5_account_changed_since_confirmation", fingerprint or "unknown"
+                )
+            if not account_validation.get("valid"):
+                raise MT5SubmitRefused(
+                    "mt5_account_profile_invalid",
+                    ",".join(account_validation.get("problems", ())),
+                )
+            if self._terms is None:
+                raise MT5SubmitRefused("mt5_account_terms_refused")
+            if not self._status.trade_allowed:
+                raise MT5SubmitRefused("mt5_terminal_trading_not_allowed")
+            unresolved = self.unresolved_request_ids()
+            if unresolved:
+                self.disarm(reason="unresolved_order_present")
+                raise MT5SubmitRefused(
+                    "mt5_unresolved_order_present", ",".join(unresolved)
+                )
+            if not strategy_id:
+                raise MT5SubmitRefused("mt5_strategy_identity_missing")
+            if self.lifecycle_lookup is None:
+                raise MT5SubmitRefused("mt5_strategy_lifecycle_not_supplied")
+            lifecycle = self.lifecycle_lookup(strategy_id)
+            approve = getattr(lifecycle, "approve_active", None)
+            if lifecycle is None or not callable(approve) or not approve():
+                raise MT5SubmitRefused("mt5_strategy_not_approved_active", strategy_id)
+            if str(getattr(spec, "spec_version", "")) == "":
+                raise MT5SubmitRefused("mt5_spec_version_missing")
+
+            provider_symbol, info = self.symbol_info(spec)
+            if provider_symbol != symbol:
+                raise MT5SubmitRefused("mt5_protection_symbol_mismatch")
+            _, symbol_check = self.cross_check(spec)
+            if not symbol_check.ok:
+                raise MT5SubmitRefused(
+                    "mt5_symbol_terms_mismatch", ",".join(symbol_check.errors)
+                )
+            try:
+                require_trading(spec, info)
+            except MT5DataRefused as exc:
+                raise MT5SubmitRefused(exc.reason, exc.detail) from exc
+
+            if not isinstance(expected_position, Mapping):
+                raise MT5SubmitRefused("mt5_protection_position_identity_missing")
+            positions = self.positions(symbol=symbol)
+            candidates = [item for item in positions if item.ticket == position_ticket]
+            if len(candidates) != 1:
+                raise MT5SubmitRefused("mt5_protection_position_not_unique")
+            position = candidates[0]
+            expected_ticket = str(expected.get("ticket") or expected.get("position_id") or "")
+            expected_symbol = str(expected.get("symbol") or "")
+            expected_side = str(expected.get("side") or "").upper()
+            expected_volume = self._protection_value(
+                expected.get("lots", expected.get("volume")),
+                name="protection_position_volume",
+            )
+            expected_entry = self._protection_value(
+                expected.get("entry_price", expected.get("price_open")),
+                name="protection_position_entry",
+            )
+            expected_stop = self._protection_value(
+                expected.get("stop_price", expected.get("stop_loss")),
+                name="protection_position_stop",
+                optional=True,
+            )
+            expected_target = self._protection_value(
+                expected.get("target_price", expected.get("take_profit")),
+                name="protection_position_target",
+                optional=True,
+            )
+            if (
+                expected_ticket != str(position_ticket)
+                or expected_symbol != symbol
+                or expected_side != position.side
+                or expected_volume != position.volume
+                or expected_entry is None
+                or abs(expected_entry - position.price_open) > info.point
+                or int(expected.get("magic", -1)) != int(self.settings.magic)
+                or int(position.magic) != int(self.settings.magic)
+            ):
+                raise MT5SubmitRefused("mt5_protection_position_identity_changed")
+            current_stop = position.stop_loss
+            if current_stop is not None and current_stop <= 0:
+                current_stop = None
+            current_target = position.take_profit
+            if current_target is not None and current_target <= 0:
+                current_target = None
+            if current_stop != expected_stop or current_target != expected_target:
+                raise MT5SubmitRefused("mt5_protection_position_changed")
+            if current_stop is not None and (
+                (position.side == "BUY" and requested_stop < current_stop)
+                or (position.side == "SELL" and requested_stop > current_stop)
+            ):
+                raise MT5SubmitRefused("mt5_protection_stop_widening_refused")
+            if requested_target is not None and (
+                (position.side == "BUY" and requested_target <= position.price_open)
+                or (position.side == "SELL" and requested_target >= position.price_open)
+            ):
+                raise MT5SubmitRefused("mt5_protection_target_side_invalid")
+
+            # Only the exact target may currently be unprotected; this route is
+            # for repairing or tightening that position, never for bypassing a
+            # different open exposure's protection blocker.
+            other_unprotected = [
+                item for item in self.unprotected_positions()
+                if int(item.get("ticket", 0) or 0) != position_ticket
+            ]
+            if other_unprotected:
+                raise MT5SubmitRefused(
+                    "mt5_other_unprotected_position_present",
+                    ",".join(str(item.get("ticket", 0)) for item in other_unprotected),
+                )
+
+            if self._protection_matches(
+                position,
+                stop_price=requested_stop,
+                target_price=requested_target,
+                point=info.point,
+            ):
+                already = {
+                    "request_id": request_id,
+                    "ticket": str(position_ticket),
+                    "symbol": symbol,
+                    "state": "CONFIRMED",
+                    "sent": False,
+                    "unknown": False,
+                    "verified": True,
+                    "retcode": 10025,
+                    "retcode_name": "NO_CHANGES",
+                    "classification": "NO_CHANGES",
+                    "reason": "broker_readback_already_matches",
+                    "detail": "",
+                    "requested_stop_loss": str(requested_stop),
+                    "requested_take_profit": (
+                        None if requested_target is None else str(requested_target)
+                    ),
+                    "broker_stop_loss": str(position.stop_loss),
+                    "broker_take_profit": (
+                        None if current_target is None else str(current_target)
+                    ),
+                    "account_fingerprint": fingerprint,
+                }
+                self._audit(
+                    "MT5_PROTECTION_MODIFICATION_CONFIRMED",
+                    allowed=True,
+                    request_id=request_id,
+                    position_ticket=position_ticket,
+                    symbol=symbol,
+                    protective_stop=str(requested_stop),
+                    target_price=requested_target,
+                    broker_stop_loss=position.stop_loss,
+                    broker_take_profit=current_target,
+                    verified=True,
+                    classification="NO_CHANGES",
+                    live=True,
+                )
+                self._protection_modification_results[request_id] = (
+                    request_identity, already
+                )
+                return already
+
+            if requested_stop.as_tuple().exponent < -int(info.digits):
+                raise MT5SubmitRefused("mt5_protection_stop_precision_invalid")
+            if requested_target is not None and requested_target.as_tuple().exponent < -int(info.digits):
+                raise MT5SubmitRefused("mt5_protection_target_precision_invalid")
+            tick = self.terminal.tick(symbol)
+            minimum_points = max(int(info.stops_level or 0), int(info.freeze_level or 0))
+            minimum_distance = info.point * minimum_points
+            if position.side == "BUY":
+                valid_stop = requested_stop < tick.bid and tick.bid - requested_stop >= minimum_distance
+                valid_target = requested_target is None or (
+                    requested_target > tick.bid
+                    and requested_target - tick.bid >= minimum_distance
+                )
+            else:
+                valid_stop = requested_stop > tick.ask and requested_stop - tick.ask >= minimum_distance
+                valid_target = requested_target is None or (
+                    requested_target < tick.ask
+                    and tick.ask - requested_target >= minimum_distance
+                )
+            if not valid_stop or not valid_target:
+                raise MT5SubmitRefused(
+                    "mt5_protection_price_outside_broker_distance",
+                    f"stops={info.stops_level};freeze={info.freeze_level}",
+                )
+
+            request = {
+                "action": TRADE_ACTION_SLTP,
+                "position": position_ticket,
+                "symbol": symbol,
+                "sl": float(requested_stop),
+                "tp": 0.0 if requested_target is None else float(requested_target),
+            }
+            check: MT5OrderCheck = check_order(self.terminal, request)
+            if not check.allowed:
+                refused = {
+                    "request_id": request_id,
+                    "ticket": str(position_ticket),
+                    "symbol": symbol,
+                    "state": "REFUSED",
+                    "sent": False,
+                    "unknown": False,
+                    "verified": False,
+                    "retcode": check.retcode,
+                    "retcode_name": check.retcode_name,
+                    "classification": "REJECTED",
+                    "reason": "mt5_protection_order_check_refused",
+                    "detail": check.comment,
+                    "requested_stop_loss": str(requested_stop),
+                    "requested_take_profit": (
+                        None if requested_target is None else str(requested_target)
+                    ),
+                    "broker_stop_loss": None if current_stop is None else str(current_stop),
+                    "broker_take_profit": None if current_target is None else str(current_target),
+                    "account_fingerprint": fingerprint,
+                }
+                self._audit(
+                    "MT5_PROTECTION_MODIFICATION_REFUSED",
+                    allowed=False,
+                    request_id=request_id,
+                    position_ticket=position_ticket,
+                    symbol=symbol,
+                    reason=refused["reason"],
+                    retcode=check.retcode,
+                    retcode_name=check.retcode_name,
+                    verified=False,
+                    live=True,
+                )
+                self._protection_modification_results[request_id] = (
+                    request_identity, refused
+                )
+                return refused
+
+            self._audit(
+                "MT5_PROTECTION_MODIFICATION_SUBMITTING",
+                allowed=True,
+                request_id=request_id,
+                position_ticket=position_ticket,
+                symbol=symbol,
+                protective_stop=str(requested_stop),
+                target_price=requested_target,
+                action="TRADE_ACTION_SLTP",
+                live=True,
+            )
+            if not self.terminal.connected:
+                raise MT5SubmitRefused("mt5_not_connected")
+            order_send_attempted = True
+            transport: MT5ProtectionOutcome = send_protection_modification(
+                self.terminal,
+                request,
+                request_id=request_id,
+                ticket=position_ticket,
+            )
+            readback_detail = ""
+            observed: MT5Position | None = None
+            try:
+                after = self.positions(symbol=symbol)
+                matches = [item for item in after if item.ticket == position_ticket]
+                observed = matches[0] if len(matches) == 1 else None
+                if observed is None:
+                    readback_detail = "position_not_found_or_duplicated_after_modification"
+            except Exception as exc:
+                readback_detail = f"positions_unavailable:{type(exc).__name__}"
+            verified = bool(
+                observed is not None
+                and self._protection_matches(
+                    observed,
+                    stop_price=requested_stop,
+                    target_price=requested_target,
+                    point=info.point,
+                )
+            )
+            if verified:
+                state = "CONFIRMED"
+                reason = "broker_readback_confirmed"
+                unknown = False
+            elif transport.unknown or transport.accepted:
+                state = "UNRESOLVED"
+                reason = "mt5_protection_outcome_unconfirmed"
+                unknown = True
+                self.disarm(reason="protection_modification_unconfirmed")
+            else:
+                state = "REJECTED"
+                reason = transport.retcode_name.lower() or "mt5_protection_rejected"
+                unknown = False
+            result = {
+                "request_id": request_id,
+                "ticket": str(position_ticket),
+                "symbol": symbol,
+                "state": state,
+                "sent": True,
+                "unknown": unknown,
+                "verified": verified,
+                "retcode": transport.retcode,
+                "retcode_name": transport.retcode_name,
+                "classification": transport.classification,
+                "reason": reason,
+                "detail": readback_detail or transport.comment,
+                "requested_stop_loss": str(requested_stop),
+                "requested_take_profit": (
+                    None if requested_target is None else str(requested_target)
+                ),
+                "broker_stop_loss": (
+                    None if observed is None or observed.stop_loss is None
+                    else str(observed.stop_loss)
+                ),
+                "broker_take_profit": (
+                    None if observed is None or observed.take_profit is None
+                    or observed.take_profit <= 0
+                    else str(observed.take_profit)
+                ),
+                "account_fingerprint": fingerprint,
+                "permits_resend": False,
+            }
+            self._audit(
+                "MT5_PROTECTION_MODIFICATION_RESULT",
+                allowed=verified,
+                request_id=request_id,
+                state=state,
+                position_ticket=position_ticket,
+                symbol=symbol,
+                retcode=transport.retcode,
+                retcode_name=transport.retcode_name,
+                classification=transport.classification,
+                unknown=unknown,
+                permits_resend=False,
+                protective_stop=str(requested_stop),
+                target_price=requested_target,
+                broker_stop_loss=result["broker_stop_loss"],
+                broker_take_profit=result["broker_take_profit"],
+                verified=verified,
+                reason=reason,
+                live=True,
+            )
+            self._protection_modification_results[request_id] = (
+                request_identity, result
+            )
+            return result
+        except Exception as exc:
+            reason = str(getattr(exc, "reason", "") or "mt5_protection_modification_refused")
+            detail = str(getattr(exc, "detail", "") or type(exc).__name__)
+            if order_send_attempted:
+                # Once order_send has been entered, later logging/parsing errors
+                # cannot turn the action into a clean refusal. Preserve the
+                # pending request in the PositionBook and require read-back.
+                self.disarm(reason="protection_modification_result_unreadable")
+                unresolved = {
+                    "request_id": request_id,
+                    "ticket": str(position_ticket),
+                    "symbol": symbol,
+                    "state": "UNRESOLVED",
+                    "sent": True,
+                    "unknown": True,
+                    "verified": False,
+                    "reason": "mt5_protection_result_unreadable",
+                    "detail": detail,
+                    "permits_resend": False,
+                    "requested_stop_loss": str(requested_stop),
+                    "requested_take_profit": (
+                        None if requested_target is None else str(requested_target)
+                    ),
+                    "account_fingerprint": fingerprint,
+                }
+                self._protection_modification_results[request_id] = (
+                    request_identity, unresolved
+                )
+                try:
+                    self._audit(
+                        "MT5_PROTECTION_MODIFICATION_RESULT",
+                        allowed=False,
+                        request_id=request_id,
+                        state="UNRESOLVED",
+                        position_ticket=position_ticket,
+                        symbol=symbol,
+                        reason=unresolved["reason"],
+                        unknown=True,
+                        permits_resend=False,
+                        verified=False,
+                        live=True,
+                    )
+                except Exception:
+                    pass
+                return unresolved
+            return self._protection_refusal(
+                request_id=request_id,
+                ticket=position_ticket,
+                symbol=symbol,
+                reason=reason,
+                detail=detail,
+            )
+
+    def _protection_refusal(
+        self,
+        *,
+        request_id: str,
+        ticket: int,
+        symbol: str,
+        reason: str,
+        detail: str = "",
+    ) -> dict[str, Any]:
+        result = {
+            "request_id": request_id,
+            "ticket": str(ticket) if ticket > 0 else "",
+            "symbol": symbol,
+            "state": "REFUSED",
+            "sent": False,
+            "unknown": False,
+            "verified": False,
+            "reason": str(reason),
+            "detail": str(detail),
+            "permits_resend": False,
+        }
+        self._audit(
+            "MT5_PROTECTION_MODIFICATION_REFUSED",
+            allowed=False,
+            request_id=request_id,
+            state="REFUSED",
+            position_ticket=ticket if ticket > 0 else 0,
+            symbol=symbol,
+            reason=reason,
+            verified=False,
+            live=False,
+        )
+        return result
 
     # -- submission -----------------------------------------------------
 
@@ -1344,6 +2049,13 @@ class MT5TradingAdapter:
         if unresolved:
             self.disarm(reason="unresolved_order_present")
             raise MT5SubmitRefused("mt5_unresolved_order_present", ",".join(unresolved))
+        unresolved_protection = self.unresolved_protection_modification_ids()
+        if unresolved_protection:
+            self.disarm(reason="unresolved_protection_modification_present")
+            raise MT5SubmitRefused(
+                "mt5_unresolved_protection_modification_present",
+                ",".join(unresolved_protection),
+            )
 
         if self.lifecycle_lookup is None:
             raise MT5SubmitRefused("mt5_strategy_lifecycle_not_supplied")
@@ -1584,6 +2296,12 @@ class MT5TradingAdapter:
             "evidence",
             "protective_stop",
             "protective_stop_points",
+            "position_ticket",
+            "target_price",
+            "broker_stop_loss",
+            "broker_take_profit",
+            "verified",
+            "action",
             "live",
         ):
             if key in fields:

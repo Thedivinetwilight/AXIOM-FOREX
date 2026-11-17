@@ -13,9 +13,9 @@ state *observed at the instant* ``order_send`` was called.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 def _ns(**fields: Any) -> SimpleNamespace:
@@ -55,7 +55,11 @@ class FakeMT5:
     ORDER_TYPE_BUY = 0
     ORDER_TYPE_SELL = 1
     TRADE_ACTION_DEAL = 1
+    TRADE_ACTION_SLTP = 6
     POSITION_TYPE_BUY = 0
+    TRADE_RETCODE_DONE = 10009
+    TRADE_RETCODE_REJECT = 10006
+    TRADE_RETCODE_NO_CHANGES = 10025
     POSITION_TYPE_SELL = 1
 
     def __init__(
@@ -118,6 +122,20 @@ class FakeMT5:
         #: Each entry is a result dict, ``None`` (module returns None), or a
         #: callable receiving the request.
         self.send_script: list[Any] = []
+        #: SL/TP actions have their own script because they do not fill volume.
+        self.protection_script: list[Any] = []
+        self.default_protection_result: Any = {
+            "retcode": self.TRADE_RETCODE_DONE,
+            "order": 0,
+            "deal": 0,
+            "volume": 0.0,
+            "comment": "protection updated",
+            "request_id": 1,
+            "retcode_external": 0,
+        }
+        self.protection_requests: list[dict[str, Any]] = []
+        self.mirror_protection_modifications = True
+        self.fail_positions_get = False
         self.default_send_result: Any = {
             "retcode": 10009,
             "order": 7001,
@@ -292,10 +310,21 @@ class FakeMT5:
         return _ns(**self.check_result)
 
     def order_send(self, request: Mapping[str, Any]):
-        self.send_requests.append(dict(request))
+        copied = dict(request)
+        self.send_requests.append(copied)
+        is_protection = copied.get("action") == self.TRADE_ACTION_SLTP
+        if is_protection:
+            self.protection_requests.append(copied)
         if self.on_send is not None:
             self.on_send(request)
-        scripted = self.send_script.pop(0) if self.send_script else self.default_send_result
+        if is_protection:
+            scripted = (
+                self.protection_script.pop(0)
+                if self.protection_script
+                else self.default_protection_result
+            )
+        else:
+            scripted = self.send_script.pop(0) if self.send_script else self.default_send_result
         if callable(scripted):
             scripted = scripted(request)
         if scripted == "raise":
@@ -305,13 +334,32 @@ class FakeMT5:
         result = dict(scripted)
         result.setdefault("request_id", 1)
         result.setdefault("comment", "")
-        if result.get("retcode") in (10008, 10009, 10010) and result.get("volume") is None:
+        if not is_protection and result.get("retcode") in (10008, 10009, 10010) and result.get("volume") is None:
             result["volume"] = request.get("volume", 0.0)
         if result.get("price") is None and "price" in request:
             result["price"] = request["price"]
-        if self.mirror_sent_orders and result.get("retcode") in (10008, 10009, 10010):
+        if is_protection:
+            if (
+                self.mirror_protection_modifications
+                and result.get("retcode") in (self.TRADE_RETCODE_DONE, self.TRADE_RETCODE_NO_CHANGES)
+            ):
+                self._mirror_protection(copied)
+        elif self.mirror_sent_orders and result.get("retcode") in (10008, 10009, 10010):
             self._mirror_entry(request, result)
         return _ns(**result)
+
+    def _mirror_protection(self, request: Mapping[str, Any]) -> None:
+        ticket = request.get("position")
+        symbol = str(request.get("symbol") or "")
+        matches = [
+            row for row in self.positions
+            if int(row.get("ticket", 0) or 0) == int(ticket or 0)
+            and str(row.get("symbol") or "") == symbol
+        ]
+        if len(matches) != 1:
+            return
+        matches[0]["sl"] = float(request.get("sl", 0.0) or 0.0)
+        matches[0]["tp"] = float(request.get("tp", 0.0) or 0.0)
 
     def _mirror_entry(self, request: Mapping[str, Any], result: Mapping[str, Any]) -> None:
         """Record the position an accepted entry deal would create.
@@ -347,6 +395,9 @@ class FakeMT5:
         )
 
     def positions_get(self, *, symbol: str | None = None, ticket: int | None = None):
+        if self.fail_positions_get:
+            self.last_error_value = (4401, "positions unavailable")
+            return None
         rows = []
         for item in self.positions:
             if symbol is not None and item.get("symbol") != symbol:

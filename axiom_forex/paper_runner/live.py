@@ -24,9 +24,11 @@ Order of operations, all fail-closed
    which re-checks everything above and then checks price drift, volume grid,
    netting conflict, margin, and quote age.
 5. **Book.**  A broker-confirmed fill is booked into the same ledger the paper
-   lane uses, at the terminal's own price and the filled volume -- so the gate
-   sees the same exposure live as it did on paper.  A fill that cannot be booked
-   blocks further orders rather than being quietly dropped.
+   lane uses, at the terminal's own price and filled volume. MT5 reports volume
+   in lots; the live leg converts it exactly to the catalog's quantity unit
+   before booking, so the gate sees the same exposure live as it did on paper.
+   A fill that cannot be booked blocks further orders rather than being quietly
+   dropped.
 
 Nothing here retries.  An unknown outcome leaves the adapter disarmed and the
 order in doubt; the next order is refused until reconciliation explains it.  No
@@ -41,6 +43,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
+from app.universe.specs import QuantityUnit
+
 # -- refusal reasons --------------------------------------------------------
 
 MODE_NOT_LIVE = "mode_not_live"
@@ -54,6 +58,7 @@ TRADING_DISABLED = "mt5_trading_disabled"
 STRATEGY_NOT_APPROVED = "strategy_not_approved_for_live"
 SPEC_MISMATCH = "live_symbol_spec_mismatch"
 UNRESOLVED_ORDER = "unresolved_order_present"
+UNRESOLVED_PROTECTION_MODIFICATION = "live_protection_modification_unresolved"
 DUPLICATE_REQUEST = "duplicate_request"
 POSITIONS_MISMATCH = "live_positions_mismatch"
 GATE_REFUSED = "gate_refused"
@@ -115,6 +120,7 @@ class LiveOutcome:
     classification: str = ""
     volume_requested: Decimal = Decimal(0)
     volume_filled: Decimal = Decimal(0)
+    price: Decimal | None = None
     unknown: bool = False
     permits_resend: bool = False
     booked: bool = False
@@ -149,6 +155,7 @@ class LiveOutcome:
             "classification": self.classification,
             "volume_requested": str(self.volume_requested),
             "volume_filled": str(self.volume_filled),
+            "price": None if self.price is None else str(self.price),
             "unknown": self.unknown,
             "unresolved": self.unresolved,
             "booked": self.booked,
@@ -230,6 +237,7 @@ class LiveLeg:
         self.expected_account = expected_account
         self.require_real_account = bool(require_real_account)
         self.history: list[dict[str, Any]] = []
+        self.protection_history: list[dict[str, Any]] = []
         self.booked: list[dict[str, Any]] = []
         self.booking_failures: list[dict[str, Any]] = []
         self.last_outcome: dict[str, Any] = {}
@@ -297,6 +305,7 @@ class LiveLeg:
         strategy_approved: bool = True,
         ledger_positions: Sequence[Mapping[str, Any]] | None = None,
         demo_test: bool = False,
+        allow_unprotected_ticket: str | None = None,
     ) -> tuple[LiveBlocker, ...]:
         """Everything that would stop a live order right now.  Sends nothing."""
 
@@ -417,6 +426,15 @@ class LiveLeg:
                     "never re-sent automatically.",
                 )
             )
+        if status.get("unresolved_protection_modifications"):
+            blockers.append(
+                LiveBlocker(
+                    UNRESOLVED_PROTECTION_MODIFICATION,
+                    "One or more SL/TP changes are unresolved and need an exact broker read-back.",
+                    "Do not modify protection or submit entries again until the exact position "
+                    "shows the durable requested stop and target, then re-arm explicitly.",
+                )
+            )
         if self.require_real_account and not demo_test:
             from ..scalper.live_account import verify_real_account
 
@@ -522,14 +540,21 @@ class LiveLeg:
             except Exception as exc:
                 reconciled = False
                 detail = type(exc).__name__
-            if unprotected:
+            allowed_ticket = str(allow_unprotected_ticket or "").strip()
+            if allowed_ticket.startswith("mt5:"):
+                allowed_ticket = allowed_ticket.split(":", 1)[1]
+            blocking_unprotected = [
+                row for row in unprotected
+                if not allowed_ticket or str(row.get("ticket") or "") != allowed_ticket
+            ]
+            if blocking_unprotected:
                 blockers.append(
                     LiveBlocker(
                         PROTECTIVE_STOP_MISSING,
-                        f"{len(unprotected)} open position(s) placed by this deployment "
+                        f"{len(blocking_unprotected)} open position(s) placed by this deployment "
                         "carry no broker-side stop loss ("
                         + ", ".join(
-                            f"ticket {row.get('ticket', 0)}" for row in unprotected
+                            f"ticket {row.get('ticket', 0)}" for row in blocking_unprotected
                         )
                         + ").",
                         "AXIOM refuses new entries while a position is unprotected, and "
@@ -691,6 +716,11 @@ class LiveLeg:
             classification=str(getattr(broker, "classification", "") or ""),
             volume_requested=Decimal(str(getattr(broker, "volume_requested", 0) or 0)),
             volume_filled=Decimal(str(getattr(broker, "volume_filled", 0) or 0)),
+            price=(
+                None
+                if getattr(broker, "price", None) is None
+                else Decimal(str(getattr(broker, "price")))
+            ),
             unknown=unknown,
             permits_resend=bool(getattr(broker, "permits_resend", False)),
             at=self.clock(),
@@ -701,6 +731,12 @@ class LiveLeg:
             outcome.booked = bool(booking.get("booked"))
             if not outcome.booked:
                 outcome.reasons = (BOOKING_FAILED,)
+            elif not self._persist_booking_result(outcome):
+                failure = "durable_booking_write_failed"
+                outcome.booked = False
+                outcome.reasons = (BOOKING_FAILED, failure)
+                outcome.booking = {**dict(outcome.booking), "booked": False, "error": failure}
+                self.booking_failures.append({"error": failure, "request_id": request_id})
         result = outcome.as_result()
         self.last_outcome = result
         self.history.append(result)
@@ -728,6 +764,94 @@ class LiveLeg:
         """Runner-facing wrapper: same path, strategy approval read from the lifecycle."""
 
         return self.submit_plan(plan, strategy_approved=self._strategy_approved())
+
+    def modify_protection(
+        self,
+        *,
+        request_id: str,
+        ticket: str,
+        symbol: str,
+        stop_price: Decimal,
+        target_price: Decimal | None,
+        expected_position: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Apply one broker-side SL/TP change under the existing LIVE guards."""
+
+        request_id = str(request_id or "")
+        ticket = str(ticket or "")
+        broker_ticket = ticket.split(":", 1)[1] if ticket.startswith("mt5:") else ticket
+        blockers = self.blockers(
+            request_id=request_id,
+            strategy_approved=self._strategy_approved(),
+            allow_unprotected_ticket=broker_ticket,
+        )
+        if blockers:
+            result = {
+                "request_id": request_id,
+                "ticket": broker_ticket,
+                "symbol": str(symbol or ""),
+                "state": "REFUSED",
+                "sent": False,
+                "unknown": False,
+                "verified": False,
+                "reason": blockers[0].reason,
+                "detail": blockers[0].message,
+                "blockers": [item.audit_view() for item in blockers],
+                "permits_resend": False,
+            }
+            self.protection_history.append(dict(result))
+            self._audit(
+                "PAPER_RUNNER_LIVE_PROTECTION_REFUSED",
+                request_id=request_id,
+                ticket=broker_ticket,
+                symbol=str(symbol or ""),
+                reason=blockers[0].reason,
+                live=True,
+            )
+            return result
+
+        try:
+            receipt = self.router.route_live_protection(
+                request_id=request_id,
+                ticket=int(broker_ticket),
+                symbol=str(symbol),
+                spec=self.spec,
+                strategy_id=self.strategy_id,
+                stop_price=Decimal(str(stop_price)),
+                target_price=(
+                    None if target_price is None else Decimal(str(target_price))
+                ),
+                expected_position=dict(expected_position),
+            )
+            result = dict(receipt or {}) if isinstance(receipt, Mapping) else {}
+        except Exception as exc:
+            reason = str(getattr(exc, "reason", "") or "live_protection_route_refused")
+            result = {
+                "request_id": request_id,
+                "ticket": broker_ticket,
+                "symbol": str(symbol or ""),
+                "state": "REFUSED",
+                "sent": False,
+                "unknown": False,
+                "verified": False,
+                "reason": reason,
+                "detail": type(exc).__name__,
+                "permits_resend": False,
+            }
+        self.protection_history.append(dict(result))
+        self._audit(
+            "PAPER_RUNNER_LIVE_PROTECTION_RESULT",
+            request_id=request_id,
+            ticket=broker_ticket,
+            symbol=str(symbol or ""),
+            state=str(result.get("state") or ""),
+            sent=bool(result.get("sent")),
+            unknown=bool(result.get("unknown")),
+            verified=bool(result.get("verified")),
+            reason=str(result.get("reason") or ""),
+            live=True,
+        )
+        return result
 
     # -- reconciliation --------------------------------------------------
 
@@ -817,24 +941,116 @@ class LiveLeg:
             return True
         return any(str(record.get("request_id", "")) == request_id for record in records)
 
+    def _persist_booking_result(self, outcome: LiveOutcome) -> bool:
+        """Persist the fill-to-ledger link so recovery can distinguish booked from in doubt."""
+
+        repository = self.repository
+        getter = getattr(repository, "get_order", None)
+        saver = getattr(repository, "save_orders", None)
+        if not callable(getter) or not callable(saver) or not outcome.request_id:
+            return False
+        try:
+            record = getter(outcome.request_id)
+            if not isinstance(record, Mapping) or str(record.get("request_id") or "") != outcome.request_id:
+                return False
+            if str(record.get("state") or "").upper() not in {"FILLED", "PARTIAL"}:
+                return False
+            merged = dict(record)
+            merged.update(
+                {
+                    "booked": bool(outcome.booked),
+                    "booking": dict(outcome.booking or {}),
+                    "leg_outcome": outcome.as_result(),
+                    "updated_at": self.clock(),
+                }
+            )
+            saver([merged])
+            stored = getter(outcome.request_id)
+            return bool(
+                isinstance(stored, Mapping)
+                and str(stored.get("request_id") or "") == outcome.request_id
+                and stored.get("booked") is True
+                and isinstance(stored.get("booking"), Mapping)
+                and stored.get("booking", {}).get("booked") is True
+            )
+        except Exception:
+            return False
+
+    def _catalog_quantity_from_broker_volume(self, volume_lots: Decimal) -> tuple[Decimal, str]:
+        """Translate MT5's lot fill into the instrument catalog's quantity unit.
+
+        ``MT5OrderOutcome.volume_filled`` is always broker lots, while the
+        portfolio ledger accepts ``CurrencyPairSpec.quantity_unit``. Keep the
+        conversion exact (no rounding) so BASE_UNITS ledgers are not booked at a
+        lot-sized quantity and an invalid catalog unit cannot be guessed.
+        """
+
+        if self.spec is None:
+            raise ValueError("live_symbol_spec_missing")
+        ledger_spec = getattr(self.portfolio, "spec", None)
+        if ledger_spec is None or ledger_spec != self.spec:
+            raise ValueError("live_ledger_spec_mismatch")
+        raw_unit = getattr(self.spec, "quantity_unit_value", None)
+        if raw_unit is None:
+            raw_unit = getattr(self.spec, "quantity_unit", None)
+        raw_unit = getattr(raw_unit, "value", raw_unit)
+        try:
+            unit = QuantityUnit(str(raw_unit).strip().upper())
+        except ValueError as exc:
+            raise ValueError("live_quantity_unit_unavailable") from exc
+        if unit == QuantityUnit.LOTS:
+            quantity = volume_lots
+        elif unit == QuantityUnit.BASE_UNITS:
+            try:
+                contract = Decimal(str(self.spec.contract_size_decimal()))
+            except Exception as exc:
+                raise ValueError("live_contract_size_unavailable") from exc
+            if not contract.is_finite() or contract <= 0:
+                raise ValueError("live_contract_size_invalid")
+            quantity = volume_lots * contract
+        else:  # pragma: no cover - QuantityUnit is exhaustive, retain fail-closed behavior.
+            raise ValueError("live_quantity_unit_unsupported")
+        if not quantity.is_finite() or quantity <= 0:
+            raise ValueError("broker_fill_quantity_conversion_invalid")
+        return quantity, unit.value
+
     def _book(self, plan: Any, outcome: Any) -> dict[str, Any]:
         """Book a broker-confirmed fill into the ledger, using the ledger's own API.
 
-        Quantity and price come from the terminal's answer, never from the plan: a
-        partial fill is booked as the size that actually traded.
+        Price and the *filled broker volume* come from the terminal, never from
+        the plan. MT5 reports volume in lots; convert it exactly to the catalog's
+        quantity unit before the ledger validates or books it.
         """
 
         if self.portfolio is None:
             return {"booked": False, "error": "no_ledger"}
         action = str(getattr(plan, "action", "") or "").upper()
-        quantity = Decimal(str(getattr(outcome, "volume_filled", 0) or 0))
-        price = getattr(outcome, "price", None) or getattr(
-            getattr(plan, "request", None), "executable_price", None
-        )
-        if price is None or quantity <= 0:
-            error = "no_fill_price_or_volume"
+        try:
+            broker_volume_lots = Decimal(str(getattr(outcome, "volume_filled", 0) or 0))
+            raw_price = getattr(outcome, "price", None)
+            price = None if raw_price is None else Decimal(str(raw_price))
+        except (ArithmeticError, TypeError, ValueError):
+            broker_volume_lots = Decimal(0)
+            price = None
+        if (
+            not broker_volume_lots.is_finite()
+            or broker_volume_lots <= 0
+            or price is None
+            or not price.is_finite()
+            or price <= 0
+        ):
+            error = "broker_fill_price_or_volume_missing"
             self.booking_failures.append({"error": error, "action": action})
             return {"booked": False, "error": error}
+        try:
+            quantity, quantity_unit = self._catalog_quantity_from_broker_volume(
+                broker_volume_lots
+            )
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            error = "broker_fill_quantity_conversion_failed"
+            failure = {"error": error, "detail": str(exc), "action": action}
+            self.booking_failures.append(failure)
+            return {"booked": False, **failure}
         at = self.clock()
         ticket = int(
             getattr(outcome, "order_ticket", 0) or getattr(outcome, "deal_ticket", 0) or 0
@@ -856,6 +1072,8 @@ class LiveLeg:
                     "action": "CLOSE",
                     "position_id": position_id,
                     "quantity": str(quantity),
+                    "quantity_unit": quantity_unit,
+                    "broker_volume_lots": str(broker_volume_lots),
                     "price": str(price),
                     "realized_pnl_account": str(getattr(trade, "realized_pnl_account", "")),
                     "order_ticket": ticket,
@@ -875,6 +1093,8 @@ class LiveLeg:
                     "action": "OPEN",
                     "position_id": position_id,
                     "quantity": str(quantity),
+                    "quantity_unit": quantity_unit,
+                    "broker_volume_lots": str(broker_volume_lots),
                     "price": str(price),
                     "order_ticket": ticket,
                 }
@@ -889,6 +1109,8 @@ class LiveLeg:
             action=entry["action"],
             position_id=entry["position_id"],
             quantity=entry["quantity"],
+            quantity_unit=entry["quantity_unit"],
+            broker_volume_lots=entry["broker_volume_lots"],
             price=entry["price"],
             order_ticket=ticket,
         )
@@ -980,4 +1202,5 @@ __all__ = [
     "SUBMIT_REFUSED",
     "TRADING_DISABLED",
     "UNRESOLVED_ORDER",
+    "UNRESOLVED_PROTECTION_MODIFICATION",
 ]

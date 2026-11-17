@@ -22,7 +22,7 @@ Three properties matter more than any of the mechanics:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Mapping
@@ -35,7 +35,7 @@ from .ev import ExpectancyTracker, cost_for, evaluate as evaluate_ev
 from .execution import ExecutionReport, PaperVenue, ScalperVenue, Trader
 from .guardian import Guardian, GuardianLimits, OpenPositionRisk, ShutdownPlan
 from .positions import ClosedTrade, ManagementAction, ManagementSettings, PositionBook
-from .regime import ABNORMAL, RegimeState, RegimeThresholds, classify
+from .regime import RegimeState, RegimeThresholds, classify
 from .scribe import Scribe
 from .skeptic import session_of
 from .signals import Evaluation, Signal, SignalContext, Strategy, default_strategies
@@ -448,6 +448,13 @@ class ScalperDesk:
                         detail=action.detail,
                         position_id=action.position_id,
                     )
+                elif action.kind == positions.HOLD and action.reason == positions.CLOSE_UNCONFIRMED:
+                    self._scribe.error(
+                        at_ms=now_ms,
+                        error=positions.CLOSE_UNCONFIRMED,
+                        detail=action.detail,
+                        position_id=action.position_id,
+                    )
             closed.extend(self._book.closed[before:])
         return actions, closed
 
@@ -556,6 +563,10 @@ class ScalperDesk:
             return "data_quality:" + ",".join(reasons)
         if self._trader.has_unresolved:
             return UNRESOLVED_ORDER
+        if self._book.close_blockers:
+            return positions.CLOSE_UNCONFIRMED
+        if self._book.verify_protection().get("missing"):
+            return execution.PROTECTION_UNVERIFIED
         allowed, reasons = self._guardian.may_open()
         if not allowed:
             self.stats["entries_suspended"] += 1

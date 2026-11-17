@@ -24,7 +24,11 @@ from axiom_forex.strategies.catalog.panel import (
 from axiom_forex.strategies.catalog.store import RECORD_VERSION
 
 UTC = timezone.utc
-NOW = datetime(2026, 11, 2, 9, 20, tzinfo=UTC)
+# Keep the fixture's injected clock and persisted evaluation timestamp aligned
+# with the time this test process starts. The production 336-hour freshness
+# limit remains unchanged; a hard-coded historical timestamp makes otherwise
+# valid fixture records stale as the calendar advances.
+NOW = datetime.now(UTC)
 
 
 def _symbol_record(name: str, base: str, profit: str, *, tradable: bool = True) -> dict[str, Any]:

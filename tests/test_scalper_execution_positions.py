@@ -18,8 +18,8 @@ from axiom_forex.scalper.execution import (
     ACCEPTED,
     ALREADY_SUBMITTED,
     BLOCKED,
+    Fill,
     MARKET_CLOSED,
-    PAPER_ONLY,
     PRECHECK_FAILED,
     PROTECTION_UNVERIFIED,
     REJECTED,
@@ -34,13 +34,16 @@ from axiom_forex.scalper.execution import (
     VenueOrder,
     precheck,
 )
-from axiom_forex.scalper.guardian import Guardian, GuardianLimits, OpenPositionRisk
+from axiom_forex.scalper.guardian import Guardian, GuardianLimits
 from axiom_forex.scalper.positions import (
     BREAK_EVEN,
     CLOSE,
+    CLOSE_UNCONFIRMED,
+    HOLD,
     MODIFY_STOP,
     MOMENTUM_FLIP,
     PARTIAL_EXIT,
+    PROTECTION_MISSING,
     STOP_HIT,
     TARGET_HIT,
     TIME_EXIT,
@@ -49,7 +52,7 @@ from axiom_forex.scalper.positions import (
     PositionBook,
 )
 from axiom_forex.scalper.signals import Signal
-from axiom_forex.scalper.ticks import ReplayTick, Tick, TickCore, synthetic_ticks
+from axiom_forex.scalper.ticks import ReplayTick, Tick, TickCore
 
 CONFIG = fixture_config()
 SPEC = CONFIG.spec_for("EURUSD.pro")
@@ -500,6 +503,103 @@ def test_break_even_moves_the_stop_to_the_entry_after_the_trigger():
     assert instance.get("1000").stop_price > Decimal("1.10200")
 
 
+def test_a_modify_return_is_not_protection_until_the_broker_echoes_the_new_stop():
+    class LyingModifyVenue(PaperVenue):
+        def modify_protection(self, *, ticket, stop_price, target_price, request_id=None):
+            return True
+
+    venue = LyingModifyVenue(cost=CONFIG.cost)
+    instance = book(venue=venue)
+    open_through_venue(instance)
+    original_stop = instance.get("1000").stop_price
+    actions = instance.on_tick(
+        position_id="1000", tick=quote("1.10218", at_ms=100), now_ms=100
+    )
+
+    assert any(action.kind == HOLD and action.reason == PROTECTION_MISSING for action in actions)
+    assert instance.get("1000").stop_price == original_stop
+    assert instance.get("1000").protection_verified is False
+    assert instance.verify_protection()["missing"] == ["1000"]
+    assert instance.summary()["pending_protection_modifications"] == ["1000"]
+
+
+def test_target_change_is_pending_until_both_protection_fields_echo_after_restore():
+    class StopOnlyEchoVenue(PaperVenue):
+        def modify_protection(self, *, ticket, stop_price, target_price, request_id=None):
+            _current_stop, current_target = self.protection(ticket)
+            return super().modify_protection(
+                ticket=ticket,
+                stop_price=stop_price,
+                target_price=current_target,
+                request_id=request_id,
+            )
+
+    venue = StopOnlyEchoVenue(cost=CONFIG.cost)
+    instance = book(venue=venue)
+    open_through_venue(instance)
+    current = instance.get("1000")
+    assert current is not None and current.target_price is not None
+    requested_target = current.target_price + Decimal("0.00020")
+
+    action = instance.modify_protection(
+        position_id="1000",
+        stop_price=current.stop_price,
+        target_price=requested_target,
+        now_ms=100,
+        reason="operator_target_update",
+    )
+
+    pending = instance.snapshot()["pending_protection_modifications"]
+    assert action.kind == HOLD
+    assert instance.get("1000").target_price == current.target_price
+    assert instance.get("1000").protection_verified is False
+    assert pending[0]["target_price"] == str(requested_target)
+    assert pending[0]["previous_target_price"] == str(current.target_price)
+    assert instance.verify_protection()["missing"] == ["1000"]
+    assert instance.snapshot()["pending_protection_modifications"] == pending
+
+    restored = book(venue=venue)
+    restored.restore_state(instance.snapshot())
+    assert restored.verify_protection()["missing"] == ["1000"]
+    venue._protection["1000"] = (current.stop_price, requested_target)
+    verified = restored.verify_protection()
+
+    assert verified["ok"] is True
+    assert restored.get("1000").target_price == requested_target
+    assert restored.get("1000").protection_verified is True
+    assert restored.snapshot()["pending_protection_modifications"] == []
+
+
+def test_live_protection_change_requires_both_durable_intent_and_result_hooks():
+    class LivePaperHarness(PaperVenue):
+        mode = "LIVE"
+
+        def __init__(self):
+            super().__init__(cost=CONFIG.cost)
+            self.modification_calls = 0
+
+        def modify_protection(self, *, ticket, stop_price, target_price, request_id=None):
+            self.modification_calls += 1
+            return super().modify_protection(
+                ticket=ticket,
+                stop_price=stop_price,
+                target_price=target_price,
+                request_id=request_id,
+            )
+
+    venue = LivePaperHarness()
+    instance = book(venue=venue)
+    open_through_venue(instance)
+    tick = quote("1.10218", at_ms=100)
+
+    actions = instance.on_tick(position_id="1000", tick=tick, now_ms=100)
+
+    assert venue.modification_calls == 0
+    assert any(action.kind == HOLD and action.reason == PROTECTION_MISSING for action in actions)
+    assert instance.snapshot()["pending_protection_modifications"]
+    assert instance.get("1000").protection_verified is False
+
+
 def test_trailing_ratchets_and_never_widens():
     instance = book()
     open_through_venue(instance)
@@ -523,6 +623,179 @@ def test_a_time_exit_closes_a_position_that_overstays():
     late = CONFIG.max_hold_ms + 100
     actions = instance.on_tick(position_id="1000", tick=quote("1.10205", at_ms=late), now_ms=late)
     assert actions[0].reason == TIME_EXIT
+
+
+def test_a_refused_close_stays_open_and_blocks_new_entries():
+    class RefusingCloseVenue(PaperVenue):
+        def __init__(self):
+            super().__init__(cost=CONFIG.cost)
+            self.close_attempts = 0
+
+        def close(self, *, ticket, price, spread_points, reason, quote=None, quantity=None):
+            self.close_attempts += 1
+            return Fill(
+                request_id=f"close:{ticket}",
+                status=REJECTED,
+                filled_lots=Decimal(0),
+                requested_lots=Decimal(str(quantity or 0)),
+                price=None,
+                spread_points=spread_points,
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=ticket,
+                reason="broker_rejected",
+                simulated=False,
+            )
+
+    venue = RefusingCloseVenue()
+    instance = book(venue=venue)
+    position(instance)
+    action = instance.close_now(
+        position_id="1000", tick=quote("1.10210", at_ms=100), now_ms=100
+    )
+
+    assert action.kind == HOLD
+    assert action.reason == CLOSE_UNCONFIRMED
+    assert instance.get("1000") is not None
+    assert instance.closed == ()
+    assert instance.close_blockers == ({"position_id": "1000", "reason": "broker_rejected"},)
+    assert venue.close_attempts == 1
+
+
+def test_an_unknown_close_is_latched_until_its_exact_durable_fill_is_reconciled():
+    class UnknownCloseVenue(PaperVenue):
+        def __init__(self):
+            super().__init__(cost=CONFIG.cost)
+            self.close_attempts = 0
+
+        def close(self, *, ticket, price, spread_points, reason, quote=None, quantity=None):
+            self.close_attempts += 1
+            return Fill(
+                request_id="close-request-17",
+                status=UNKNOWN_OUTCOME,
+                filled_lots=Decimal(0),
+                requested_lots=Decimal(str(quantity)),
+                price=None,
+                spread_points=spread_points,
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=ticket,
+                reason="response_lost",
+                simulated=False,
+            )
+
+    venue = UnknownCloseVenue()
+    instance = book(venue=venue)
+    position(instance)
+    first = instance.close_now(
+        position_id="1000", tick=quote("1.10210", at_ms=100), now_ms=100
+    )
+    retry = instance.close_now(
+        position_id="1000", tick=quote("1.10220", at_ms=200), now_ms=200
+    )
+
+    assert first.kind == HOLD and first.reason == CLOSE_UNCONFIRMED
+    assert retry.kind == HOLD and retry.reason == CLOSE_UNCONFIRMED
+    assert venue.close_attempts == 1
+    assert instance.pending_closes[0]["request_id"] == "close-request-17"
+
+    reconciled = instance.resolve_pending_close(
+        position_id="1000",
+        fill=Fill(
+            request_id="close-request-17",
+            status=ACCEPTED,
+            filled_lots=Decimal("0.04"),
+            requested_lots=Decimal("0.10"),
+            price=Decimal("1.10217"),
+            spread_points=Decimal(0),
+            slippage_points=Decimal(0),
+            latency_ms=0,
+            ticket="1000",
+            reason="FILLED",
+            simulated=False,
+        ),
+        now_ms=300,
+    )
+
+    assert reconciled is not None and reconciled.kind == PARTIAL_EXIT
+    assert instance.get("1000").lots == Decimal("0.06")
+    assert instance.pending_closes == ()
+    assert instance.close_blockers == ()
+    assert instance.closed[0].exit_price == Decimal("1.10217")
+
+
+def test_a_broker_partial_close_books_only_the_reported_slice():
+    class PartialCloseVenue(PaperVenue):
+        def close(self, *, ticket, price, spread_points, reason, quote=None, quantity=None):
+            return Fill(
+                request_id=f"close:{ticket}",
+                status=ACCEPTED,
+                filled_lots=Decimal("0.04"),
+                requested_lots=Decimal(str(quantity)),
+                price=Decimal("1.10227"),
+                spread_points=spread_points,
+                slippage_points=Decimal(0),
+                latency_ms=0,
+                ticket=ticket,
+                reason="partial_fill",
+                simulated=False,
+            )
+
+    venue = PartialCloseVenue(cost=CONFIG.cost)
+    instance = book(venue=venue, partial_exit_points=Decimal("10"))
+    open_through_venue(instance)
+    actions = instance.on_tick(
+        position_id="1000", tick=quote("1.10230", at_ms=100), now_ms=100
+    )
+
+    remaining = instance.get("1000")
+    assert any(action.kind == PARTIAL_EXIT for action in actions)
+    assert remaining is not None
+    assert remaining.lots == Decimal("0.06")
+    assert remaining.partial_closed_lots == Decimal("0.04")
+    assert instance.closed[0].lots == Decimal("0.04")
+    assert instance.closed[0].exit_price == Decimal("1.10227")
+
+
+def test_position_book_snapshot_round_trips_partial_and_management_state():
+    venue = PaperVenue(cost=CONFIG.cost)
+    settings = {
+        "partial_exit_points": Decimal("10"),
+        "partial_exit_fraction": Decimal("0.4"),
+        "break_even_trigger_points": Decimal("10"),
+        "trail_after_points": Decimal("30"),
+        "trail_distance_points": Decimal("5"),
+    }
+    original = book(venue=venue, **settings)
+    open_through_venue(original)
+    original.on_tick(
+        position_id="1000", tick=quote("1.10220", at_ms=100), now_ms=100
+    )
+    original.on_tick(
+        position_id="1000", tick=quote("1.10250", at_ms=200), now_ms=200
+    )
+    before = original.get("1000")
+    assert before is not None
+    assert before.partial_closed_lots == Decimal("0.04")
+    assert before.break_even_moved is True
+    assert before.trailing_active is True
+    assert before.mfe_points > 0
+
+    saved = original.snapshot()
+    restored = book(venue=venue, **settings)
+    restored.restore_state(saved)
+
+    after = restored.get("1000")
+    assert after is not None
+    assert after.lots == before.lots
+    assert after.partial_closed_lots == before.partial_closed_lots
+    assert after.break_even_moved is before.break_even_moved
+    assert after.trailing_active is before.trailing_active
+    assert after.mfe_points == before.mfe_points
+    assert after.mae_points == before.mae_points
+    assert restored.verify_protection()["ok"] is True
+    assert restored.snapshot()["open_positions"] == saved["open_positions"]
+    assert restored.snapshot()["closed_trades"] == saved["closed_trades"]
 
 
 def test_a_stale_quote_closes_rather_than_managing_blind():
@@ -600,6 +873,33 @@ def test_protection_verification_reads_the_venue():
     result = instance.verify_protection()
     assert result["ok"] is True
     assert position.position_id in result["verified"]
+
+
+def test_zero_broker_target_is_the_absent_tp_sentinel():
+    venue = PaperVenue(cost=CONFIG.cost)
+    instance = book(venue=venue)
+    opened = open_through_venue(instance, target=None)
+    venue._protection[opened.position_id] = (opened.stop_price, Decimal("0"))
+
+    result = instance.verify_protection()
+
+    assert result["ok"] is True
+    assert opened.position_id in result["verified"]
+    assert instance.get(opened.position_id).protection_verified is True
+
+
+def test_a_positive_but_wrong_broker_stop_does_not_count_as_verified():
+    class WrongStopVenue(PaperVenue):
+        def protection(self, ticket):
+            return (Decimal("1.10100"), None)
+
+    instance = book(venue=WrongStopVenue(cost=CONFIG.cost))
+    position(instance)
+
+    result = instance.verify_protection()
+    assert result["ok"] is False
+    assert result["missing"] == ["1000"]
+    assert instance.get("1000").protection_verified is False
 
 
 def test_an_unprotected_position_is_flagged_and_entries_are_suspended():

@@ -20,8 +20,10 @@ The file proves, in order:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import timedelta, timezone
 from decimal import Decimal
+from uuid import uuid4
 from types import SimpleNamespace
 
 import pytest
@@ -29,18 +31,27 @@ import pytest
 from axiom_forex.paper_runner.live import (
     ACCOUNT_IDENTITY_MISMATCH,
     REAL_ACCOUNT_REQUIRED,
+    UNRESOLVED_PROTECTION_MODIFICATION,
     LiveLeg,
 )
 from axiom_forex.paper_runner.provider import build_provider_platform
+from axiom_forex.brokers.mt5 import TRADE_ACTION_SLTP
 from axiom_forex.brokers.mt5.catalogue import build_catalogue
 from axiom_forex.database.repository import ForexRepository
 from axiom_forex.execution.mode_router import ExecutionRouter
 from axiom_forex.scalper.config import InstrumentSpec
-from axiom_forex.scalper.execution import PAPER_ONLY, Trader, VenueOrder, LIVE_VENUE_NOT_PERMITTED
+from axiom_forex.scalper.execution import (
+    ACCEPTED,
+    UNKNOWN_OUTCOME,
+    Fill,
+    PAPER_ONLY,
+    PROTECTION_UNVERIFIED,
+    Trader,
+    VenueOrder,
+    LIVE_VENUE_NOT_PERMITTED,
+)
 from axiom_forex.scalper.guardian import Guardian, GuardianLimits
 from axiom_forex.scalper.live_account import (
-    FINGERPRINT_MISMATCH,
-    LOGIN_MISMATCH,
     MODE_NOT_REAL,
     MODE_UNKNOWN,
     ExpectedAccount,
@@ -51,12 +62,20 @@ from axiom_forex.scalper.live_autonomous import (
     RECOVERY_REQUIRED,
     AdmittedStrategy,
     AutonomousScalper,
+    JsonRunStateStore,
 )
-from axiom_forex.scalper.live_venue import BrokerPlanFactory, BrokerVenue
-from axiom_forex.scalper.positions import ManagementSettings, PositionBook
+from axiom_forex.scalper.live_venue import (
+    CLOSE_QUOTE_REQUIRED,
+    BrokerPlanFactory,
+    BrokerVenue,
+)
+from axiom_forex.scalper.positions import (
+    MODIFY_PROTECTION,
+    ManagementSettings,
+    PositionBook,
+)
 from axiom_forex.scalper.ticks import TickCore
 from app.execution.broker import TradingBlocked
-from tests.fake_mt5 import FakeMT5
 from tests.paper_provider_support import PAIR, START, Mode, symbol_request, write_setup
 from tests.test_demo_execution_test import TICK, demo_fake, make_terminal
 from tests.test_mt5_adapter import build_harness
@@ -242,9 +261,7 @@ def _venue(real, **kwargs):
         leg=real["leg"],
         plan_factory=BrokerPlanFactory(platform=real["platform"], strategy_id="scalper-live-auto"),
         protection_reader=lambda ticket: (Decimal("1.09500"), None),
-        position_reader=lambda: [
-            {"ticket": row["ticket"]} for row in (real["fake"].positions or [])
-        ],
+        position_reader=lambda: [dict(row) for row in (real["fake"].positions or [])],
         clock_ms=lambda: TICK * 1000,
         **kwargs,
     )
@@ -262,6 +279,110 @@ def _order(request_id="scalper:venue:1", lots="0.10"):
         signal_fingerprint="fp",
         strategy="trend",
     )
+
+
+def test_a_live_close_requires_a_current_quote_before_calling_the_leg():
+    class Leg:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, plan):
+            self.calls.append(plan)
+            return {}
+
+    leg = Leg()
+    factory_calls = []
+
+    def plan_factory(**kwargs):
+        factory_calls.append(kwargs)
+        return object()
+
+    venue = BrokerVenue(leg=leg, plan_factory=plan_factory)
+    fill = venue.close(
+        ticket="42",
+        price=Decimal("1.10"),
+        spread_points=Decimal(0),
+        reason="operator_close",
+    )
+
+    assert fill.status == "blocked"
+    assert fill.reason == CLOSE_QUOTE_REQUIRED
+    assert factory_calls == []
+    assert leg.calls == []
+
+
+def test_live_close_plan_uses_opposite_side_exact_quantity_and_broker_fill():
+    from app.common.types import OrderSide
+
+    position = SimpleNamespace(
+        account_id="synthetic-account",
+        side=OrderSide.BUY,
+        quantity=Decimal("0.10"),
+        remaining_quantity=Decimal("0.10"),
+    )
+    platform = SimpleNamespace(
+        spec=SimpleNamespace(canonical_pair="EUR/USD", pair="EUR/USD", quantity_unit_value="LOTS"),
+        execution_config=SimpleNamespace(provider_id="synthetic-provider"),
+        broker_symbol="EURUSD.pro",
+        portfolio=SimpleNamespace(positions={"mt5:42": position}),
+        context_factory=SimpleNamespace(build=lambda *, at, bar: {"at": at, "bar": bar}),
+    )
+    quote = SimpleNamespace(
+        source_time=START,
+        received_at=START,
+        bid=Decimal("1.10000"),
+        ask=Decimal("1.10002"),
+        tick_id="close-quote-1",
+    )
+    factory = BrokerPlanFactory(platform=platform, strategy_id="test-close")
+    planned = []
+
+    def plan_factory(**kwargs):
+        plan = factory(**kwargs)
+        planned.append(plan)
+        return plan
+
+    class Leg:
+        def __init__(self):
+            self.plan = None
+
+        def execute(self, plan):
+            self.plan = plan
+            return {
+                "submitted": True,
+                "state": "FILLED",
+                "volume_requested": "0.05",
+                "volume_filled": "0.05",
+                "booked": True,
+                "booking": {
+                    "action": "CLOSE",
+                    "position_id": "mt5:42",
+                    "quantity": "0.05",
+                    "price": "1.10001",
+                },
+            }
+
+    leg = Leg()
+    venue = BrokerVenue(leg=leg, plan_factory=plan_factory)
+    fill = venue.close(
+        ticket="42",
+        price=Decimal("1.10000"),
+        spread_points=Decimal(0),
+        reason="stop_hit",
+        quote=quote,
+        quantity=Decimal("0.05"),
+    )
+
+    plan = planned[0]
+    assert plan.action == "CLOSE"
+    assert plan.request.side == OrderSide.SELL
+    assert plan.request.quantity == Decimal("0.05")
+    assert plan.request.close_intent.position_id == "mt5:42"
+    assert leg.plan.request.request_id == plan.request.request_id
+    assert fill.status == "accepted"
+    assert fill.filled_lots == Decimal("0.05")
+    assert fill.ticket == "42"
+    assert fill.price == Decimal("1.10001")
 
 
 def test_the_venue_submits_once_through_the_guarded_leg(real):
@@ -351,7 +472,6 @@ def test_the_trader_refuses_a_live_venue_it_was_not_told_about():
 
 
 def instrument_spec(platform) -> InstrumentSpec:
-    spec = platform.spec
     return InstrumentSpec(
         symbol=PAIR,
         pair=PAIR,
@@ -435,15 +555,13 @@ class AlwaysBuy:
             parameter_fingerprint=self.fingerprint,
             ttl_ms=self._ttl,
         )
-        from axiom_forex.scalper.config import InstrumentSpec as _Spec
-
         signal = signal.__class__(
             **{**signal.__dict__, "_point": None}
         ) if hasattr(signal, "_point") else signal
         return Evaluation(strategy=self.name, family=self.family, outcome="signal", detail="test", signal=signal)
 
 
-def build_run(real, *, admitted=True, strategy=None):
+def build_run(real, *, admitted=True, strategy=None, state_store=None):
     platform = real["platform"]
     spec = instrument_spec(platform)
     venue = _venue(real)
@@ -500,8 +618,72 @@ def build_run(real, *, admitted=True, strategy=None):
         starting_equity=Decimal("10000"),
         risk_fraction=Decimal("0.0001"),
         clock=lambda: START,
+        state_store=(
+            state_store
+            if state_store is not None
+            else JsonRunStateStore(real["tmp"] / f"run-{uuid4().hex}.json")
+        ),
     )
     return run, venue, chosen
+
+
+def _seed_guarded_scalper_position(real, run, venue):
+    """Create one fake broker fill and matching provider/scalper ledgers."""
+
+    quote = real["harness"].adapter.quote(real["platform"].spec)
+    fill = venue.submit(_order("scalper:protection-seed"), quote)
+    assert fill.status == ACCEPTED, fill.audit_view()
+    # The generic provider fixture uses a synthetic account id; bind its booked
+    # fill to this fake terminal identity so the live leg can reconcile it.
+    portfolio = real["platform"].portfolio
+    provider_position = portfolio.positions[f"mt5:{fill.ticket}"]
+    portfolio.positions[provider_position.position_id] = replace(
+        provider_position,
+        account_id=real["harness"].adapter.status()["account_fingerprint"],
+    )
+
+    def read_protection(ticket):
+        try:
+            rows = real["harness"].adapter.positions(symbol="EURUSD.pro")
+        except Exception:
+            return None, None
+        matches = [item for item in rows if str(item.ticket) == str(ticket)]
+        if len(matches) != 1:
+            return None, None
+        target = matches[0].take_profit
+        return matches[0].stop_loss, (target if target is not None and target > 0 else None)
+
+    venue._protection_reader = read_protection
+    stop, target = venue.protection(str(fill.ticket))
+    assert stop is not None and stop > 0
+    position = run.book.open_position(
+        position_id=str(fill.ticket),
+        symbol=PAIR,
+        side="BUY",
+        lots=fill.filled_lots,
+        entry_price=fill.price,
+        stop_price=stop,
+        target_price=target,
+        now_ms=int(START.timestamp() * 1000),
+        request_id=fill.request_id,
+        strategy_fingerprint="protection-test-strategy",
+    )
+    assert position.protection_verified is True
+    assert run._record_position_risk(position) is True
+    run.state = "ARMED"
+    assert run._persist_state() is True
+    return fill, position, read_protection
+
+
+def _manage_position_tick(real, *, bid, ask):
+    moment_ms = int(START.timestamp() * 1000) + 100
+    return {
+        "symbol": PAIR,
+        "bid": bid,
+        "ask": ask,
+        "source_time": START,
+        "now_ms": moment_ms,
+    }
 
 
 def tick_kwargs(real, *, seconds_ago=0, bid="1.10000", ask="1.10020"):
@@ -512,6 +694,325 @@ def tick_kwargs(real, *, seconds_ago=0, bid="1.10000", ask="1.10020"):
         "source_time": START - timedelta(seconds=seconds_ago),
         "now_ms": int((START.timestamp() - 1) * 1000),
     }
+
+
+def test_scalper_protection_change_uses_guarded_live_path_and_requires_echo(real):
+    run, venue, _ = build_run(real)
+    fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
+    bid = fill.price + Decimal("0.00100")
+    ask = bid + Decimal("0.00020")
+    real["fake"].symbols["EURUSD.pro"].update(
+        {"bid": float(bid), "ask": float(ask), "time": int(START.timestamp())}
+    )
+
+    result = run.on_tick(**_manage_position_tick(real, bid=bid, ask=ask))
+
+    expected_stop = fill.price + Decimal("80") * position.point
+    current = run.book.get(fill.ticket)
+    assert current is not None
+    assert current.stop_price == expected_stop
+    assert current.protection_verified is True
+    assert current.trailing_active is True
+    assert run.book.snapshot()["pending_protection_modifications"] == []
+    assert result["state"] == "ARMED"
+    assert any(
+        action.get("kind") == "modify_stop"
+        for group in result["managed"]
+        for action in group
+    )
+    assert len(real["fake"].send_requests) == 2
+    assert real["fake"].send_requests[-1]["action"] == TRADE_ACTION_SLTP
+    assert "volume" not in real["fake"].send_requests[-1]
+    assert len(real["fake"].protection_requests) == 1
+    assert venue.record.protection_modifications[-1]["verified"] is True
+    assert real["leg"].router.routed[-1]["action"] == "MODIFY_POSITION_PROTECTION"
+    assert real["leg"].router.routed[-1]["broker_action_sent"] is True
+    assert real["harness"].adapter.armed is True
+
+
+def test_live_target_modification_persists_before_send_and_confirms_both_fields(real):
+    run, venue, _ = build_run(real)
+    fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
+    requested_target = Decimal("1.11500")
+    pre_send_intents = []
+    real["fake"].on_send = lambda _request: pre_send_intents.append(
+        run.state_store.load()["position_book"]["pending_protection_modifications"]
+    )
+
+    action = run.book.modify_protection(
+        position_id=fill.ticket,
+        stop_price=position.stop_price,
+        target_price=requested_target,
+        now_ms=int(START.timestamp() * 1000) + 100,
+        reason="operator_target_update",
+    )
+
+    pending_intent = pre_send_intents[0][0]
+    current = run.book.get(fill.ticket)
+    assert action.kind == MODIFY_PROTECTION
+    assert pending_intent["stop_price"] == str(position.stop_price)
+    assert pending_intent["target_price"] == str(requested_target)
+    assert pending_intent["previous_target_price"] is None
+    assert pending_intent["request_id"]
+    assert current is not None
+    assert current.target_price == requested_target
+    assert current.stop_price == position.stop_price
+    assert current.protection_verified is True
+    assert run.book.snapshot()["pending_protection_modifications"] == []
+    assert run.state_store.load()["position_book"]["pending_protection_modifications"] == []
+    assert real["fake"].protection_requests[-1]["action"] == TRADE_ACTION_SLTP
+    assert real["fake"].protection_requests[-1]["position"] == int(fill.ticket)
+    assert real["fake"].protection_requests[-1]["sl"] == float(position.stop_price)
+    assert real["fake"].protection_requests[-1]["tp"] == float(requested_target)
+    assert venue.record.protection_modifications[-1]["state"] == "CONFIRMED"
+    assert venue.record.protection_modifications[-1]["verified"] is True
+    assert real["leg"].router.routed[-1]["action"] == "MODIFY_POSITION_PROTECTION"
+    assert real["leg"].router.routed[-1]["broker_action_sent"] is True
+    assert real["harness"].adapter.armed is True
+
+
+def test_protection_change_does_not_send_without_durable_pre_send_intent(real):
+    run, venue, _ = build_run(real)
+    fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
+
+    def fail_save(_state):
+        raise OSError("simulated state-store failure")
+
+    run.state_store.save = fail_save
+    action = run.book.modify_protection(
+        position_id=fill.ticket,
+        stop_price=position.stop_price,
+        target_price=Decimal("1.11500"),
+        now_ms=int(START.timestamp() * 1000) + 100,
+        reason="operator_target_update",
+    )
+
+    assert action.kind == "hold"
+    assert run.state == RECOVERY_REQUIRED
+    assert real["fake"].protection_requests == []
+    assert len(real["fake"].send_requests) == 1
+    assert run.book.snapshot()["pending_protection_modifications"]
+
+
+def test_confirmed_protection_is_not_adopted_until_result_state_is_durable(real):
+    run, venue, _ = build_run(real)
+    fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
+    real_save = run.state_store.save
+    saves = 0
+
+    def fail_second_save(state):
+        nonlocal saves
+        saves += 1
+        if saves == 2:
+            raise OSError("simulated post-confirm persistence failure")
+        real_save(state)
+
+    run.state_store.save = fail_second_save
+    requested_target = Decimal("1.11500")
+    action = run.book.modify_protection(
+        position_id=fill.ticket,
+        stop_price=position.stop_price,
+        target_price=requested_target,
+        now_ms=int(START.timestamp() * 1000) + 100,
+        reason="operator_target_update",
+    )
+
+    assert action.kind == "hold"
+    assert run.state == RECOVERY_REQUIRED
+    assert real["fake"].protection_requests[-1]["tp"] == float(requested_target)
+    assert len(real["fake"].send_requests) == 2
+    assert run.book.get(fill.ticket).target_price is None
+    assert run.book.get(fill.ticket).protection_verified is False
+    saved = run.state_store.load()
+    assert saved["position_book"]["pending_protection_modifications"][0][
+        "target_price"
+    ] == str(requested_target)
+
+    recovered, recovered_venue, _ = build_run(real, state_store=run.state_store)
+    recovered_venue._protection_reader = venue._protection_reader
+    outcome = recovered.recover(state=saved)
+    assert outcome["ok"] is True, outcome
+    assert recovered.book.snapshot()["pending_protection_modifications"] == []
+    assert recovered.book.get(fill.ticket).target_price == requested_target
+    assert len(real["fake"].send_requests) == 2
+
+
+def test_pending_target_modification_recovers_only_from_exact_broker_echo(real):
+    run, venue, _ = build_run(real)
+    fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
+    requested_target = Decimal("1.11500")
+    real["fake"].protection_script = [None]
+
+    action = run.book.modify_protection(
+        position_id=fill.ticket,
+        stop_price=position.stop_price,
+        target_price=requested_target,
+        now_ms=int(START.timestamp() * 1000) + 100,
+        reason="operator_target_update",
+    )
+
+    assert action.reason == "broker_side_protection_missing"
+    assert real["harness"].adapter.armed is False
+    assert UNRESOLVED_PROTECTION_MODIFICATION in {
+        item.reason for item in real["leg"].blockers()
+    }
+    pending = run.book.snapshot()["pending_protection_modifications"]
+    assert len(pending) == 1
+    assert pending[0]["target_price"] == str(requested_target)
+    assert pending[0]["previous_target_price"] is None
+    assert len(real["fake"].protection_requests) == 1
+    assert real["fake"].positions[0]["tp"] == 0.0
+
+    stopped = run.stop(reason="target_recovery_test")
+    saved = run.state_store.load()
+    assert stopped["state_persisted"] is True
+    assert saved["position_book"]["pending_protection_modifications"] == pending
+    assert len(real["fake"].send_requests) == 2
+
+    unresolved, unresolved_venue, _ = build_run(real, state_store=run.state_store)
+    unresolved_venue._protection_reader = venue._protection_reader
+    mismatch = unresolved.recover(state=saved)
+    assert mismatch["ok"] is False
+    assert unresolved.state == RECOVERY_REQUIRED
+    assert "size or protection differs" in mismatch["recovery"]["detail"]
+    assert unresolved.book.open_positions == ()
+
+    real["fake"].positions[0]["tp"] = float(requested_target)
+    recovered, recovered_venue, _ = build_run(real, state_store=run.state_store)
+    recovered_venue._protection_reader = venue._protection_reader
+    outcome = recovered.recover(state=saved)
+    assert outcome["ok"] is True, outcome
+    assert recovered.book.snapshot()["pending_protection_modifications"] == []
+    restored = recovered.book.get(fill.ticket)
+    assert restored is not None
+    assert restored.stop_price == position.stop_price
+    assert restored.target_price == requested_target
+    assert restored.protection_verified is True
+    assert len(real["fake"].send_requests) == 2
+    assert recovered.start()["ok"] is False
+    assert len(real["fake"].send_requests) == 2
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected_reason"),
+    [
+        ("mode", "mode_not_live"),
+        ("arming", "live_not_armed"),
+        ("account", "real_account_required"),
+    ],
+)
+def test_protection_changes_preserve_mode_arming_and_real_account_gates(
+    real, gate, expected_reason
+):
+    run, venue, _ = build_run(real)
+    fill, _position, _read_protection = _seed_guarded_scalper_position(
+        real, run, venue
+    )
+    bid = fill.price + Decimal("0.00100")
+    ask = bid + Decimal("0.00020")
+    real["fake"].symbols["EURUSD.pro"].update(
+        {"bid": float(bid), "ask": float(ask), "time": int(START.timestamp())}
+    )
+    if gate == "mode":
+        real["mode"].mode = "PAPER"
+        real["mode"].live_effective = False
+    elif gate == "arming":
+        real["harness"].adapter.disarm(reason="test_gate")
+    else:
+        real["fake"].trade_mode = 0
+        real["harness"].adapter.refresh_account()
+
+    run.on_tick(**_manage_position_tick(real, bid=bid, ask=ask))
+
+    assert len(real["fake"].send_requests) == 1
+    assert real["fake"].protection_requests == []
+    refusal = venue.record.protection_modifications[-1]
+    assert refusal["state"] == "REFUSED", refusal
+    assert refusal["reason"] == expected_reason
+    current = run.book.get(fill.ticket)
+    assert current is not None
+    assert current.protection_verified is False
+    assert run.book.snapshot()["pending_protection_modifications"]
+
+
+def test_unknown_protection_change_survives_shutdown_and_recovers_by_readback(real):
+    run, venue, _ = build_run(real)
+    fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
+    bid = fill.price + Decimal("0.00100")
+    ask = bid + Decimal("0.00020")
+    real["fake"].symbols["EURUSD.pro"].update(
+        {"bid": float(bid), "ask": float(ask), "time": int(START.timestamp())}
+    )
+    real["fake"].protection_script = [None]
+
+    managed = run.on_tick(**_manage_position_tick(real, bid=bid, ask=ask))
+
+    assert managed["state"] == "ARMED"
+    assert real["harness"].adapter.armed is False
+    assert venue.record.protection_modifications[-1]["state"] == "UNRESOLVED"
+    pending = run.book.snapshot()["pending_protection_modifications"]
+    assert len(pending) == 1
+    requested_stop = Decimal(pending[0]["stop_price"])
+    assert requested_stop > position.stop_price
+
+    stopped = run.stop(reason="test_shutdown")
+    saved = run.state_store.load()
+    assert stopped["state_persisted"] is True
+    assert stopped["open_positions"]
+    assert saved["position_book"]["pending_protection_modifications"] == pending
+    assert len(real["fake"].send_requests) == 2  # entry + one SLTP; shutdown sends nothing
+
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh_venue._protection_reader = venue._protection_reader
+    unresolved = fresh.recover(state=saved)
+    assert unresolved["ok"] is False
+    assert fresh.state == RECOVERY_REQUIRED
+    assert "protection differs" in unresolved["recovery"]["detail"]
+    assert fresh.book.open_positions == ()
+
+    # Simulate the terminal reflecting the timed-out request later. Recovery
+    # accepts only this broker echo, clears the pending intent, and never resends.
+    broker_row = next(
+        row for row in real["fake"].positions if int(row["ticket"]) == int(fill.ticket)
+    )
+    broker_row["sl"] = float(requested_stop)
+    recovered, recovered_venue, _ = build_run(real, state_store=run.state_store)
+    recovered_venue._protection_reader = venue._protection_reader
+    result = recovered.recover(state=saved)
+    assert result["ok"] is True, result
+    assert recovered.state == "ARMED"
+    assert recovered.book.snapshot()["pending_protection_modifications"] == []
+    assert recovered.book.get(fill.ticket).stop_price == requested_stop
+    assert recovered.book.get(fill.ticket).protection_verified is True
+    assert recovered.guardian.open_positions[0].protected is True
+    assert len(real["fake"].send_requests) == 2
+
+    # Recovery does not re-arm the disconnected/uncertain live session.
+    started = recovered.start()
+    assert started["ok"] is False
+    assert len(real["fake"].send_requests) == 2
+
+
+def test_unconfirmed_broker_protection_blocks_live_readiness_and_entries(real):
+    run, venue, _ = build_run(real)
+    venue._protection_reader = lambda ticket: (Decimal(0), None)
+    run.book.open_position(
+        position_id="unsafely-protected",
+        symbol=PAIR,
+        side="BUY",
+        lots=Decimal("0.10"),
+        entry_price=Decimal("1.10000"),
+        stop_price=Decimal("1.09500"),
+        target_price=None,
+        now_ms=int(START.timestamp() * 1000),
+        request_id="entry-request",
+    )
+    run.state = "RUNNING"
+
+    reasons = {item["reason"] for item in run.readiness()}
+    assert PROTECTION_UNVERIFIED in reasons
+    assert run._entry_block(PAIR, int(START.timestamp() * 1000)) == PROTECTION_UNVERIFIED
+    assert real["fake"].send_requests == []
 
 
 def test_the_run_refuses_to_arm_without_an_admitted_strategy(real):
@@ -618,6 +1119,314 @@ def test_recovery_restores_an_exact_state(real):
     assert restored["ok"] is True, restored
     assert fresh.state == "ARMED"
     assert fresh.snapshot()["strategy_fingerprint"] == snapshot["strategy_fingerprint"]
+
+
+def test_json_run_state_store_round_trips_and_recovers_from_disk(real):
+    store = JsonRunStateStore(real["tmp"] / "durable-run-state.json")
+    run, _venue_instance, _ = build_run(real, state_store=store)
+
+    started = run.start()
+    assert started["ok"] is True, started
+    saved = store.load()
+    assert saved == run.snapshot()
+    assert saved["schema"] == "axiom-scalper-live-run-v2"
+    assert saved["position_book"]["open_positions"] == []
+    assert "guardian" in saved
+
+    fresh, _fresh_venue, _ = build_run(real, state_store=store)
+    recovered = fresh.recover()
+    assert recovered["ok"] is True, recovered
+    assert fresh.state == "ARMED"
+    assert store.load() == fresh.snapshot()
+
+
+def test_durable_run_recovery_restores_full_managed_and_guardian_exposure(real):
+    run, _venue_instance, _ = build_run(real)
+    position = run.book.open_position(
+        position_id="31415",
+        symbol=PAIR,
+        side="BUY",
+        lots=Decimal("0.10"),
+        entry_price=Decimal("1.10000"),
+        stop_price=Decimal("1.09500"),
+        target_price=Decimal("1.11000"),
+        now_ms=int(START.timestamp() * 1000),
+        request_id="entry-request-31415",
+        strategy_fingerprint="managed-test-strategy",
+    )
+    assert run._record_position_risk(position) is True
+    real["fake"].positions.append(
+        {
+            "ticket": 31415,
+            "symbol": "EURUSD.pro",
+            "type": 0,
+            "volume": 0.10,
+            "price_open": 1.10000,
+            "sl": 1.09500,
+            "tp": 1.11000,
+        }
+    )
+    snapshot = run.snapshot()
+
+    fresh, fresh_venue, _ = build_run(real)
+    fresh_venue.query = lambda request_id: (
+        Fill(
+            request_id="entry-request-31415",
+            status=ACCEPTED,
+            filled_lots=Decimal("0.10"),
+            requested_lots=Decimal("0.10"),
+            price=Decimal("1.10000"),
+            spread_points=Decimal(0),
+            slippage_points=Decimal(0),
+            latency_ms=1,
+            ticket="31415",
+            simulated=False,
+        )
+        if request_id == "entry-request-31415"
+        else None
+    )
+    fresh_venue._protection_reader = lambda _ticket: (
+        Decimal("1.09500"), Decimal("1.11000")
+    )
+    recovered = fresh.recover(state=snapshot)
+    assert recovered["ok"] is True, recovered
+    assert fresh.book.get("31415") is not None
+    assert fresh.book.get("31415").entry_request_id == "entry-request-31415"
+    assert fresh.guardian.open_positions[0].position_id == "31415"
+    assert fresh.guardian.open_positions[0].protected is True
+    assert fresh.snapshot()["position_book"] == fresh.book.snapshot()
+
+
+def test_persisted_entry_intent_is_reconciled_without_resubmission(real):
+    store = JsonRunStateStore(real["tmp"] / "pending-entry-state.json")
+    run, _venue_instance, _ = build_run(real, state_store=store)
+    intent = {
+        "request_id": "entry-request-recovery-1",
+        "symbol": PAIR,
+        "side": "BUY",
+        "lots": "0.10",
+        "signal_fingerprint": "recovered-entry-fingerprint",
+        "tick_id": "tick-recovery-1",
+        "source_time": START.isoformat(),
+        "bid": "1.09990",
+        "ask": "1.10010",
+        "stop_price": "1.09500",
+        "target_price": "1.11000",
+        "requested_at_ms": int(START.timestamp() * 1000),
+        "risk_account": "50",
+        "notional_account": "11000",
+    }
+    run._pending_submission = dict(intent)
+    run.state = "RUNNING"
+    store.save(run.snapshot())
+    real["fake"].positions.append(
+        {
+            "ticket": 31415,
+            "symbol": "EURUSD.pro",
+            "type": 0,
+            "volume": 0.10,
+            "price_open": 1.10000,
+            "sl": 1.09500,
+            "tp": 1.11000,
+        }
+    )
+
+    unresolved, unresolved_venue, _ = build_run(real, state_store=store)
+    unresolved_venue.query = lambda _request_id: None
+    first_recovery = unresolved.recover()
+    assert first_recovery["ok"] is False
+    assert unresolved.state == RECOVERY_REQUIRED
+    assert unresolved._pending_submission["request_id"] == "entry-request-recovery-1"
+    assert real["fake"].send_requests == []
+
+    accepted_fill = Fill(
+        request_id="entry-request-recovery-1",
+        status=ACCEPTED,
+        filled_lots=Decimal("0.10"),
+        requested_lots=Decimal("0.10"),
+        price=Decimal("1.10000"),
+        spread_points=Decimal("20"),
+        slippage_points=Decimal(0),
+        latency_ms=10,
+        ticket="31415",
+        reason="filled",
+        detail="durable booking confirmed",
+        simulated=False,
+    )
+    recovered, recovered_venue, _ = build_run(real, state_store=store)
+    recovered_venue._protection_reader = lambda _ticket: (
+        Decimal("1.09500"), Decimal("1.11000")
+    )
+    recovered_venue.query = lambda request_id: (
+        accepted_fill if request_id == "entry-request-recovery-1" else None
+    )
+    result = recovered.recover()
+    assert result["ok"] is True, result
+    assert recovered.state == "ARMED"
+    assert recovered._pending_submission is None
+    assert recovered.book.get("31415") is not None
+    assert recovered.book.get("31415").entry_request_id == "entry-request-recovery-1"
+    assert recovered.guardian.open_positions[0].position_id == "31415"
+    assert real["fake"].send_requests == []
+
+
+def test_pending_close_survives_restart_and_reconciles_its_exact_durable_fill(real):
+    run, venue, _ = build_run(real)
+    position = run.book.open_position(
+        position_id="31415",
+        symbol=PAIR,
+        side="BUY",
+        lots=Decimal("0.10"),
+        entry_price=Decimal("1.10000"),
+        stop_price=Decimal("1.09500"),
+        target_price=None,
+        now_ms=int(START.timestamp() * 1000),
+        request_id="entry-request-31415",
+    )
+    assert run._record_position_risk(position) is True
+    real["fake"].positions.append(
+        {
+            "ticket": 31415,
+            "symbol": "EURUSD.pro",
+            "type": 0,
+            "volume": 0.10,
+            "price_open": 1.10000,
+            "sl": 1.09500,
+            "tp": 0.0,
+        }
+    )
+
+    def read_stop(ticket):
+        for row in real["fake"].positions:
+            if str(row.get("ticket")) == str(ticket):
+                return Decimal(str(row.get("sl") or 0)), None
+        return None, None
+
+    venue._protection_reader = read_stop
+    venue.close_request_id = lambda _ticket: "close-request-31415"
+    unknown = Fill(
+        request_id="close-request-31415",
+        status=UNKNOWN_OUTCOME,
+        filled_lots=Decimal(0),
+        requested_lots=Decimal("0.10"),
+        price=None,
+        spread_points=Decimal(0),
+        slippage_points=Decimal(0),
+        latency_ms=0,
+        ticket="31415",
+        reason="timeout_without_confirmation",
+        simulated=False,
+    )
+    pre_send_states = []
+
+    def ambiguous_close(**_kwargs):
+        pre_send_states.append(run.state_store.load())
+        return unknown
+
+    venue.close = ambiguous_close
+    action = run.book._close(
+        position,
+        Decimal("1.09900"),
+        int(START.timestamp() * 1000),
+        "operator_close",
+        "test close outcome is ambiguous",
+        quote=None,
+    )
+    assert action.reason == "close_outcome_unconfirmed"
+    assert pre_send_states
+    assert pre_send_states[0]["position_book"]["pending_closes"][0]["request_id"] == "close-request-31415"
+    snapshot = run.snapshot()
+    assert snapshot["position_book"]["pending_closes"][0]["request_id"] == "close-request-31415"
+
+    fresh, fresh_venue, _ = build_run(real)
+    fresh_venue._protection_reader = read_stop
+    entry_fill = Fill(
+        request_id="entry-request-31415",
+        status=ACCEPTED,
+        filled_lots=Decimal("0.10"),
+        requested_lots=Decimal("0.10"),
+        price=Decimal("1.10000"),
+        spread_points=Decimal(0),
+        slippage_points=Decimal(0),
+        latency_ms=1,
+        ticket="31415",
+        simulated=False,
+    )
+    fresh_venue.query = lambda request_id: (
+        entry_fill if request_id == "entry-request-31415" else None
+    )
+    recovered = fresh.recover(state=snapshot)
+    assert recovered["ok"] is False
+    assert fresh.state == RECOVERY_REQUIRED
+    assert fresh.book.pending_closes[0]["request_id"] == "close-request-31415"
+
+    accepted_close = Fill(
+        request_id="close-request-31415",
+        status=ACCEPTED,
+        filled_lots=Decimal("0.10"),
+        requested_lots=Decimal("0.10"),
+        price=Decimal("1.09900"),
+        spread_points=Decimal(0),
+        slippage_points=Decimal(0),
+        latency_ms=12,
+        ticket="31415",
+        reason="filled",
+        detail="durable close fill and booking confirmed",
+        simulated=False,
+    )
+    fresh_venue.query = lambda request_id: accepted_close if request_id == "close-request-31415" else None
+    real["fake"].positions.clear()
+    reconciled = fresh.reconcile_close(position_id="31415")
+    assert reconciled["ok"] is True, reconciled
+    assert fresh.state == "ARMED"
+    assert fresh.book.get("31415") is None
+    assert fresh.book.pending_closes == ()
+    assert fresh.guardian.open_positions == ()
+    assert fresh.guardian.loss_streak == 1
+
+
+def test_corrupt_durable_run_state_fails_closed(real):
+    store = JsonRunStateStore(real["tmp"] / "corrupt-run-state.json")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{not valid json", encoding="utf-8")
+    run, _venue_instance, _ = build_run(real, state_store=store)
+
+    recovered = run.recover()
+    assert recovered["ok"] is False
+    assert run.state == RECOVERY_REQUIRED
+    assert "could not be read" in recovered["recovery"]["detail"]
+    assert run.start()["ok"] is False
+    assert real["fake"].send_requests == []
+
+
+def test_snapshot_preserves_the_managed_entry_request_identity(real):
+    run, _venue_instance, _ = build_run(real)
+    run.book.open_position(
+        position_id="1001",
+        symbol=PAIR,
+        side="BUY",
+        lots=Decimal("0.10"),
+        entry_price=Decimal("1.10000"),
+        stop_price=Decimal("1.09500"),
+        target_price=None,
+        now_ms=int(START.timestamp() * 1000),
+        request_id="entry-request-1001",
+    )
+
+    row = run.snapshot()["open_positions"][0]
+    assert row["entry_request_id"] == "entry-request-1001"
+
+
+def test_recovery_refuses_a_different_account_identity(real):
+    run, _venue_instance, _ = build_run(real)
+    snapshot = run.snapshot()
+    snapshot["account_identity"]["fingerprint"] = derived_fingerprint(999)
+    fresh, _, _ = build_run(real)
+
+    restored = fresh.recover(state=snapshot)
+    assert restored["ok"] is False
+    assert fresh.state == RECOVERY_REQUIRED
+    assert "account identity differs" in restored["recovery"]["detail"]
 
 
 def test_recovery_refuses_a_different_strategy(real):

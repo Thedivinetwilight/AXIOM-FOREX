@@ -133,6 +133,45 @@ class ExecutionRouter:
         self._audit(payload)
         return receipt
 
+    def route_live_protection(self, **action: Any) -> Any:
+        """Dispatch one guarded SL/TP action through the same live adapter.
+
+        This is a position-management action, not a market order: it shares the
+        router's LIVE confirmation and adapter arming checks, then delegates to
+        the adapter attached to this exact live path. There is no paper fallback
+        and no second terminal connection.
+        """
+
+        mode_name, confirmed = _read_mode(self.mode)
+        if mode_name != LIVE:
+            self._refuse(LIVE_MODE_REQUIRED, route=LIVE, detail=f"mode={mode_name or 'UNKNOWN'}")
+        if not confirmed:
+            self._refuse(LIVE_NOT_CONFIRMED, route=LIVE)
+        if self.live is None:
+            self._refuse(LIVE_UNAVAILABLE, route=LIVE)
+        if getattr(self.live, "armed", None) is not True:
+            self._refuse(LIVE_NOT_ARMED, route=LIVE)
+        modify = getattr(self.live, "modify_position_protection", None)
+        if not callable(modify):
+            self._refuse("live_protection_management_unavailable", route=LIVE)
+        receipt = modify(**action)
+        view = receipt if isinstance(receipt, Mapping) else {}
+        self._audit(
+            {
+                "event_type": "EXECUTION_ROUTED",
+                "route": LIVE,
+                "action": "MODIFY_POSITION_PROTECTION",
+                "live": True,
+                "order_sent": False,
+                "broker_action_sent": bool(view.get("sent")),
+                "request_id": str(action.get("request_id") or ""),
+                "ticket": str(action.get("ticket") or ""),
+                "state": str(view.get("state") or ""),
+                "verified": bool(view.get("verified")),
+            }
+        )
+        return receipt
+
     # -- internals -------------------------------------------------------
 
     def _refuse(self, reason: str, *, route: str, detail: str = "") -> None:

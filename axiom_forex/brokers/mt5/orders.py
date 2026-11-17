@@ -36,6 +36,7 @@ from .terminal import (
 
 # Order/action constants from the official integration.
 TRADE_ACTION_DEAL = 1
+TRADE_ACTION_SLTP = 6
 TRADE_ACTION_REMOVE = 8
 ORDER_TYPE_BUY = 0
 ORDER_TYPE_SELL = 1
@@ -244,6 +245,50 @@ class MT5OrderOutcome:
             "unknown": self.unknown,
             "permits_resend": self.permits_resend,
             "partially_filled": self.partially_filled,
+            "state": self.state,
+            "request": dict(self.request or {}),
+        }
+
+
+@dataclass(frozen=True)
+class MT5ProtectionOutcome:
+    """Action-aware result for ``TRADE_ACTION_SLTP``.
+
+    SL/TP modifications do not fill a volume.  They therefore cannot use
+    :class:`MT5OrderOutcome`'s market-deal classification, which correctly
+    treats an accepted response without positive fill volume as unknown.
+    """
+
+    request_id: str
+    ticket: int
+    retcode: int
+    retcode_name: str
+    classification: str
+    comment: str
+    unknown: bool
+    permits_resend: bool = False
+    request: dict[str, Any] | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return not self.unknown and self.classification in {"OK", "NO_CHANGES"}
+
+    @property
+    def state(self) -> str:
+        if self.unknown:
+            return "UNRESOLVED"
+        return "ACCEPTED" if self.accepted else "REJECTED"
+
+    def audit_view(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "ticket": self.ticket,
+            "retcode": self.retcode,
+            "retcode_name": self.retcode_name,
+            "classification": self.classification,
+            "comment": self.comment,
+            "unknown": self.unknown,
+            "permits_resend": False,
             "state": self.state,
             "request": dict(self.request or {}),
         }
@@ -510,6 +555,82 @@ def send_order(
         partially_filled=partial,
         sent_at=sent_at,
         request=request,
+    )
+
+
+def send_protection_modification(
+    terminal: MT5Terminal,
+    request: dict[str, Any],
+    *,
+    request_id: str,
+    ticket: int,
+) -> MT5ProtectionOutcome:
+    """Send one SL/TP action and classify it without looking for fill volume.
+
+    ``DONE`` and ``NO_CHANGES`` are action-level acknowledgements, but the
+    caller must still read the position back before it can claim protection.
+    ``PLACED``/``DONE_PARTIAL`` are not synchronous SLTP completion, so they
+    remain unresolved. Unknown codes, exceptions, and ``None`` never permit a
+    resend.
+    """
+
+    if not terminal.connected:
+        raise MT5OrderRefused("mt5_not_connected")
+    try:
+        result = terminal.module.order_send(request)
+    except Exception as exc:
+        return MT5ProtectionOutcome(
+            request_id=request_id,
+            ticket=int(ticket),
+            retcode=0,
+            retcode_name="NO_RETCODE",
+            classification=RetcodeClass.UNKNOWN.value,
+            comment=f"order_send_exception:{type(exc).__name__}",
+            unknown=True,
+            request=dict(request),
+        )
+    if result is None:
+        code, text = terminal._last_error()
+        return MT5ProtectionOutcome(
+            request_id=request_id,
+            ticket=int(ticket),
+            retcode=int(code),
+            retcode_name=label(code),
+            classification=RetcodeClass.UNKNOWN.value,
+            comment=f"order_send_returned_none:{text}",
+            unknown=True,
+            request=dict(request),
+        )
+
+    retcode = int(_field(result, "retcode", 0) or 0)
+    comment = str(_field(result, "comment", "") or "")
+    if retcode == 10009:  # TRADE_RETCODE_DONE
+        classification = RetcodeClass.OK.value
+        unknown = False
+    elif retcode == 10025:  # TRADE_RETCODE_NO_CHANGES
+        classification = "NO_CHANGES"
+        unknown = False
+    else:
+        terminal_class = classify(retcode, has_result=True)
+        # Only explicit synchronous SLTP success codes are accepted here.
+        # Pending/partial responses and unrecognised codes may still change the
+        # position after this function returns, so they must not be replayed.
+        if terminal_class is RetcodeClass.OK or terminal_class is RetcodeClass.UNKNOWN:
+            classification = RetcodeClass.UNKNOWN.value
+            unknown = True
+        else:
+            classification = terminal_class.value
+            unknown = False
+
+    return MT5ProtectionOutcome(
+        request_id=request_id,
+        ticket=int(ticket),
+        retcode=retcode,
+        retcode_name=label(retcode),
+        classification=classification,
+        comment=comment,
+        unknown=unknown,
+        request=dict(request),
     )
 
 

@@ -55,12 +55,24 @@ switches accounts and never reconnects silently.
 * **Start** begins entry decisions; **pause** stops them and keeps management;
   **stop** stops entries, and reports the open positions at the broker without
   closing anything unless the operator asks (`flatten`).
-* An **unknown** submission pauses the run and latches the venue: no new order
-  is submitted until `query()` proves the outcome from the durable record.
-* **Recovery** either restores the exact snapshot (symbols, strategy
-  fingerprint, mode, every open position with a readable protective stop) or
-  leaves the run in `RECOVERY_REQUIRED` with the reconciliation path in words.
-  No position is adopted from a partial record.
+* A versioned `JsonRunStateStore` uses atomic replacement plus file and
+  directory `fsync`. The run persists admission/config identity, guardian
+  observations and exposure, lifecycle counters, the complete PositionBook
+  (including partial exits and pending close/protection state), and any entry
+  intent. Live readiness refuses a missing or failed durable store.
+* Entry intents are fsynced before submission. A restart queries that exact
+  request id; a confirmed fill is adopted using its actual ticket, size, price
+  and protection terms, while an unknown outcome stays blocked and is never
+  resubmitted.
+* Close intents are likewise fsynced with a unique request id before the live
+  venue is called. An unknown close survives restart and can only be resolved
+  from that exact durable fill; broker position changes alone do not book a
+  close.
+* **Recovery** either restores the exact account, symbol/instrument terms,
+  strategy evidence, risk policy, durable entry fills, guardian state and full
+  position-management state, then verifies broker tickets, volumes, entry
+  prices, stops and targets; or leaves the run in `RECOVERY_REQUIRED`. It does
+  not adopt a partial or mismatched snapshot.
 
 ## What is **not** built yet (and blocks a live run)
 
@@ -73,10 +85,15 @@ switches accounts and never reconnects silently.
    background pump thread: `AutonomousScalper.on_tick` is driven by its caller.
    The existing `/live` page and its actions are unchanged, so nothing in the UI
    claims this lane is running.
-3. **No stop-modification route exists** on the guarded path, and the venue says
-   so (`venue_modification_unsupported`) rather than pretending. Trailing and
-   break-even management therefore report what they could not do; the
-   broker-side stop attached at entry is the protection that exists.
+3. **Existing-position SL/TP changes use the guarded route.** `PositionBook`
+   writes the exact stop/target intent durably before calling `BrokerVenue`,
+   which resolves one exact ticket and dispatches through `LiveLeg` blockers,
+   LIVE confirmation, the router and the account-bound MT5 adapter. A broker
+   retcode is not confirmation: both requested protection fields must be read
+   back from that ticket, and the confirmed result is durably committed. An
+   unknown outcome remains pending and non-resendable; restart recovery accepts
+   only the exact ticket/size/entry/stop/target state. This internal route is not
+   wired to a workstation control.
 4. **Booking a fill back into the managed book** depends on the broker naming
    the ticket; when it cannot (the fake terminal's record does not), the trader
    reports `protective_orders_not_verified` and the existing guard refuses
@@ -86,17 +103,16 @@ switches accounts and never reconnects silently.
 
 ## Tests
 
-`tests/test_scalper_live_autonomous.py` — 26 tests: REAL acceptance; DEMO,
-CONTEST, unclassified, unconfirmed, wrong-server, wrong-login and
-wrong-fingerprint refusal; the leg enforcing it before every order and a changed
-account stopping the lane; venue submission through the guarded leg, partial
-fill, refusal before the broker, unknown-outcome latch, duplicate id; the
-trader's refusal of an unannounced live venue; no admission → no arm; demo
-account → no start; stale quote → no decision; one admitted signal → exactly one
-order for the broker symbol; the trader refusing to call a position protected
-when the broker record cannot show a stop; stop blocking entries; recovery
-refusing state-less and mismatched resumes.
+The fake-terminal suite covers REAL-account verdicts without contacting a
+broker; guarded LIVE mode/arming/account gates; action-specific SLTP handling;
+exact-position identity; read-back-only confirmation of both fields; failure
+before durable pre-send intent; post-send ambiguity and idempotency; restart
+reconciliation for stop and target changes; and shutdown without implicit
+flattening. See `tests/test_mt5_adapter.py`,
+`tests/test_scalper_execution_positions.py`, and
+`tests/test_scalper_live_autonomous.py`.
 
-PAPER is untouched: `PaperVenue`, `ScalperDesk` and their guards are unchanged,
-and the trader still refuses a live venue unless the caller explicitly opts in
-*and* the venue declares `live_execution`.
+PAPER remains isolated from the live lane. `PaperVenue` now tracks its own
+open volume so a simulated partial close preserves the remaining position's
+protection, and the trader still refuses a live venue unless the caller
+explicitly opts in *and* the venue declares `live_execution`.
