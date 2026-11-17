@@ -391,6 +391,11 @@ class ScalperLiveAutonomousHost:
             return self._refuse("arm_confirmation_mismatch", f"Type {ARM_PHRASE!r} exactly. No trading permission was changed.")
         if self._state in {RUNNING, PAUSED, RECOVERY_REQUIRED}:
             return self._refuse("live_run_already_active", "Stop and reconcile the current AX-SCALPER run before another arm request.")
+        if self._runtime is None:
+            saved = self._saved_recovery_view()
+            if saved.get("error") or saved.get("requests"):
+                return self._refuse("stored_reconciliation_required",
+                                    "Stored requests are unresolved or unreadable. Preserve the state and broker records; do not resend or arm.")
         prepared = self._prepare_candidate(candidate_id)
         if not prepared[0]:
             return prepared[1]

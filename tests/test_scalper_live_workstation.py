@@ -538,3 +538,23 @@ def test_partially_damaged_recovery_does_not_hide_readable_request_ids(tmp_path)
         assert adapter.send_calls == 0
     finally:
         host.close()
+
+
+def test_unresolved_stored_protection_blocks_arm_before_any_broker_access(tmp_path):
+    host, adapter, platform_calls = _host(tmp_path)
+    host.state_store.path.write_text(json.dumps({
+        "pending_submission": None,
+        "position_book": {"pending_closes": [], "pending_protection_modifications": [
+            {"request_id": "original-protection", "position_id": "77"}]},
+    }), encoding="utf-8")
+    before = host.state_store.path.read_bytes()
+    try:
+        result = host.arm(candidate_id=default_strategies()[0].fingerprint,
+                          confirmation=ARM_PHRASE, account_confirmation=account_fingerprint(LOGIN))
+        assert result["reason"] == "stored_reconciliation_required"
+        assert not result["ok"]
+        assert adapter.arm_calls == adapter.send_calls == 0
+        assert platform_calls == []
+        assert host.state_store.path.read_bytes() == before
+    finally:
+        host.close()

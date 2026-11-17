@@ -1311,7 +1311,8 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     ]
 
     controls = ""
-    if candidates and not blockers_list and not adapter_armed and not positions:
+    if (candidates and not blockers_list and not adapter_armed and not positions
+            and not saved_recovery.get("error") and not saved_recovery.get("requests")):
         controls += (
             "<h3>Arm this exact admitted strategy</h3><p class='small muted'>Arming changes no broker position and sends no order. It requires the exact LIVE account fingerprint and phrase.</p>"
             + action_form("ax-scalper-live-arm", nonce, "Arm AX-SCALPER for this REAL account", tone="danger",
