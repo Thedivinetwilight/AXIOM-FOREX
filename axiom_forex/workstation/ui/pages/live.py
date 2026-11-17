@@ -452,15 +452,23 @@ def _account_kind_notice(view: Mapping[str, Any]) -> str:
     if kind == "REAL":
         return notice(
             "The connected account is a REAL-money account",
-            "Every order this page authorises spends real money. A demo account is not a "
-            "rehearsal either: the same code path runs, with the same refusals.",
+            "Orders authorised on this account can put real money at risk. The AX-SCALPER "
+            "lane still has an incomplete restart-recovery path; do not use it for autonomous trading.",
             tone="danger",
             role="alert",
         )
-    if kind in {"DEMO", "CONTEST"}:
+    if kind == "DEMO":
         return notice(
-            f"The connected account is a {kind} account",
-            "No real money is at risk on this account type, and the same gates still apply.",
+            "The connected account is a DEMO account",
+            "AX-SCALPER currently refuses DEMO accounts; equivalent DEMO and REAL support "
+            "has not yet been implemented. Other tools have their own restrictions.",
+            tone="warn",
+        )
+    if kind == "CONTEST":
+        return notice(
+            "The connected account is a CONTEST account",
+            "AX-SCALPER refuses CONTEST accounts. Check the broker's terms; this page "
+            "does not determine the financial risk of that account.",
             tone="warn",
         )
     return notice(

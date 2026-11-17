@@ -583,3 +583,15 @@ def test_durable_query_binding_requires_current_real_account_and_exact_record(tm
                               "redacted_account": {"server": SERVER, "currency": "USD"}}
     assert not check(row)
     assert adapter.send_calls == 0
+
+
+def test_account_type_notice_does_not_claim_demo_or_contest_are_supported():
+    from axiom_forex.workstation.ui.pages.live import _account_kind_notice
+
+    demo = _account_kind_notice({"account_mode": "DEMO"})
+    contest = _account_kind_notice({"account_mode": "CONTEST"})
+    real = _account_kind_notice({"account_mode": "REAL"})
+    assert "currently refuses DEMO" in demo
+    assert "refuses CONTEST" in contest
+    assert "No real money is at risk" not in contest
+    assert "incomplete restart-recovery" in real
