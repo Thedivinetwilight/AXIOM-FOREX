@@ -51,10 +51,9 @@ def _text(value: Any) -> str:
 class ExpectedAccount:
     """The real account this run is allowed to trade, declared by the operator.
 
-    ``server`` is required: an account number alone is not an account, and two
-    brokers can serve the same login.  ``login`` and ``fingerprint`` are checked
-    when they are declared; a declaration with no login is refused at
-    construction so a half-specified expectation can never pass as a match.
+    All four fields are required. The fingerprint must derive from the declared
+    login, so it cannot silently stand in for a different login. The adapter
+    redacts the terminal login; its independently reported fingerprint binds it.
     """
 
     server: str
@@ -69,10 +68,14 @@ class ExpectedAccount:
         try:
             login = int(self.login)
         except (TypeError, ValueError):
+            login = 0
+        if isinstance(self.login, bool) or login <= 0 or _text(self.login) != str(login):
             problems.append("account.login")
-        else:
-            if login < 0:
-                problems.append("account.login")
+        if not _text(self.currency):
+            problems.append("account.currency")
+        fingerprint = _text(self.fingerprint)
+        if not fingerprint or fingerprint != _expected_fingerprint(login):
+            problems.append("account.fingerprint")
         return tuple(problems)
 
     @property
@@ -201,28 +204,22 @@ def verify_real_account(
             reasons.append(NOT_DECLARED)
             details.append("the declared account is incomplete: " + ", ".join(problems))
         else:
-            if server and server.casefold() != _text(expected.server).casefold():
+            if server != _text(expected.server):
                 reasons.append(SERVER_MISMATCH)
                 details.append(
-                    f"the terminal is on server {server!r}, the run was configured for "
+                    f"the terminal reports server {server!r}, the run was configured for "
                     f"{expected.server!r}"
                 )
-            # The adapter redacts the login on purpose, so a declared login is
-            # checked through the one-way fingerprint derived from it: the same
-            # identity the rest of the system audits, and no login in the clear.
-            wanted = _text(expected.fingerprint)
-            if not wanted and expected.login:
-                wanted = _expected_fingerprint(int(expected.login))
-            if wanted and fingerprint != wanted:
-                reasons.append(LOGIN_MISMATCH if expected.login and not expected.fingerprint
-                               else FINGERPRINT_MISMATCH)
-                details.append(
-                    "the terminal's account fingerprint is not the one this run was "
-                    "configured for"
-                )
-            if expected.currency and currency and (
-                currency.casefold() != _text(expected.currency).casefold()
-            ):
+            # The terminal login is redacted; compare the independently reported
+            # fingerprint to the one derived from the declared login as well as
+            # to the explicitly declared fingerprint.
+            if fingerprint != _expected_fingerprint(int(expected.login)):
+                reasons.append(LOGIN_MISMATCH)
+                details.append("the terminal's login fingerprint differs from the declared login")
+            if fingerprint != _text(expected.fingerprint):
+                reasons.append(FINGERPRINT_MISMATCH)
+                details.append("the terminal's fingerprint differs from the declared fingerprint")
+            if currency != _text(expected.currency):
                 reasons.append(CURRENCY_MISMATCH)
                 details.append(
                     f"the terminal reports account currency {currency!r}, the run was "

@@ -132,7 +132,7 @@ def real(tmp_path):
         audit_log=harness.audit,
         portfolio=platform.portfolio,
         clock=lambda: START,
-        expected_account=ExpectedAccount(server=SERVER, login=LOGIN),
+        expected_account=ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=derived_fingerprint()),
         require_real_account=True,
     )
     try:
@@ -186,7 +186,7 @@ def status(**overrides):
     ],
 )
 def test_the_account_check_names_every_disagreement(override, expected_reason):
-    verdict = verify_real_account(status(**override), ExpectedAccount(server=SERVER, login=LOGIN))
+    verdict = verify_real_account(status(**override), ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=derived_fingerprint()))
     assert verdict.ok is False
     assert expected_reason in verdict.reasons, verdict.audit_view()
     assert verdict.detail
@@ -247,7 +247,7 @@ def test_a_demo_account_is_refused_by_the_leg_before_the_gate(real):
 
 
 def test_a_different_real_account_is_refused(real):
-    real["leg"].expected_account = ExpectedAccount(server=SERVER, login=LOGIN + 1)
+    real["leg"].expected_account = ExpectedAccount(server=SERVER, login=LOGIN + 1, currency="USD", fingerprint=derived_fingerprint(LOGIN + 1))
     reasons = {item.reason for item in real["leg"].blockers()}
     assert ACCOUNT_IDENTITY_MISMATCH in reasons
     assert real["fake"].send_requests == []
@@ -588,7 +588,7 @@ def build_run(real, *, admitted=True, strategy=None, state_store=None):
     run = AutonomousScalper(
         adapter=real["harness"].adapter,
         mode=real["mode"],
-        expected_account=ExpectedAccount(server=SERVER, login=LOGIN),
+        expected_account=ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=derived_fingerprint()),
         admitted=(
             AdmittedStrategy(
                 strategy=chosen,
@@ -1446,3 +1446,27 @@ def test_recovery_refuses_a_different_strategy(real):
     assert restored["ok"] is False
     assert fresh.state == RECOVERY_REQUIRED
     assert "strategy fingerprint differs" in restored["recovery"]["detail"]
+
+
+@pytest.mark.parametrize("redacted", [
+    {"server": "", "currency": "USD"},
+    {"server": SERVER, "currency": ""},
+    {"currency": "USD"},
+    {"server": SERVER},
+])
+def test_real_account_refuses_missing_terminal_identity_fields(redacted):
+    expected = ExpectedAccount(server=SERVER, login=LOGIN, currency="USD",
+                               fingerprint=derived_fingerprint())
+    assert not verify_real_account(status(redacted_account=redacted), expected).ok
+
+
+@pytest.mark.parametrize("expected", [
+    ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=""),
+    ExpectedAccount(server=SERVER, login=LOGIN, currency="", fingerprint=derived_fingerprint()),
+    ExpectedAccount(server=SERVER, login=0, currency="USD", fingerprint=derived_fingerprint()),
+    ExpectedAccount(server=SERVER, login=LOGIN + 1, currency="USD", fingerprint=derived_fingerprint()),
+])
+def test_real_account_refuses_incomplete_or_inconsistent_declaration(expected):
+    verdict = verify_real_account(status(), expected)
+    assert not verdict.ok
+    assert "expected_account_not_declared" in verdict.reasons
