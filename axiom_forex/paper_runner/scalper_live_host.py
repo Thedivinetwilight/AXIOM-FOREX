@@ -51,6 +51,9 @@ START_PHRASE = "START AX-SCALPER LIVE"
 class _Reply:
     def __init__(self) -> None:
         self.ready = threading.Event()
+        self.lock = threading.Lock()
+        self.started = False
+        self.cancelled = False
         self.value: Any = None
         self.error: BaseException | None = None
 
@@ -215,7 +218,14 @@ class ScalperLiveAutonomousHost:
         reply = _Reply()
         self._queue.put((operation, payload, reply))
         if not reply.ready.wait(timeout):
-            return {"ok": False, "reason": "live_runner_busy", "message": "The owner thread did not answer in time; no second command was issued."}
+            with reply.lock:
+                if not reply.ready.is_set():
+                    if not reply.started:
+                        reply.cancelled = True
+                        return {"ok": False, "reason": "live_runner_busy",
+                                "message": "The command timed out before execution and was cancelled."}
+                    return {"ok": False, "reason": "live_runner_action_in_progress",
+                            "message": "The command started but has not answered. Its outcome is not yet known; inspect the runner state and do not retry blindly."}
         if reply.error is not None:
             return {"ok": False, "reason": type(reply.error).__name__, "message": "The guarded LIVE runner refused the action; no retry was attempted."}
         value = reply.value
@@ -230,6 +240,11 @@ class ScalperLiveAutonomousHost:
                 pass
             if task is not None:
                 operation, payload, reply = task
+                with reply.lock:
+                    if reply.cancelled:
+                        reply.ready.set()
+                        continue
+                    reply.started = True
                 try:
                     handler = getattr(self, f"_do_{operation}", None)
                     if not callable(handler):
@@ -238,7 +253,8 @@ class ScalperLiveAutonomousHost:
                 except BaseException as exc:
                     reply.error = exc
                 finally:
-                    reply.ready.set()
+                    with reply.lock:
+                        reply.ready.set()
             else:
                 try:
                     self._cycle()
@@ -410,13 +426,29 @@ class ScalperLiveAutonomousHost:
         self._audit("AX_SCALPER_LIVE_STOPPED", open_positions=len(result.get("open_positions") or ()))
         result["message"] = str(result.get("message") or "No new entry will be submitted.")
         if still_open:
-            result["message"] += " The owner thread remains active to manage those exact positions from fresh quotes; the broker-side protective stops remain in force."
+            result["message"] += (
+                " The owner thread will attempt local management while connected and "
+                "all account, quote and execution guards pass. Broker protection must "
+                "be verified separately; it is not assumed by this stop response."
+            )
+        if result.get("state_persisted") is False:
+            result["ok"] = False
+            result["reason"] = "run_state_persistence_failed"
+            result["message"] += " The stop state could not be durably saved; exact recovery is required."
         return self._remember(result)
 
     def _do_shutdown(self) -> dict[str, Any]:
         """End the owner thread without closing positions or leaving it armed."""
         result = self._do_stop()
         self._release_arm()
+        result["message"] = (
+            "Shutdown requested: new entries stopped and this lane was disarmed; no "
+            "position was closed. Verify broker-side protection and recover the exact "
+            "durable state before resuming."
+            + (" The stop state could not be durably saved." if result.get("state_persisted") is False else "")
+            + (" Local management stops with the owner thread." if result.get("ok") else
+               " The owner thread was not confirmed stopped; inspect its status.")
+        )
         return result
 
     def _do_reconcile(self) -> dict[str, Any]:
@@ -855,6 +887,10 @@ class ScalperLiveAutonomousHost:
         if self._thread is None or not self._thread.is_alive():
             return {"ok": True, "state": self._state}
         result = self._call("shutdown", {}, timeout=45.0)
+        if not result.get("ok"):
+            # Do not kill the owner thread after a cancelled or in-flight stop.
+            # Its state and any continuing management remain explicitly unknown.
+            return result
         with self._lock:
             self._closing = True
         self._thread.join(timeout=5.0)

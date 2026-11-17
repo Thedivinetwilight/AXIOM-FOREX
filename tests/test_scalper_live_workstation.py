@@ -313,3 +313,56 @@ def test_live_page_renders_explicit_arm_and_start_forms_only_for_ready_admission
     html = render_live(ctx)
     assert "ax-scalper-live-start" in html
     assert "START AX-SCALPER LIVE" in html
+
+
+def test_timed_out_queued_action_is_cancelled_before_it_can_run(tmp_path):
+    import threading
+
+    host, _adapter, _ = _host(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    executed = []
+
+    def busy():
+        entered.set()
+        assert release.wait(5)
+        return {"ok": True}
+
+    host._do_busy = busy
+    host._do_probe = lambda: executed.append(True) or {"ok": True}
+    caller = threading.Thread(target=lambda: host._call("busy", {}, timeout=5))
+    try:
+        caller.start()
+        assert entered.wait(2)
+        result = host._call("probe", {}, timeout=0.01)
+        assert result["reason"] == "live_runner_busy"
+        release.set()
+        caller.join(2)
+        # FIFO barrier proves that the cancelled command was processed/skipped.
+        assert host._call("view", {}, timeout=5)["ok"] is True
+        assert executed == []
+    finally:
+        release.set()
+        caller.join(2)
+        host.close()
+
+
+def test_timed_out_started_action_reports_unknown_in_progress(tmp_path):
+    import threading
+
+    host, _adapter, _ = _host(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+
+    def busy():
+        entered.set()
+        assert release.wait(5)
+        return {"ok": True}
+
+    host._do_busy = busy
+    try:
+        result = host._call("busy", {}, timeout=0.1)
+        assert entered.is_set()
+        assert result["reason"] == "live_runner_action_in_progress"
+        assert "do not retry" in result["message"]
+    finally:
+        release.set()
+        host.close()
