@@ -1545,3 +1545,28 @@ def test_status_read_does_not_adopt_or_clear_pending_protection(real):
     assert run.book.snapshot() == before
     assert before["pending_protection_modifications"]
     assert any(item["reason"] == "protection_reconciliation_required" for item in status["blockers"])
+
+
+def test_guarded_query_refuses_missing_or_mismatched_durable_record_even_if_memory_claims_success():
+    request_id = "original-request"
+    durable = {"request_id": request_id, "account_fingerprint": "expected", "state": "UNRESOLVED"}
+    leg = SimpleNamespace(repository=SimpleNamespace(get_order=lambda _id: durable),
+                          last_outcome={"request_id": request_id, "state": "REJECTED"},
+                          history=[])
+    venue = BrokerVenue(leg=leg, plan_factory=lambda **kw: None,
+                        query_guard=lambda row: row.get("account_fingerprint") == "expected")
+    # The in-memory definitive result cannot overwrite the unresolved durable row.
+    assert venue.query(request_id).status == UNKNOWN_OUTCOME
+    durable["account_fingerprint"] = "other-account"
+    assert venue.query(request_id) is None
+    leg.repository = SimpleNamespace(get_order=lambda _id: None)
+    assert venue.query(request_id) is None
+    assert venue.record.submissions == []
+
+
+def test_guarded_query_refuses_a_guard_exception():
+    leg = SimpleNamespace(repository=SimpleNamespace(get_order=lambda _id: {"request_id": "r"}))
+    def broken(_row):
+        raise ValueError("identity unavailable")
+    venue = BrokerVenue(leg=leg, plan_factory=lambda **kw: None, query_guard=broken)
+    assert venue.query("r") is None

@@ -726,6 +726,22 @@ class ScalperLiveAutonomousHost:
 
     # -- run construction and polling ---------------------------------
 
+    def _matches_durable_request(self, record: Mapping[str, Any], *,
+                                 expected: ExpectedAccount, symbol: str,
+                                 strategy_id: str) -> bool:
+        """Attribute an exact durable outcome to this run, or keep it unknown."""
+        try:
+            self.adapter.refresh_account()
+            verdict = verify_real_account(dict(self.adapter.status() or {}), expected)
+            return (verdict.ok and str(record.get("broker_id") or "").lower() == "mt5_terminal"
+                    and str(record.get("account_fingerprint") or "") == expected.fingerprint
+                    and str(record.get("account_server") or "") == expected.server
+                    and str(record.get("account_mode") or "") == verdict.mode
+                    and str(record.get("provider_symbol") or "") == symbol
+                    and str(record.get("strategy_id") or "") == strategy_id)
+        except Exception:
+            return False
+
     def _build_runtime(self, *, expected: ExpectedAccount,
                        strategy: Any, evidence: str, policy_version: str) -> AutonomousScalper:
         from ..execution.mode_router import ExecutionRouter
@@ -763,6 +779,10 @@ class ScalperLiveAutonomousHost:
         requirement = lambda: self.adapter.stop_requirement(
             platform.spec, symbol=symbol
         )
+        def query_guard(record: Mapping[str, Any]) -> bool:
+            return self._matches_durable_request(record, expected=expected,
+                                                 symbol=symbol, strategy_id=strategy_id)
+
         venue = BrokerVenue(
             leg=None,
             plan_factory=BrokerPlanFactory(platform=platform, strategy_id=strategy_id),
@@ -771,6 +791,7 @@ class ScalperLiveAutonomousHost:
             clock_ms=lambda: int(datetime.now(UTC).timestamp() * 1000),
             symbols={symbol: symbol},
             stop_requirement=requirement,
+            query_guard=query_guard,
         )
         leg = LiveLeg(
             router=ExecutionRouter(mode=self.mode, paper=None, live=self.adapter,

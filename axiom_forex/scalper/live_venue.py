@@ -105,6 +105,7 @@ class BrokerVenue:
         clock_ms: Callable[[], int] | None = None,
         symbols: Mapping[str, str] | None = None,
         stop_requirement: Callable[[], Mapping[str, Any]] | None = None,
+        query_guard: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> None:
         self.leg = leg
         #: ``(order_or_ticket, quote) -> plan``.  The caller owns how a scalper
@@ -119,6 +120,7 @@ class BrokerVenue:
         #: before its plan reaches LiveLeg if its risk stop differs from the
         #: broker-side stop the adapter will actually attach.
         self._stop_requirement = stop_requirement
+        self._query_guard = query_guard
         self.record = VenueRecord()
         self._unresolved: set[str] = set()
         self._tickets: dict[str, str] = {}
@@ -433,16 +435,25 @@ class BrokerVenue:
                 raw = dict(repository(request_id) or {})
             except Exception:
                 raw = {}
-        if isinstance(reader, Mapping):
-            candidate = dict(reader)
-            if str(candidate.get("request_id") or "") == str(request_id):
-                raw = {**raw, **candidate}
-        if not raw:
-            history = getattr(self.leg, "history", ())
-            for candidate in reversed(tuple(history or ())):
-                if isinstance(candidate, Mapping) and str(candidate.get("request_id") or "") == str(request_id):
-                    raw = dict(candidate)
-                    break
+        if self._query_guard is not None:
+            # Recovery must use the durable record, never an in-memory result
+            # that may not have been committed or belongs to another account.
+            try:
+                if not raw or not self._query_guard(raw):
+                    return None
+            except Exception:
+                return None
+        else:
+            if isinstance(reader, Mapping):
+                candidate = dict(reader)
+                if str(candidate.get("request_id") or "") == str(request_id):
+                    raw = {**raw, **candidate}
+            if not raw:
+                history = getattr(self.leg, "history", ())
+                for candidate in reversed(tuple(history or ())):
+                    if isinstance(candidate, Mapping) and str(candidate.get("request_id") or "") == str(request_id):
+                        raw = dict(candidate)
+                        break
         if not raw or str(raw.get("request_id") or "") != str(request_id):
             return None
 

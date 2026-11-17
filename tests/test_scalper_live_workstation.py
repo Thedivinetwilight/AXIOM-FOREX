@@ -558,3 +558,28 @@ def test_unresolved_stored_protection_blocks_arm_before_any_broker_access(tmp_pa
         assert host.state_store.path.read_bytes() == before
     finally:
         host.close()
+
+
+def test_durable_query_binding_requires_current_real_account_and_exact_record(tmp_path):
+    from axiom_forex.scalper.live_account import ExpectedAccount
+
+    host, adapter, _ = _host(tmp_path)
+    fingerprint = account_fingerprint(LOGIN)
+    expected = ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=fingerprint)
+    adapter.status = lambda: {"connected": True, "account_mode": "REAL", "account_mode_confirmed": True,
+                              "account_fingerprint": fingerprint,
+                              "redacted_account": {"server": SERVER, "currency": "USD"}}
+    row = {"broker_id": "mt5_terminal", "account_fingerprint": fingerprint,
+           "account_server": SERVER, "account_mode": "REAL", "provider_symbol": SYMBOL,
+           "strategy_id": "strategy"}
+    check = lambda record: host._matches_durable_request(record, expected=expected,
+                                                         symbol=SYMBOL, strategy_id="strategy")
+    assert check(row)
+    for key in row:
+        assert not check({**row, key: "mismatch"}), key
+        assert not check({k: v for k, v in row.items() if k != key}), key
+    adapter.status = lambda: {"connected": True, "account_mode": "DEMO", "account_mode_confirmed": True,
+                              "account_fingerprint": fingerprint,
+                              "redacted_account": {"server": SERVER, "currency": "USD"}}
+    assert not check(row)
+    assert adapter.send_calls == 0
