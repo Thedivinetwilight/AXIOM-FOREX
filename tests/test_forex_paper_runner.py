@@ -246,7 +246,10 @@ def test_only_the_live_modules_can_arm_and_nothing_here_can_send_an_order():
     """
 
     root = Path(__file__).resolve().parents[1] / "axiom_forex" / "paper_runner"
-    live_modules = {"live.py", "live_host.py", "live_workflow.py", "live_assembly.py"}
+    live_modules = {
+        "live.py", "live_host.py", "live_workflow.py", "live_assembly.py",
+        "scalper_live_host.py",
+    }
     paper_only_forbidden = {
         "submit_order",
         "place_order",

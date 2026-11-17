@@ -133,12 +133,11 @@ def test_live_execution_owns_the_continuous_session():
     html = _live(app)
     text = _text(html)
 
-    assert "Continuous LIVE Autopilot" in text
-    # The continuous lane is named before the one-shot bridge, in the document.
-    assert html.index("id='continuous'") < html.index("id='one-shot'")
-    # The index at the top of the page points at every part of the workflow.
-    for anchor in ("#continuous", "#plan", "#session", "#one-shot", "#account"):
-        assert f"href='{anchor}'" in html, anchor
+    assert "Autonomous scalping" in text
+    assert "REAL ONLY" in text
+    assert html.index("id='ax-scalper-live'") < html.index("id='scalper-activity'")
+    assert "Guarded AX-SCALPER one-shot LIVE intent" not in text
+    assert "DEMO execution test" not in text
 
 
 def test_the_continuous_panel_states_whether_it_is_sending_and_why_not():
@@ -153,14 +152,10 @@ def test_the_continuous_panel_states_whether_it_is_sending_and_why_not():
     html = _live(app)
     text = _text(html)
 
-    assert "not sending" in text
-    assert "SENDING REAL ORDERS" not in text
-    assert "What stops it, and where to fix it" in text
-    # Every blocker carries the control that clears it, inline.
-    assert "href='/mode'" in html
-    assert "Switch the mode to LIVE" in text
-    # A blocked bridge offers no start.
+    assert "REAL ONLY" in text
+    assert "No REAL-only AX-SCALPER runner" in text or "not wired" in text
     assert "action='/actions/autopilot-live-start'" not in html
+    assert "action='/actions/ax-scalper-live-start'" not in html
 
 
 def test_a_ready_continuous_panel_offers_the_start_and_one_place_to_stop_it():
@@ -172,14 +167,17 @@ def test_a_ready_continuous_panel_offers_the_start_and_one_place_to_stop_it():
     html = _live(app)
     text = _text(html)
 
-    assert "action='/actions/autopilot-live-start'" in html
-    assert "Every prerequisite the live path checks is satisfied" in text
-    assert "not a statement about the market" not in text
+    # The older bar strategy mock does not satisfy the separate AX-SCALPER
+    # admission, account, recovery and configuration gates.
+    assert "action='/actions/autopilot-live-start'" not in html
+    assert "action='/actions/ax-scalper-live-start'" not in html
+    assert "REAL ONLY" in text
 
     pilot.start()
     html = _live(app)
+    assert "Other LIVE session already active" in _text(html)
     assert "action='/actions/autopilot-live-stop'" in html
-    assert "SENDING REAL ORDERS" in _text(html)
+    assert "SENDING REAL ORDERS" not in _text(html)
 
 
 def test_a_blocker_with_no_known_fix_still_lands_somewhere_useful():
@@ -189,7 +187,7 @@ def test_a_blocker_with_no_known_fix_still_lands_somewhere_useful():
     assert fix_for("something_nobody_mapped") == ("Open setup", "/setup")
 
 
-# ------------------------------------------------------------------ one-shot
+# -------------------------------------------------------------- one-shot off
 def test_the_scalper_bridge_is_labelled_one_shot_and_never_a_loop():
     from pathlib import Path
 
@@ -197,14 +195,11 @@ def test_the_scalper_bridge_is_labelled_one_shot_and_never_a_loop():
     html = _live(app)
     text = _text(html)
 
-    assert "Guarded AX-SCALPER one-shot LIVE intent (not continuous)" in text
-    assert "ONE-SHOT" in text
-    assert "One-shot, not a session" in text
-    # What it is, said in the section itself: a single intent, not a loop.
-    one_shot = html[html.index("id='one-shot'") : html.index("id='last-path'") if "id='last-path'" in html else None]
-    assert "not continuous" in one_shot
-    assert "One-shot, not a session" in one_shot
-    assert "Nothing here loops" in one_shot
+    assert "Autonomous scalping" in text
+    assert "REAL ONLY" in text
+    assert "Guarded AX-SCALPER one-shot LIVE intent" not in text
+    assert "action='/actions/scalper-live-submit'" not in html
+    assert "action='/actions/demo-test-submit'" not in html
 
 
 # --------------------------------------------------------------- separation
@@ -218,8 +213,8 @@ def test_only_one_page_starts_a_live_session():
     live = _live(app)
     assert "action='/actions/autopilot-live-start'" not in paper
     assert "action='/actions/autopilot-live-stop'" not in paper
-    assert "href='/live#continuous'" in paper
-    # ...and the live page never posts the paper loop's own actions.
+    assert "href='/live#ax-scalper-live'" in paper
+    # The live page never posts the paper loop's own actions.
     for action in ("autopilot-start", "autopilot-stop", "scalper-paper-start"):
         assert f"action='/actions/{action}'" not in live, action
 

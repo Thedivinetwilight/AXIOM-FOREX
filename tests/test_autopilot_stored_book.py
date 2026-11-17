@@ -345,7 +345,7 @@ def test_a_live_stop_without_a_bridge_does_not_talk_about_starting(tmp_path):
     # The start control keeps its own wording.
     status, _redirect, message = app.act("autopilot-live-start", {"nonce": [app.nonce]})
     assert int(status) == 409
-    assert "started or stopped" in message
+    assert "older bar-based LIVE start is disabled" in message
 
 
 # -- headings a person can read --------------------------------------------

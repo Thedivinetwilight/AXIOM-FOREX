@@ -207,6 +207,7 @@ def build_live_workflow(
     pause_seconds: float = 1.0,
     scalper_host: Any = None,
     scalper_approval_path: str | Path | None = None,
+    market_session: Any = None,
 ) -> LiveTrading | None:
     """Return the workflow, or ``None`` when this deployment cannot trade live."""
 
@@ -345,6 +346,27 @@ def build_live_workflow(
         audit_log=audit_log,
     )
     live.scalper_bridge = bridge
+
+    # The continuous AX-SCALPER lane is separate from the bar-based strategy
+    # session above, but shares its adapter, router/gate construction, provider
+    # platform factory, account arming, and lifecycle lookup. It is inert until
+    # the operator explicitly arms and starts it on /live.
+    if market_session is not None:
+        from .scalper_live_host import ScalperLiveAutonomousHost
+
+        live.scalper_autonomous = ScalperLiveAutonomousHost(
+            session=market_session,
+            adapter=adapter,
+            mode=mode,
+            platform_factory=platform_factory,
+            admission_host=scalper_host,
+            live_workflow=live,
+            settings_path=Path(project_root) / "scalper_live_settings.local.json",
+            state_path=Path(project_root) / "scalper_live_run.local.json",
+            audit_log=audit_log,
+        )
+    else:
+        live.scalper_autonomous = None
 
     # The one-shot DEMO execution test.  It shares the adapter, the mode, the
     # provider stack and the *same* live leg; it owns no route of its own and it

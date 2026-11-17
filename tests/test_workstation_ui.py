@@ -396,8 +396,8 @@ def test_prerequisite_help_never_points_at_a_removed_control():
     combined = " ".join(item["detail"] for item in help_items)
     assert "Account & symbols screen" not in combined
     assert "type its full path" not in combined
-    terminal_item = next(item for item in help_items if item["code"] == "mt5_terminal_not_found")
-    assert "mt5_settings.local.json" in terminal_item["detail"]
+    platform_item = next(item for item in help_items if item["code"] == "not_windows")
+    assert "connection step will stay disabled" in platform_item["detail"]
 
 
 @pytest.mark.parametrize("path", sorted(GET_ROUTES))
@@ -761,6 +761,11 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "scalper-live-arm",
         "scalper-live-submit",
         "scalper-live-reconcile",
+        "ax-scalper-live-arm",
+        "ax-scalper-live-start",
+        "ax-scalper-live-stop",
+        "ax-scalper-live-reconcile",
+        "ax-scalper-live-reconcile-close",
         # The one-shot DEMO execution test. It sends exactly one order, only to
         # an account MT5 itself reports as DEMO, only through the same live leg
         # a strategy order uses; it cannot close, cannot arm, cannot change the

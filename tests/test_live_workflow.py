@@ -482,38 +482,16 @@ def _live_host(*, adapter, mode, plan, terminal, setup_doc):
     )
 
 
-def test_a_live_session_sends_one_order_and_never_retries(live, fake, terminal, setup_doc):
-    result = live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())
-    assert result.armed, [item.audit_view() for item in result.blockers]
+def test_legacy_bar_based_live_entry_is_blocked_by_the_workstation(live, fake):
+    """Only the separately gated AX-SCALPER REAL lane may start from the UI."""
 
-    host = _live_host(
-        adapter=live.adapter,
-        mode=Mode("LIVE", True),
-        plan=live.plan,
-        terminal=terminal,
-        setup_doc=setup_doc,
-    )
-    try:
-        host.start()
-        started = host.start_runner()
-        assert started.get("running") is True, started
-        assert _wait(lambda: len(fake.send_requests) >= 1, timeout=10.0)
-        # Let the loop run out its cycles.
-        _wait(lambda: host.view().get("running") is False, timeout=10.0)
-        view = host.view()
-        assert len(fake.send_requests) == 1
-        assert fake.send_requests[0]["symbol"] == BROKER_SYMBOL
-        assert int(view["live_orders"]) == 1
-        # The broker's own fill is booked into the same ledger paper uses.
-        assert len(host.platform.portfolio.positions) == 1
-        assert host.platform.paper_execution.fills() == ()
-        # And nothing was simulated in its place.
-        assert view["paper_only"] is False
-        assert view["order_sending"] is True
-    finally:
-        host.close()
-        live.adapter.disarm(reason="test")
-        live.adapter.disconnect(reason="test")
+    app = _app(live)
+    for action in ("live-arm", "live-start", "autopilot-live-start"):
+        status, _redirect, message = app.act(action, {"nonce": [app.nonce]})
+        assert int(status) == 409, (action, message)
+        assert "disabled" in message.lower()
+    assert live.adapter.armed is False
+    assert fake.send_requests == []
 
 
 def test_the_session_refuses_to_start_unarmed(tmp_path, fake, terminal, setup_doc):
@@ -554,30 +532,12 @@ def test_the_session_refuses_to_start_unarmed(tmp_path, fake, terminal, setup_do
         adapter.disconnect(reason="test")
 
 
-def test_a_failed_check_stops_the_session_and_disarms(live, fake, terminal, setup_doc):
-    live.arm(values(), confirmation=PHRASE, reviewed=True, account_confirmation=live.confirmed_account_fingerprint())  # noqa: F841
-    host = _live_host(
-        adapter=live.adapter,
-        mode=Mode("LIVE", True),
-        plan=live.plan,
-        terminal=terminal,
-        setup_doc=setup_doc,
-    )
-    try:
-        host.start()
-        assert host.start_runner().get("running") is True
-        assert _wait(lambda: len(fake.send_requests) >= 1, timeout=10.0)
-        sent = len(fake.send_requests)
-        # The operator's own stop, or any failing check, ends the loop.
-        host.stop_runner(reason="test_stop", disarm=True)
-        assert _wait(lambda: host.view().get("running") is False, timeout=5.0)
-        assert live.armed is False
-        time.sleep(0.3)
-        assert len(fake.send_requests) == sent  # never re-sent
-    finally:
-        host.close()
-        live.adapter.disarm(reason="test")
-        live.adapter.disconnect(reason="test")
+def test_stopping_the_disabled_legacy_lane_never_sends_or_closes(live, fake):
+    app = _app(live)
+    status, _redirect, _message = app.act("live-stop", {"nonce": [app.nonce]})
+    assert int(status) == 303
+    assert fake.send_requests == []
+    assert live.adapter.armed is False
 
 
 # ---------------------------------------------------------------------------
@@ -597,8 +557,9 @@ def test_the_live_page_says_when_no_order_can_be_sent():
     app = _app(None)
     status, html = app.page("/live")
     assert int(status) == 200
-    assert "No real order can be sent right now" in html
-    assert "no live trading adapter" in html.lower()
+    assert "REAL ONLY" in html
+    assert "REAL-only AX-SCALPER runner" in html
+    assert "action='/actions/live-start'" not in html
 
 
 def test_the_live_page_says_when_the_next_signal_will_send():
@@ -634,11 +595,10 @@ def test_the_live_page_says_when_the_next_signal_will_send():
     app = _app(Sending())
     status, html = app.page("/live")
     assert int(status) == 200
-    assert "The next strategy signal WILL send a real order" in html
-    # The stop control is labelled as what it is: an emergency stop that closes
-    # nothing.  A label that could be read as "flatten the account" would be wrong.
-    assert "EMERGENCY STOP" in html
-    assert "does not close them" in html or "closes nothing" in html
+    assert "Autonomous scalping" in html
+    assert "REAL-only AX-SCALPER runner" in html
+    assert "action='/actions/autopilot-live-start'" not in html
+    assert "action='/actions/ax-scalper-live-start'" not in html
 
 
 def test_the_live_actions_need_the_nonce():
@@ -657,9 +617,9 @@ def test_the_live_actions_need_the_nonce():
 def test_the_live_actions_explain_a_missing_adapter():
     app = _app(None)
     status, redirect, message = app.act("live-start", {"nonce": [app.nonce]})
-    assert int(status) == 400
+    assert int(status) == 409
     assert redirect == "/live"
-    assert "no live trading adapter" in message.lower()
+    assert "manual non-scalper LIVE entry lane is disabled" in message
 
 
 def test_the_page_prints_no_secret_and_no_balance(live):

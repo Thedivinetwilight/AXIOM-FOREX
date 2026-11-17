@@ -215,7 +215,9 @@ def test_the_environment_checks_are_reported_separately():
     blockers = issue(ready_facts(environment=report))
     assert "not_windows" in blockers
     assert "metatrader5_package_missing" in blockers
-    assert "mt5_terminal_not_found" in blockers
+    # A terminal path is not probed off Windows, so the platform blocker owns
+    # that remediation instead of reporting a misleading missing terminal.
+    assert "mt5_terminal_not_found" not in blockers
     for blocker in blockers.values():
         assert blocker.resolution
 

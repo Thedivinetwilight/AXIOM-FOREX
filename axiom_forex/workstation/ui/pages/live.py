@@ -84,6 +84,16 @@ FIXES: dict[str, tuple[str, str]] = {
     "account_mismatch": ("Confirm the account", "/live#account"),
     "risk_limit": ("Read the risk limits", "/live#plan"),
     "live_autopilot_unavailable": ("Open the paper command center", "/autopilot"),
+    "terminal_not_connected": ("Connect to MT5 explicitly", "/setup"),
+    "live_mode_not_confirmed": ("Confirm LIVE mode", "/mode"),
+    "real_account_required": ("Sign in to the declared REAL account", "/setup"),
+    "account_identity_mismatch": ("Check the declared account", "/live#local-settings"),
+    "scalper_settings_missing": ("Complete the local LIVE settings", "/live#local-settings"),
+    "scalper_settings_schema_invalid": ("Repair the local LIVE settings", "/live#local-settings"),
+    "no_admitted_candidate": ("Review evidence requirements", "/live#local-settings"),
+    "live_admission_review_unavailable": ("Review the signed evidence setup", "/live#local-settings"),
+    "another_live_session_running": ("Stop the other LIVE session", "/live#session"),
+    "live_adapter_already_armed": ("Disarm the other LIVE plan", "/live#session"),
 }
 _FALLBACK_FIX = ("Open setup", "/setup")
 
@@ -516,6 +526,13 @@ def key_done(key: str, current: str, done: bool) -> bool:
 def _account_section(view: Mapping[str, Any]) -> str:
     account = dict(view.get("account") or {})
     positions = [dict(item) for item in (view.get("positions") or ())]
+    scalper_live = dict(view.get("scalper_live") or {})
+    pnl = dict(scalper_live.get("pnl") or {})
+    pnl_value = (
+        f"{fmt.text(pnl.get('total'))} {fmt.text(pnl.get('currency'))}"
+        if pnl.get("available")
+        else "Unavailable · " + fmt.text(pnl.get("reason") or "broker profit was not reported")
+    )
     position_rows = [
         [
             cell(fmt.text(item.get("symbol") or ""), label="Symbol"),
@@ -540,15 +557,17 @@ def _account_section(view: Mapping[str, Any]) -> str:
                 ("Trading allowed in terminal", chip("yes", "ok") if account.get("trading_allowed") else chip("no", "warn")),
                 ("Orders sent this session", fmt.text(view.get("orders_sent", 0))),
                 ("Broker positions", fmt.text(len(positions))),
+                ("Broker-reported open-position P&L", pnl_value),
+                ("P&L basis", fmt.text(pnl.get("basis") or "broker-reported open-position profit only")),
                 ("Unresolved orders", fmt.text(len(view.get("unresolved") or []))),
             ]
         )
         + (
             notice(
                 f"{len(positions)} live position(s) are still open at the broker",
-                "Changing the execution mode back to PAPER, disarming or stopping the session "
-                "does not close or manage these: only the terminal or the broker can close them, "
-                "and this workstation will not send a close you did not ask for.",
+                "Stopping new entries does not flatten them. The exact active AX-SCALPER run "
+                "may manage only positions it restored and verified; other positions remain "
+                "outside this runner. Use the broker table below to review its own report.",
                 tone="warn",
             )
             if positions
@@ -566,6 +585,71 @@ def _account_section(view: Mapping[str, Any]) -> str:
         note="PAPER positions and P&L are on /autopilot. They are a different book, read from "
         "a different file, and are never mixed into these rows.",
         id="account",
+    )
+
+
+def broker_protection_status_section(view: Mapping[str, Any]) -> str:
+    """Keep broker-reported protection warnings visible without legacy entry controls."""
+
+    warnings_html = stop_warnings(view)
+    broker_stop = dict(view.get("broker_stop") or {})
+    protective = dict(view.get("protective_stop") or {})
+    if not warnings_html and not broker_stop.get("available") and not protective:
+        return ""
+    pairs = [
+        ("Broker-side stop", broker_stop_state(view)),
+        (
+            "Plan protective stop",
+            (f"<code>{fmt.text(protective.get('pips'))}</code> pips "
+             if protective.get("pips") else "not reported ")
+            + f"<span class='small muted'>{fmt.text(protective.get('note') or 'a limit AXIOM watches')}</span>",
+        ),
+    ]
+    return section(
+        "Existing broker protection",
+        warnings_html + facts(split=True, pairs=pairs),
+        note="The broker is authoritative. This readout does not change an order.",
+        id="broker-protection",
+    )
+
+
+def existing_order_reconciliation_section(view: Mapping[str, Any], nonce: str) -> str:
+    """Keep exact-id reconciliation reachable for requests recorded by older builds."""
+
+    scalper_live = dict(view.get("scalper_live") or {})
+    unresolved = [str(item) for item in (scalper_live.get("unresolved_orders") or ()) if str(item)]
+    if not unresolved:
+        return ""
+    result = dict(scalper_live.get("result") or {})
+    rows = "".join(
+        "<li><code>{}</code>{}</li>".format(
+            fmt.text(intent_id),
+            action_form(
+                "scalper-live-reconcile", nonce, "Reconcile this exact request id",
+                fields=f"<input type='hidden' name='intent_id' value='{fmt.attr(intent_id)}'>",
+            ),
+        )
+        for intent_id in unresolved
+    )
+    latest = (
+        notice(
+            "Last reconciliation result",
+            fmt.text(result.get("message") or result.get("reason") or "not reported"),
+            tone="warn" if not result.get("ok") else "ok",
+        )
+        if result
+        else ""
+    )
+    return section(
+        "Previously recorded order requests",
+        notice(
+            "Reconciliation only",
+            "These requests were recorded by an earlier LIVE workflow. Reconciliation queries the same durable request id and never submits again. New one-shot entry controls are disabled.",
+            tone="warn",
+        )
+        + latest
+        + f"<ul class='list' role='list'>{rows}</ul>",
+        id="previous-live-requests",
     )
 
 
@@ -1128,6 +1212,237 @@ def _last_path_section(view: Mapping[str, Any]) -> str:
     )
 
 
+def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
+    """One REAL-only AX-SCALPER run surface, backed by its owner-thread host."""
+
+    scalper = dict(view.get("scalper_autonomous") or {})
+    state = str(scalper.get("state") or "UNAVAILABLE")
+    config = dict(scalper.get("config") or {})
+    account = dict(scalper.get("account") or {})
+    tick = dict(scalper.get("latest_tick") or {})
+    run = dict(scalper.get("run") or {})
+    blockers_list = [dict(item) for item in (scalper.get("blockers") or ())]
+    run_blockers = [dict(item) for item in (run.get("blockers") or ())]
+    known = {str(item.get("reason") or "") for item in blockers_list}
+    blockers_list.extend(item for item in run_blockers if str(item.get("reason") or "") not in known)
+    candidates = [dict(item) for item in (scalper.get("eligible_candidates") or ())]
+    all_candidates = [dict(item) for item in (scalper.get("candidates") or ())]
+    positions = [dict(item) for item in (run.get("open_positions") or scalper.get("open_positions") or ())]
+    pending_entry = run.get("pending_submission") or scalper.get("pending_submission")
+    pending_closes = [dict(item) for item in (run.get("pending_closes") or ())]
+    adapter_armed = bool(scalper.get("adapter_armed"))
+    active = state in {"RUNNING", "PAUSED", "ARMED", "RECOVERY_REQUIRED"}
+    selected_id = str(scalper.get("candidate_id") or "")
+
+    tone = "danger" if state == "RUNNING" else "warn" if state in {"PAUSED", "RECOVERY_REQUIRED"} else "ok" if state == "ARMED" else "muted"
+    readouts = [
+        readout("Runner", chip(state, tone, dot=state == "RUNNING"), foot="one strategy, one verified symbol", tone="live" if state == "RUNNING" else ""),
+        readout("Account", chip(str(scalper.get("account_mode") or "UNKNOWN"), "danger" if str(scalper.get("account_mode") or "").upper() != "REAL" else "ok", dot=True), foot="REAL only; DEMO is refused", small=True),
+        readout("MT5 connection", chip("connected" if scalper.get("connected") else "not connected", "ok" if scalper.get("connected") else "warn"), foot=fmt.text(scalper.get("account_server") or "server not reported"), small=True),
+        readout("Quote", chip("fresh" if tick.get("fresh") else "unavailable / stale", "ok" if tick.get("fresh") else "warn"), foot=f"{fmt.text(tick.get('age_ms') if tick.get('age_ms') is not None else '—')} ms · {fmt.text(tick.get('symbol') or config.get('symbol') or 'no symbol')}", small=True),
+        readout("Managed positions", fmt.text(len(positions)), foot="broker positions remain open after Stop", small=True),
+    ]
+
+    account_pairs = [
+        ("Terminal account type", fmt.text(scalper.get("account_mode") or "not reported")),
+        ("Declared server", fmt.text(scalper.get("account_server") or account.get("expected", {}).get("server") or "not reported")),
+        ("Account currency", fmt.text(scalper.get("account_currency") or account.get("expected", {}).get("currency") or "not reported")),
+        ("Account fingerprint", f"<code>{fmt.text(scalper.get('account_fingerprint') or 'not reported')}</code>"),
+        ("LIVE mode confirmed", chip("yes", "ok") if scalper.get("live_effective") and str(scalper.get("mode") or "").upper() == "LIVE" else chip("no", "warn")),
+        ("Adapter armed", chip("yes", "danger", dot=True) if adapter_armed else chip("no", "muted")),
+        ("Symbol", fmt.text(config.get("symbol") or "not configured")),
+        ("Broker-confirmed stop setting", "read from MT5 at arm and checked against each strategy stop"),
+        ("Settings file", f"<code>{fmt.text(scalper.get('settings_path') or 'not wired')}</code>"),
+        ("Recovery file", f"<code>{fmt.text(scalper.get('state_path') or 'not wired')}</code>"),
+    ]
+    config_body = facts(split=True, pairs=account_pairs)
+    risk = dict(config.get("risk") or {})
+    costs = dict(config.get("costs") or {})
+    if risk or costs:
+        rows = [(f"Risk · {key}", fmt.text(value)) for key, value in risk.items()]
+        rows.extend((f"Declared cost · {key}", fmt.text(value)) for key, value in costs.items())
+        config_body += "<details class='fold'><summary><span class='fold-h'>Declared risk and broker costs</span><span class='fold-n'>the local settings values used by the runner</span></summary><div class='fold-body'>" + facts(split=True, pairs=rows) + "</div></details>"
+
+    blocker_html = blockers_with_fix(blockers_list)
+    if not blocker_html and state not in {"RUNNING", "ARMED"}:
+        blocker_html = notice("No readiness blockers reported", "The runner still checks the account, quote, risk, strategy admission, and broker protections before each order.", tone="ok")
+
+    execution_mode = str(view.get("mode") or scalper.get("mode") or "PAPER").upper()
+    if state == "RUNNING":
+        readiness_banner = notice(
+            "AX-SCALPER decision loop is running",
+            "Every possible order still needs a fresh quote, an admitted strategy, current risk approval and broker-confirmed protection.",
+            tone="danger",
+        )
+    elif state == "ARMED":
+        readiness_banner = notice(
+            "Armed, not started",
+            "No entry loop is running. A separate explicit Start action is required before this lane can make trading decisions.",
+            tone="warn",
+        )
+    else:
+        readiness_banner = notice(
+            "No real order can be sent right now",
+            "The AX-SCALPER REAL runner is not running. Its account, evidence, configuration, recovery and quote gates must pass before Arm and Start are offered.",
+            tone="info",
+        )
+    if execution_mode != "LIVE":
+        readiness_banner += notice(
+            "Before you use this page",
+            "Paper mode is the default. It cannot send a real order; the REAL-only runner requires a confirmed LIVE mode and an MT5 account positively identified as REAL.",
+            tone="warn",
+        )
+
+    candidate_rows = [
+        [
+            cell(fmt.text(item.get("name") or item.get("candidate_id") or item.get("fingerprint") or "—"), label="Strategy"),
+            cell(fmt.text(item.get("family") or "not reported"), label="Family"),
+            cell(fmt.text(item.get("timeframe") or "not reported"), label="Timeframe"),
+            cell(chip("ADMITTED" if item.get("eligible") else "BLOCKED", "ok" if item.get("eligible") else "warn"), label="Admission"),
+            cell(fmt.text(item.get("reason") or item.get("rationale") or item.get("evidence_note") or "Signed replay review required"), label="Evidence / reason"),
+        ]
+        for item in all_candidates
+    ]
+    options = [("", "Choose an admitted strategy")] + [
+        (str(item.get("fingerprint") or ""),
+         f"{item.get('name') or item.get('candidate_id') or 'AX-SCALPER candidate'} · {item.get('family') or 'family unavailable'}")
+        for item in candidates if item.get("fingerprint")
+    ]
+
+    controls = ""
+    if candidates and not blockers_list and not adapter_armed and not positions:
+        controls += (
+            "<h3>Arm this exact admitted strategy</h3><p class='small muted'>Arming changes no broker position and sends no order. It requires the exact LIVE account fingerprint and phrase.</p>"
+            + action_form("ax-scalper-live-arm", nonce, "Arm AX-SCALPER for this REAL account", tone="danger",
+                          fields=field("candidate_id", "Admitted strategy", kind="select", options=options, required=True, field_id="ax-scalper-arm-candidate")
+                          + field("account_confirmation", "Type the exact account fingerprint", required=True, field_id="ax-scalper-arm-account", value=str(scalper.get("account_fingerprint") or ""))
+                          + field("confirmation", "Type ARM AX-SCALPER LIVE", required=True, field_id="ax-scalper-arm-phrase", placeholder="ARM AX-SCALPER LIVE"))
+        )
+    if state == "ARMED" and adapter_armed and candidates and not blockers_list:
+        controls += (
+            "<h3>Start autonomous entries</h3><p class='small muted'>This begins continuous decisions on fresh live MT5 quotes. Every entry uses the guarded adapter, declared risk and broker-confirmed protection.</p>"
+            + action_form("ax-scalper-live-start", nonce, "Start AX-SCALPER LIVE", tone="danger",
+                          fields=field("candidate_id", "Same admitted strategy", kind="select", options=options, value=selected_id, required=True, field_id="ax-scalper-start-candidate")
+                          + field("account_confirmation", "Repeat the exact account fingerprint", required=True, field_id="ax-scalper-start-account", value=str(scalper.get("account_fingerprint") or ""))
+                          + field("confirmation", "Type START AX-SCALPER LIVE", required=True, field_id="ax-scalper-start-phrase", placeholder="START AX-SCALPER LIVE"))
+        )
+    if active or adapter_armed or positions:
+        controls += action_form("ax-scalper-live-stop", nonce, "STOP new entries · keep managing open positions", tone="warn")
+    if pending_entry:
+        controls += action_form("ax-scalper-live-reconcile", nonce, "Reconcile the same pending entry request")
+    for index, item in enumerate(pending_closes):
+        position_id = str(item.get("position_id") or "")
+        if position_id:
+            controls += action_form("ax-scalper-live-reconcile-close", nonce,
+                                    f"Reconcile pending close · {position_id}",
+                                    fields=f"<input type='hidden' name='position_id' value='{fmt.attr(position_id)}'>")
+
+    decisions = list(run.get("decisions") or ())
+    latest_decision = decisions[-1] if decisions else {}
+    if isinstance(latest_decision, Mapping):
+        decision = dict(latest_decision)
+    else:
+        decision = {}
+    last = dict(scalper.get("last_result") or {})
+    quote_pairs = [
+        ("Latest quote", f"{fmt.text(tick.get('symbol') or '—')} · bid {fmt.text(tick.get('bid') or '—')} / ask {fmt.text(tick.get('ask') or '—')}"),
+        ("Quote timestamp", fmt.text(tick.get("source_time") or "not received")),
+        ("Received", fmt.text(tick.get("received_at") or "not received")),
+        ("Freshness", f"{fmt.text(tick.get('age_ms') if tick.get('age_ms') is not None else '—')} ms · {fmt.text('fresh' if tick.get('fresh') else 'stale/unavailable')}"),
+        ("Last decision", fmt.text(decision.get("signal") or decision.get("decision") or last.get("signal") or "not reported")),
+        ("Decision reason", fmt.text(decision.get("reason") or decision.get("blocked") or last.get("blocked") or scalper.get("reason") or "not reported")),
+        ("Run pause / refusal", fmt.text(run.get("pause_reason") or run.get("stop_reason") or scalper.get("reason") or "none reported")),
+        ("Starting equity", fmt.text(run.get("starting_equity") or "unavailable")),
+        ("Current equity", fmt.text(run.get("equity") or "unavailable")),
+        ("Risk state", fmt.text(run.get("guardian") or "see the live risk blockers above")),
+    ]
+    activity = facts(split=True, pairs=quote_pairs)
+    last_result_html = (
+        notice(
+            "Last AX-SCALPER runner action",
+            fmt.text(last.get("message") or last.get("reason") or "not reported"),
+            tone="ok" if last.get("ok") else "warn",
+        )
+        if last
+        else ""
+    )
+    position_rows = [
+        [
+            cell(fmt.text(item.get("position_id") or item.get("ticket") or "—"), label="Position", mono=True),
+            cell(fmt.text(item.get("symbol") or config.get("symbol") or "—"), label="Symbol"),
+            cell(fmt.text(item.get("side") or "—"), label="Side"),
+            cell(fmt.text(item.get("lots") or item.get("quantity") or "—"), label="Lots", num=True),
+            cell(fmt.text(item.get("entry_price") or "—"), label="Entry", num=True),
+            cell(fmt.text(item.get("stop_price") or "—"), label="Broker stop", num=True),
+            cell(fmt.text(item.get("unrealized_pnl") or "unavailable"), label="Unrealized P&L", num=True),
+        ] for item in positions
+    ]
+    recovery = dict(run.get("recovery") or {})
+    top = deck(
+        "AX-SCALPER · REAL LIVE runner",
+        id="ax-scalper-live", lane="live", state=state,
+        note="one admitted strategy · live MT5 quotes · guarded real orders",
+        readouts=readouts,
+        body=(
+            readiness_banner
+            +
+            notice("REAL account only", "This runner refuses DEMO, CONTEST, unknown account types, changed account identity, missing signed independent replay admission, stale quotes, and unverified broker protection. It never sends on Connect.", tone="danger", role="alert")
+            + blocker_html
+            + last_result_html
+            + config_body
+            + table(( ("Strategy", False), ("Family", False), ("Timeframe", False), ("Admission", False), ("Evidence / reason", False) ), candidate_rows,
+                    caption="Candidates reviewed against the signed evidence policy and independent raw-data replay. Fixture test evidence is not admission.",
+                    empty=empty_state("No strategy is admitted", "No strategy can trade until real signed evidence passes the independent replay and current policy."))
+            + controls
+            + (notice("Exact recovery required", fmt.text(recovery.get("detail") or "The persisted run cannot be resumed safely."), tone="danger") if recovery else "")
+            + "<details class='fold' id='local-settings'><summary><span class='fold-h'>Local LIVE setup and missing values</span><span class='fold-n'>no capital, costs, contract size, or risk limits are guessed</span></summary><div class='fold-body'>"
+            + notice("Settings are incomplete or unavailable", "Create the ignored local file shown below using broker-verified terms. Do not copy PAPER capital or use a demo account fingerprint.", tone="warn")
+            + f"<p class='small'>Local LIVE settings: <code>{fmt.text(scalper.get('settings_path') or 'not wired')}</code></p>"
+            + f"<p class='small'>Durable LIVE run state: <code>{fmt.text(scalper.get('state_path') or 'not wired')}</code>. Preserve it across restarts.</p>"
+            + "<p class='small'>The exact blank template, field units, accepted cost labels and safe launch/update steps are in <code>docs/SCALPER_LIVE_WORKSTATION.md</code> in the project folder.</p>"
+            + "<p class='small'>Required values: exact terminal-verified symbol; broker margin fraction; commission and whether observed or estimated; slippage points and state; swap state; every validated risk limit; and exact REAL server, login, currency and account fingerprint. The runner validates units and ranges and refuses missing fields.</p>"
+            + "</div></details>"
+        ),
+        foot="Stop prevents new entries and never closes a position. If positions remain open, this process stays connected and keeps managing them from fresh quotes.",
+    )
+    return top + section("Live activity and managed positions", activity + table(
+        (("Position", False), ("Symbol", False), ("Side", False), ("Lots", True), ("Entry", True), ("Broker stop", True), ("Unrealized P&L", True)),
+        position_rows, caption="Positions managed by this exact AX-SCALPER run. P&L is shown only if the run reports it.",
+        empty=empty_state("No managed position", "Open positions are never inferred from a PAPER ledger.")),
+        note="The broker is authoritative for order and position state. Unknown outcomes stay latched and are queried by the same request id.", id="scalper-activity")
+
+
+def legacy_live_stop_section(view: Mapping[str, Any], nonce: str) -> str:
+    """Report and safely stop an older LIVE session; never offer it a new start."""
+
+    continuous = dict(view.get("continuous") or {})
+    running = bool(view.get("session_running") or continuous.get("state") in {"RUNNING", "STARTING"})
+    armed = bool(view.get("armed"))
+    if not running and not armed:
+        return ""
+    controls = ""
+    if running:
+        controls += action_form("autopilot-live-stop", nonce, "Stop the other LIVE session", tone="danger")
+    if armed:
+        controls += action_form("live-disarm", nonce, "Disarm the other LIVE plan", tone="warn")
+    return section(
+        "Other LIVE session already active",
+        notice(
+            "This older LIVE workflow cannot be started here",
+            "It is shown only so an existing session can be stopped safely. AX-SCALPER will remain blocked until this session is stopped and the shared adapter is free.",
+            tone="danger", role="alert",
+        )
+        + facts([
+            ("Session", fmt.text(continuous.get("state") or view.get("session_state") or "not reported")),
+            ("Order sending", chip("yes", "danger", dot=True) if continuous.get("order_sending") else chip("no", "muted")),
+            ("Broker positions", fmt.text(len(view.get("positions") or continuous.get("positions") or ()))),
+        ])
+        + "<div class='actions'>" + controls + "</div>",
+        note="Stopping disables that runner's new entries. Broker positions remain open and are never closed by Stop.",
+        id="other-live-session",
+    )
+
+
 
 # --------------------------------------------------------------- demo test
 def demo_test_section(ctx: Any, nonce: str) -> str:
@@ -1393,209 +1708,29 @@ def demo_test_section(ctx: Any, nonce: str) -> str:
 def render_live(ctx: Any) -> str:
     view = dict((ctx.extra or {}).get("live") or {})
     nonce = fmt.attr(ctx.action_nonce)
-    configured = bool(view.get("configured"))
-    armed = bool(view.get("armed"))
-    scalper = dict(view.get("scalper_live") or {})
-    continuous = dict(view.get("continuous") or {})
-
+    scalper = dict(view.get("scalper_autonomous") or {})
+    state = str(scalper.get("state") or "UNAVAILABLE")
     head = page_head(
-        "LIVE · real MetaTrader 5 account. Nothing here is a simulated fill.",
-        "Live execution",
-        "The continuous guarded session first, then the manual review and arming that "
-        "authorises it, the one-shot AX-SCALPER intent, and a one-shot DEMO execution test you "
-        "can run against a demo account to see the order path work. Arming writes the plan and "
-        "sends nothing; every order still passes the adapter's own preflight, and PAPER results "
-        "never authorise anything here.",
-        badges=_state_chip(armed, configured)
-        + chip("LIVE · REAL BROKER", "danger", dot=True)
-        + chip(str(view.get("mode") or "PAPER"), "danger" if view.get("live_effective") else "paper"),
-        actions=(
-            action_form("live-stop", nonce, "EMERGENCY STOP", tone="danger")
-            if configured and armed
-            else button_link("/autopilot", "PAPER is on /autopilot", small=True)
-        ),
+        "REAL LIVE · AX-SCALPER",
+        "Autonomous scalping",
+        "One admitted AX-SCALPER strategy, on verified live MT5 quotes, through the existing guarded order route. Only a terminal-confirmed REAL account is accepted. A demo account, missing signed replay evidence, unknown costs, or incomplete risk terms cannot start.",
+        badges=chip("REAL ONLY", "danger", dot=True)
+        + chip(str(scalper.get("account_mode") or "ACCOUNT UNKNOWN"), "danger" if str(scalper.get("account_mode") or "").upper() != "REAL" else "ok")
+        + chip(state, "danger" if state == "RUNNING" else "warn" if state in {"PAUSED", "RECOVERY_REQUIRED"} else "muted"),
+        actions=button_link("/autopilot", "Open PAPER", small=True),
     )
-
     index = jump_nav_bar(
-        [
-            ("continuous", "1 · Continuous session"),
-            ("plan", "2 · Plan & arming"),
-            ("session", "3 · Manual session"),
-            ("one-shot", "4 · One-shot intent"),
-            ("demo-test", "5 · DEMO test order"),
-            ("account", "6 · Account"),
-            ("stop", "7 · Broker-side stop"),
-        ]
+        [("ax-scalper-live", "AX-SCALPER LIVE"),
+         ("scalper-activity", "Activity & positions"),
+         ("account", "Broker account"),
+         ("broker-protection", "Broker protection")]
     )
-
-    lifecycle = section(
-        "LIVE workflow at a glance",
-        _lifecycle(view, scalper),
-        note="Each step is answered by the runtime, not by this layout.",
-        id="lifecycle",
-        plain=True,
-    )
-    status = section(
-        "Status",
-        facts(
-            [
-                ("Adapter", chip("configured", "ok") if configured else chip("not configured", "muted")),
-                ("Workflow armed", chip("ARMED", "danger", dot=True) if armed else chip("Not armed", "muted")),
-                (
-                    "Session",
-                    chip(str(view.get("session_state") or continuous.get("state") or "NOT RUNNING"),
-                         "ok" if view.get("session_running") or continuous.get("state") == "RUNNING" else "muted"),
-                ),
-                ("Orders sent", fmt.text(view.get("orders_sent", 0))),
-                ("Unresolved", fmt.text(len(view.get("unresolved") or ())) or "0"),
-                ("Sending real orders", chip("yes", "danger", dot=True) if continuous.get("order_sending") else chip("no", "muted")),
-                ("Broker-reported P&L availability", "see the account section"),
-                ("PAPER", "The PAPER command center is on /autopilot"),
-            ]
-        ),
-        plain=True,
-        id="status",
-    )
-    limits = section(
-        "What this page cannot say",
-        facts(
-            [
-                ("PAPER results", "not a live readiness verdict; they are on /autopilot"),
-                ("P&L", "only the broker's own open-position profit, when it reports one"),
-                ("Retries", "an unknown outcome stops the session; nothing is re-sent"),
-                ("Position management", "this page cannot close or modify a broker position"),
-            ]
-        ),
-        plain=True,
-        id="limits",
-    )
-    elsewhere = section(
-        "PAPER is a different page",
-        "<p class='small'>The PAPER command center is on <a href='/autopilot'>/autopilot</a>: "
-        "simulated fills on this machine, its own ledger, and no route to a broker. Nothing "
-        "here promotes a paper result, and nothing there can arm, submit or close a real "
-        "order.</p>",
-        plain=True,
-        id="paper-handoff",
-    )
-
-    before = (
-        "<details class='disclosure'><summary>Before you use this page</summary>"
-        "<p>Everything here acts on a <em>real</em> MetaTrader 5 account. Paper mode is the "
-        "default and nothing on this page changes that by itself. Arming writes a plan and "
-        "authorises the adapter without sending anything; starting a session can send a real "
-        "order on the next strategy signal. No button here connects, signs in, switches "
-        "account, or edits your broker settings, and none of these settings is changed by "
-        "anything on the paper pages. The PAPER command center is on "
-        "<a href='/autopilot'>/autopilot</a>; this page never promotes its results.</p></details>"
-    )
-
-    warning = (
-        "<p class='inline-note' role='note'>"
-        "<strong>SIMULATED / SAMPLE DATA in the banner is about the terminal, not about this "
-        "page.</strong> If the launcher was started with --simulate there is no real terminal, "
-        "and the adapter refuses to arm. Check the banner above before reading any figure here."
-        "</p>"
-        if ctx.terminal.simulated
-        else ""
-    )
-
-    deck_html = continuous_live_section(view, ctx)
-
-    if not configured:
-        limits_rows = [
-            (
-                "No MetaTrader 5 trading adapter is wired in",
-                "This workstation cannot send a real order at all. Start it against your own "
-                "terminal and the adapter, or keep using PAPER.",
-            ),
-            ("Order entry", "there is no order form on this page, at any mode"),
-            ("Arming", "refused: without an adapter there is nothing to arm"),
-            (
-                "The PAPER command center is on /autopilot",
-                "its fills are simulated on this machine",
-            ),
-        ]
-        main = (
-            _live_status_banner(view)
-            + deck_html
-            + before
-            + section(
-                "The exact plan, and arming it",
-                (
-                    facts(
-                        [
-                            ("Last arming decision", chip(str((dict(view.get("last_arm") or {})).get("outcome") or "not recorded"), "muted")),
-                            ("Reason", f"<code>{fmt.text((dict(view.get('last_arm')) or {}).get('reason') or '—')}</code>"),
-                            ("Message", fmt.text((dict(view.get("last_arm") or {})).get("message") or "no arming click has been recorded")),
-                        ]
-                    )
-                    if view.get("last_arm")
-                    else ""
-                )
-                + empty_state(
-                    "No plan can be armed",
-                    "There is no adapter to arm. The PAPER command center cannot arm, submit, or "
-                    "close a broker order either.",
-                ),
-                id="plan",
-            )
-            + _scalper_live_section(view, nonce)
-            + demo_test_section(ctx, nonce)
-            + broker_stop_settings_section(view, nonce)
-            + section(
-                "What is missing",
-                facts(limits_rows),
-                note="No MetaTrader 5 adapter is configured on this workstation, so there is no "
-                "live trading adapter to send with: nothing here can reach a broker. Everything "
-                "on the PAPER side keeps working, and nothing here pretends otherwise.",
-                id="missing",
-                plain=True,
-            )
-        )
-        return head + index + workgrid(main, lifecycle + status + elsewhere)
-
-    positions = [dict(item) for item in (view.get("positions") or ())]
-    pnl_rows = [
-        ("Broker-reported open positions (not PAPER positions)", fmt.text(len(positions))),
-        ("Orders sent this session", fmt.text(view.get("orders_sent", 0))),
-        ("Unresolved broker requests", fmt.text(len(view.get("unresolved") or ()))),
-    ]
-
     main = (
-        _live_status_banner(view)
-        + warning
-        + stop_warnings(view)
-        + deck_html
-        + before
-        + _plan_section(view, nonce)
-        + _session_section(view, nonce)
-        + _scalper_live_section(view, nonce)
-        + demo_test_section(ctx, nonce)
+        broker_protection_status_section(view)
+        +
+        legacy_live_stop_section(view, nonce)
+        + autonomous_scalper_section(view, nonce)
+        + existing_order_reconciliation_section(view, nonce)
         + _account_section(view)
-        + broker_stop_settings_section(view, nonce)
-        + _last_path_section(view)
-        + section(
-            "Broker-reported P&L and positions",
-            facts(pnl_rows)
-            + (
-                table(
-                    (("Ticket", False), ("Symbol", False), ("Volume", False), ("Profit", False)),
-                    [
-                        [
-                            cell(fmt.text(item.get("ticket") or ""), label="Ticket", mono=True),
-                            cell(fmt.text(item.get("symbol") or ""), label="Symbol"),
-                            cell(fmt.text(item.get("volume") or ""), label="Volume", mono=True),
-                            cell(fmt.text(item.get("profit") or ""), label="Profit", mono=True),
-                        ]
-                        for item in positions
-                    ],
-                    caption="Open positions the terminal reports. This page cannot close them.",
-                )
-                if positions
-                else ""
-            ),
-            id="totals",
-        )
     )
-    return head + index + workgrid(main, lifecycle + status + limits + elsewhere)
+    return head + index + workgrid(main, "")

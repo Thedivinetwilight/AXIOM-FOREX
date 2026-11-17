@@ -1023,40 +1023,22 @@ def _handoff_section(ctx: Any, view: Mapping[str, Any]) -> str:
             "time, not a broker measurement, and not a promise about execution speed.</p>"
         )
 
-    # The control lives on the page that owns the real account, so this page can
-    # never start a live session by accident: it reports the state and hands over.
+    # LIVE entry is owned by the REAL-only AX-SCALPER control deck.  The older
+    # generic bridge is shown for refusal/review only and cannot start a second
+    # strategy loop from either page.
     if running:
         body += (
-            "<p class='small' id='handoff-note'><strong>The LIVE session is running.</strong> "
-            "It was started on <a href='/live#continuous'>Live execution</a>, which is the only "
-            "place it can be started or stopped: every signal it produces still passes that "
-            "path's gate, risk limits, account check and unresolved-order lockout.</p>"
+            "<p class='small' id='handoff-note'><strong>An older LIVE session is running.</strong> "
+            "Open <a href='/live#other-live-session'>Live execution</a> to stop it. AX-SCALPER "
+            "will refuse to arm while that session or any other adapter reservation remains.</p>"
         )
-    elif live.get("available") and not own_blockers:
+    else:
         body += (
-            "<p class='small' id='handoff-note'>Every prerequisite this page can see is "
-            "satisfied. Starting is a real-account action, so it is taken on "
-            "<a href='/live#continuous'>Live execution</a>, where the account is confirmed and "
-            "the phrase is typed.</p>"
+            "<p class='small' id='handoff-note'><strong>Only AX-SCALPER may start a LIVE loop "
+            "in this build.</strong> The old bar-based bridge stays disabled; its candidate "
+            "selection and PAPER results do not authorize real orders.</p>"
         )
-    elif live.get("available"):
-        first = own_blockers[0]
-        body += (
-            "<p class='small'><strong>Start is disabled:</strong> "
-            f"<code>{fmt.text(first.get('reason') or 'a prerequisite is missing')}</code> — "
-            f"{fmt.text(first.get('message') or '')}</p>"
-        )
-    handover = (
-        button_link("/live#continuous", "Open the LIVE session controls", small=True)
-        if live.get("available")
-        else button_link("/live", "Open the separate LIVE review", small=True)
-    )
-    body += (
-        "<p class='small muted' style='margin-top:10px'>This page never starts a live session. "
-        "The continuous session is started and stopped on Live execution, over the same guarded "
-        "runner and broker adapter; stopping it disarms the plan and stops new submissions, and "
-        "any open position stays open in the terminal.</p>"
-    )
+    handover = button_link("/live#ax-scalper-live", "Open AX-SCALPER REAL controls", small=True)
 
     return section(
         "Taking this to LIVE: what is missing",

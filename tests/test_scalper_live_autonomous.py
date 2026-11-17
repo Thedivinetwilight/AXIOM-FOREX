@@ -922,17 +922,25 @@ def test_protection_changes_preserve_mode_arming_and_real_account_gates(
         real["fake"].trade_mode = 0
         real["harness"].adapter.refresh_account()
 
-    run.on_tick(**_manage_position_tick(real, bid=bid, ask=ask))
+    outcome = run.on_tick(**_manage_position_tick(real, bid=bid, ask=ask))
 
     assert len(real["fake"].send_requests) == 1
     assert real["fake"].protection_requests == []
-    refusal = venue.record.protection_modifications[-1]
-    assert refusal["state"] == "REFUSED", refusal
-    assert refusal["reason"] == expected_reason
     current = run.book.get(fill.ticket)
     assert current is not None
-    assert current.protection_verified is False
-    assert run.book.snapshot()["pending_protection_modifications"]
+    if gate == "arming":
+        refusal = venue.record.protection_modifications[-1]
+        assert refusal["state"] == "REFUSED", refusal
+        assert refusal["reason"] == expected_reason
+        assert current.protection_verified is False
+        assert run.book.snapshot()["pending_protection_modifications"]
+    else:
+        # Account and execution-mode identity are checked before PositionBook
+        # sees a quote: no protection/close request may target the wrong account.
+        assert outcome["blocked"] == expected_reason
+        assert venue.record.protection_modifications == []
+        assert current.protection_verified is True
+        assert run.book.snapshot()["pending_protection_modifications"] == []
 
 
 def test_unknown_protection_change_survives_shutdown_and_recovers_by_readback(real):

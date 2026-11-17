@@ -8,7 +8,13 @@ import time
 import pytest
 
 from axiom_forex.paper_runner.accounting import write_capital
-from axiom_forex.scalper.live_config import LiveScalperConfigError, load_live_paper_config
+from axiom_forex.scalper.live_config import (
+    LIVE_SCHEMA,
+    LiveScalperConfigError,
+    load_live_paper_config,
+    load_live_scalper_config,
+)
+from axiom_forex.brokers.mt5.identity import account_fingerprint
 from axiom_forex.scalper.live_host import ScalperPaperHost
 from axiom_forex.scalper.scribe import POSITION_OPENED, RAW_TICK, STATE, Scribe, verify_jsonl
 
@@ -138,6 +144,35 @@ def test_live_config_uses_verified_broker_spec_and_local_paper_capital(tmp_path)
     assert config.instruments[0].source == "CONNECTED_MT5_SYMBOL_INFO"
     assert config.instruments[0].contract_size == Decimal("100000")
     assert capital == Decimal("10000.00") and currency == "USD"
+
+
+def test_live_config_is_separate_and_never_reads_paper_capital(tmp_path):
+    session = Session()
+    payload = settings()
+    payload["schema"] = LIVE_SCHEMA
+    payload["account"] = {
+        "server": "Broker-Real",
+        "login": 55500123,
+        "currency": "USD",
+        "fingerprint": account_fingerprint(55500123),
+    }
+    path = tmp_path / "scalper_live.local.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    # No PAPER capital document is created; LIVE settings are independent of it.
+    config, currency, expected = load_live_scalper_config(session=session, settings_path=path)
+    assert config.instruments[0].symbol == SYMBOL
+    assert currency == "USD"
+    assert expected.server == "Broker-Real" and expected.login == 55500123
+
+
+def test_live_config_refuses_missing_real_account_declaration(tmp_path):
+    session = Session()
+    payload = settings()
+    payload["schema"] = LIVE_SCHEMA
+    path = tmp_path / "scalper_live.local.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(LiveScalperConfigError, match="live_account_declaration_missing"):
+        load_live_scalper_config(session=session, settings_path=path)
 
 
 @pytest.mark.parametrize(("mutate", "reason"), [

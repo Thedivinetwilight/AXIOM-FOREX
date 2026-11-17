@@ -760,7 +760,8 @@ def test_switching_to_paper_shows_open_positions_and_says_it_will_not_close_them
 
     live_html = app.page("/live")[1]
     assert "live position(s) are still open" in live_html
-    assert "does not close or manage these" in live_html
+    assert "Stopping new entries does not flatten them" in live_html
+    assert "other positions remain outside this runner" in live_html
 
 
 def test_switching_to_paper_stops_the_session_and_never_liquidates(tmp_path):

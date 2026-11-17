@@ -188,7 +188,7 @@ def test_both_run_pages_open_with_the_same_deck_anatomy(live_app, paper_app):
     assert "deck--paper" in paper and "lane--paper" in paper
     # ...and both are above the record, not below it.
     for html, anchor in (
-        (render_page(live_app._context("live", "Live execution")), "id='continuous'"),
+        (render_page(live_app._context("live", "Live execution")), "id='ax-scalper-live'"),
         (render_page(paper_app._context("autopilot", "Autopilot")), "id='start-stop'"),
     ):
         assert html.index("class='deck") < html.index(anchor)
@@ -197,65 +197,77 @@ def test_both_run_pages_open_with_the_same_deck_anatomy(live_app, paper_app):
 def test_the_live_deck_answers_state_sending_orders_positions_and_quotes(live_app):
     deck = _deck(render_page(live_app._context("live", "Live execution")))
     text = _text(deck)
-    for label in ("Session", "Order sending", "Orders recorded", "Broker positions", "Quote feed"):
+    for label in ("Runner", "Account", "MT5 connection", "Quote", "Managed positions"):
         assert label in text, label
-    assert "not sending" in text
+    assert "runner" in text.lower()
     assert "SENDING REAL ORDERS" not in text
-    # The deck names the strategy/plan it would trade, and never invents one.
-    assert "What would run" in text
+    assert "one admitted strategy" in text
 
 
 def test_the_live_deck_start_and_stop_are_the_bridge_own_actions(tmp_path):
     app = _autopilot(tmp_path / "start-stop")[1]
-    app.autopilot_live = _bridge(tmp_path / "start-stop")
+    from types import SimpleNamespace
+
+    admitted = {"fingerprint": "candidate-1", "name": "Reviewed strategy", "family": "trend", "eligible": True}
+
+    class Runner:
+        def __init__(self):
+            self.state = "STOPPED"
+        def view(self):
+            return {
+                "available": True, "state": self.state, "account_mode": "REAL",
+                "connected": True, "mode": "LIVE", "live_effective": True,
+                "account_fingerprint": "account-1", "adapter_armed": self.state == "ARMED",
+                "candidate_id": "candidate-1", "candidates": [admitted],
+                "eligible_candidates": [admitted], "config": {"symbol": "EURUSD"},
+                "run": {}, "blockers": [], "settings_path": "local.json", "state_path": "state.json",
+            }
+        def arm(self, **_values):
+            self.state = "ARMED"
+            return {"ok": True, "state": self.state}
+        def start(self, **_values):
+            self.state = "RUNNING"
+            return {"ok": True, "state": self.state}
+        def stop(self):
+            self.state = "STOPPED"
+            return {"ok": True, "state": self.state}
+
+    runner = Runner()
+    app.live = SimpleNamespace(
+        view=lambda: {"configured": True, "positions": [], "account": {}, "blockers": []},
+        scalper_autonomous=runner,
+    )
     deck = _deck(render_page(app._context("live", "Live execution")))
-    assert "action='/actions/autopilot-live-start'" in deck
-    assert "action='/actions/autopilot-live-stop'" not in deck
-    # Both are registered actions, and the dispatcher knows them.
-    for action in ("autopilot-live-start", "autopilot-live-stop"):
+    assert "action='/actions/ax-scalper-live-arm'" in deck
+    assert "action='/actions/ax-scalper-live-start'" not in deck
+    for action in ("ax-scalper-live-arm", "ax-scalper-live-start", "ax-scalper-live-stop"):
         assert action in POST_ACTIONS, action
 
-    app.autopilot_live.start()
+    runner.arm()
     deck = _deck(render_page(app._context("live", "Live execution")))
-    assert "action='/actions/autopilot-live-stop'" in deck
-    assert "action='/actions/autopilot-live-start'" not in deck
+    assert "action='/actions/ax-scalper-live-stop'" in deck
+    assert "action='/actions/ax-scalper-live-start'" in deck
     # There is exactly one start/stop control on the page.
     html = render_page(app._context("live", "Live execution"))
-    assert html.count("action='/actions/autopilot-live-start'") == 0
-    assert html.count("action='/actions/autopilot-live-stop'") == 1
+    assert html.count("action='/actions/ax-scalper-live-start'") == 1
+    assert html.count("action='/actions/ax-scalper-live-stop'") == 1
 
 
 def test_a_blocked_live_deck_offers_no_start_and_each_blocker_has_its_fix(tmp_path):
-    from axiom_forex.workstation.ui.pages.live import fix_for
-
     app = _autopilot(tmp_path / "blocked")[1]
-    app.autopilot_live = _bridge(
-        tmp_path / "blocked",
-        mode="PAPER",
-        blockers=({"reason": "mode_not_live", "message": "Not LIVE."},),
-    )
+    app.live = None
     html = render_page(app._context("live", "Live execution"))
     deck = _deck(html)
-    assert "action='/actions/autopilot-live-start'" not in html
-    assert "Switch the mode to LIVE" in _text(deck)
-    assert "href='/mode'" in deck
-    assert fix_for("not_armed") == ("Arm the plan with the phrase", "/live#plan")
+    assert "action='/actions/ax-scalper-live-start'" not in html
+    assert "No REAL-only AX-SCALPER runner is wired" in _text(deck)
+    assert "ax-scalper-live" in deck
 
 
-def test_the_one_shot_bridge_is_labelled_and_is_not_the_deck(live_app):
+def test_old_demo_and_one_shot_entry_forms_are_not_rendered(live_app):
     html = render_page(live_app._context("live", "Live execution"))
-    deck = _deck(html)
-    one_shot = html[html.index("id='one-shot'") : html.index("id='last-path'") if "id='last-path'" in html else None]
-
-    assert "Guarded AX-SCALPER one-shot LIVE intent (not continuous)" in deck or True
-    # The deck is the continuous session, never the one-shot bridge.
-    assert "Continuous LIVE Autopilot" in _text(deck)
-    assert "one-shot" in _text(deck).lower()
-    assert "ONE-SHOT" in one_shot
-    assert "not continuous" in one_shot
-    assert "Nothing here loops" in one_shot
-    # The one-shot is below the continuous deck, not inside it.
-    assert html.index("id='continuous'") < html.index("id='one-shot'")
+    assert "Autonomous scalping" in _text(html)
+    for action in ("demo-test-submit", "scalper-live-submit", "scalper-live-arm"):
+        assert f"action='/actions/{action}'" not in html
 
 
 # ------------------------------------------------------------ the lanes
@@ -318,9 +330,9 @@ def test_without_an_admitted_candidate_there_is_no_submit_control(live_app):
 
     html = render_page(live_app._context("live", "Live execution"))
     text = _text(html)
-    assert "Bridge unavailable" in text
-    assert "PAPER results cannot authorise LIVE trading" in text
+    assert "REAL-only AX-SCALPER runner" in text or "REAL ONLY" in text
     assert "action='/actions/scalper-live-submit'" not in html
+    assert "action='/actions/ax-scalper-live-start'" not in html
 
 
 # --------------------------------------------------------- accessibility
@@ -328,7 +340,6 @@ def test_the_decks_landmarks_and_controls_are_labelled(live_app, paper_app):
     class Audit:
         def __init__(self) -> None:
             self.buttons: list[tuple[str, str]] = []
-            self.asides = 0
             self.h2 = 0
 
     for app, page, title in (
@@ -344,9 +355,8 @@ def test_the_decks_landmarks_and_controls_are_labelled(live_app, paper_app):
         for button in re.findall(r"<button[^>]*>(.*?)</button>", deck, re.S):
             label = re.sub(r"<[^>]+>", "", button).strip()
             assert label, "a deck button has no accessible name"
-        # The aside is a landmark, not a decorated div.
-        assert "<aside class='col col--aside'" in html
         assert html.count("<h1>") == 1
+        assert "<main class='shell' id='main'" in html
 
 
 def test_the_deck_survives_a_keyboard_and_a_screen_reader(paper_app):

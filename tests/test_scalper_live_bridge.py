@@ -629,34 +629,34 @@ class FakeLiveWithBridge:
         return "account-1"
 
 
-def test_guarded_live_actions_dispatch_to_bridge_and_live_page_renders_card():
+def test_scalper_only_page_hides_the_old_one_shot_entry_surface():
     from tests.test_workstation_ui import app_for, live_wizard
 
     app = app_for(live_wizard())
     bridge = FakeBridge()
     app.live = FakeLiveWithBridge(bridge)
     html = app.page("/live")[1]
-    assert "Guarded AX-SCALPER one-shot LIVE intent" in html
+    assert "Autonomous scalping" in html
     for action in ("scalper-live-register", "scalper-live-review",
                    "scalper-live-approve", "scalper-live-arm",
-                   "scalper-live-submit", "scalper-live-reconcile"):
-        assert f"/actions/{action}" in html
-    assert "One-shot submission BLOCKED" in html
+                   "scalper-live-submit"):
+        assert f"/actions/{action}" not in html
+    assert "one-shot LIVE" not in html
 
-    status, path, _ = app.act("scalper-live-register", {
+    status, path, message = app.act("scalper-live-register", {
         "nonce": [app.nonce], "intent_json": ["{\"schema\":\"v3\"}"],
     })
-    assert int(status) == 303
+    assert int(status) == 409
     assert path == "/live"
-    assert bridge.calls == [("register", "{\"schema\":\"v3\"}")]
-    assert "Last guarded AX-SCALPER action" in app.page("/live")[1]
+    assert "one-shot LIVE intent path is disabled" in message
+    assert bridge.calls == []
 
     status, _, message = app.act("scalper-live-register", {
         "nonce": [app.nonce], "password": ["must-not-be-read"],
     })
     assert int(status) == 400
     assert "credential" in message
-    assert bridge.calls == [("register", "{\"schema\":\"v3\"}")]
+    assert bridge.calls == []
 
     status, _, _ = app.act("scalper-live-reconcile", {
         "nonce": [app.nonce], "intent_id": ["intent-1"],
@@ -903,18 +903,26 @@ def test_all_guarded_post_actions_require_nonces_refuse_credentials_and_report_r
         assert "credential" in message
         assert bridge.calls == before
 
-        status, path, _ = app.act(action, {**fields, "nonce": [app.nonce]})
-        assert int(status) == 303, action
-        assert path == "/live"
-        assert bridge.calls[-1] == expected_calls[action], action
+        status, path, message = app.act(action, {**fields, "nonce": [app.nonce]})
+        if action == "scalper-live-reconcile":
+            assert int(status) == 303, action
+            assert path == "/live"
+            assert bridge.calls[-1] == expected_calls[action], action
+        else:
+            assert int(status) == 409, action
+            assert "one-shot LIVE intent path is disabled" in message
+            assert bridge.calls == before
 
     bridge.result = {"ok": False, "reason": "guard_refused",
                      "message": "The exact guard refused this action.", "blockers": []}
     for action, fields in forms.items():
         status, _, message = app.act(action, {**fields, "nonce": [app.nonce]})
-        expected = 303 if action == "scalper-live-submit" else 409
+        expected = 409
         assert int(status) == expected, (action, message)
-        assert "guard_refused" in message or "reconciled" not in message
+        if action == "scalper-live-reconcile":
+            assert "guard_refused" in message
+        else:
+            assert "one-shot LIVE intent path is disabled" in message
 
 
 def test_view_never_prepares_or_releases_an_owner_thread_stack(world):

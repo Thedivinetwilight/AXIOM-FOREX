@@ -466,20 +466,15 @@ def test_no_paper_page_offers_the_demo_test():
     assert "SEND ONE DEMO ORDER" not in html
 
 
-def test_the_live_page_draws_the_demo_test_as_a_smoke_test():
+def test_the_live_page_does_not_offer_a_demo_order_smoke_test():
     from axiom_forex.workstation.app import WorkstationApp
 
     app = WorkstationApp(wizard=simulated_wizard())
     html = render_page(app._context("live", "Live execution"))
-    assert "demo-test-submit" in html or "DEMO execution test" in html
-    text = html.replace("\n", " ")
-    assert "Execution smoke test" in text
-    assert "<strong>not</strong> a strategy" in text
-    assert "no evidence at all about profitability" in text
-    # With no adapter in this window the section says exactly that, and offers
-    # no form at all: there is nothing here that could send.
-    assert "No demo test can be built here" in text
+    assert "Autonomous scalping" in html
+    assert "REAL ONLY" in html
     assert "action='/actions/demo-test-submit'" not in html
+    assert "DEMO execution test" not in html
 
 
 # -- 7. the route -----------------------------------------------------------
@@ -492,12 +487,12 @@ def test_the_demo_test_route_refuses_when_no_adapter_is_wired():
 
     app = WorkstationApp(wizard=simulated_wizard())
     status, path, message = app._dispatch("demo-test-submit", {})
-    assert status == HTTPStatus.BAD_REQUEST
+    assert status == HTTPStatus.CONFLICT
     assert path == "/live"
-    assert "no demo test order was built or sent" in message
+    assert "DEMO trading is disabled" in message
 
 
-def test_the_demo_test_route_hands_the_form_to_the_controller(rig):
+def test_the_demo_test_route_refuses_without_calling_the_controller(rig):
     from http import HTTPStatus
     from types import SimpleNamespace
 
@@ -509,15 +504,11 @@ def test_the_demo_test_route_hands_the_form_to_the_controller(rig):
     form = {name: [item] for name, item in values(rig).items()}
     form["nonce"] = [app.nonce]
     status, path, message = app._dispatch("demo-test-submit", form)
-    assert status == HTTPStatus.SEE_OTHER
+    assert status == HTTPStatus.CONFLICT
     assert path == "/live"
-    assert "DEMO execution test" in message
-    assert len(rig["fake"].send_requests) == 1
-    # The answer is kept for exactly one render, and it never keeps the phrase.
-    assert app.demo_test_result["status"] == "FILLED"
-    assert "confirmation" not in app.demo_test_result["values"]
-    assert app.demo_test_result == {} or app.demo_test_view()["result"]
-    assert app.demo_test_result == {}  # consumed by the read above
+    assert "DEMO trading is disabled" in message
+    assert len(rig["fake"].send_requests) == 0
+    assert app.demo_test_result == {}
 
 
 def test_the_demo_test_form_is_drawn_only_when_there_is_an_adapter():

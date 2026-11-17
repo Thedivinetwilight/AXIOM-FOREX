@@ -246,10 +246,11 @@ def test_a_blocked_bridge_shows_the_reason_and_offers_no_start(tmp_path):
     html = _page(app)
     text = _text(html)
 
-    assert "Taking this to LIVE: what is missing" in text
-    assert "Start is disabled" in text
+    assert "PAPER COMMAND CENTER" in text
+    assert "LIVE review and arming are on /live" in text
+    # The page may report the older bridge's refusal, but it offers no
+    # competing LIVE start control.
     assert "mode_not_live" in text
-    assert "Start the live session" not in text
     assert "action='/actions/autopilot-live-start'" not in html
     assert "SENDING REAL ORDERS" not in text
 
@@ -260,11 +261,12 @@ def test_a_ready_bridge_offers_the_start_on_the_live_page(tmp_path):
     html = _live_page(app)
     text = _text(html)
 
-    assert "action='/actions/autopilot-live-start'" in html
-    assert "Continuous LIVE Autopilot" in text
-    assert "not sending" in text
-    assert "unresolved-order lockout" in text
-    assert "Plan matches the selection yes" in text
+    assert "Autonomous scalping" in text
+    assert "REAL ONLY" in text
+    # The old bar-based bridge does not authorize this separate scalper lane.
+    assert "action='/actions/autopilot-live-start'" not in html
+    assert "action='/actions/ax-scalper-live-start'" not in html
+    assert "No REAL-only AX-SCALPER runner" in text or "not wired" in text
 
 
 def test_the_paper_page_hands_the_live_session_over_instead_of_starting_it(tmp_path):
@@ -276,8 +278,9 @@ def test_the_paper_page_hands_the_live_session_over_instead_of_starting_it(tmp_p
     # One control location: the paper page reports and links, it does not start.
     assert "action='/actions/autopilot-live-start'" not in html
     assert "action='/actions/autopilot-live-stop'" not in html
-    assert "href='/live#continuous'" in html
-    assert "This page never starts a live session" in text
+    assert "href='/live#ax-scalper-live'" in html
+    assert "PAPER COMMAND CENTER" in text
+    assert "action='/actions/autopilot-live-start'" not in html
 
 
 def test_a_running_bridge_shows_the_stop_the_history_and_the_timings(tmp_path):
@@ -290,13 +293,12 @@ def test_a_running_bridge_shows_the_stop_the_history_and_the_timings(tmp_path):
     html = _live_page(app)
     text = _text(html)
 
+    # A running legacy session remains visible and stoppable. It never exposes
+    # that bridge as the new AX-SCALPER runner or another entry control.
+    assert "Other LIVE session already active" in text
     assert "action='/actions/autopilot-live-stop'" in html
-    assert "SENDING REAL ORDERS" in text
-    assert "req-1" in text
-    assert "Orders the live path recorded" in text
-    assert "Measured latency" in text
-    assert "not a promise about execution speed" in text
-    assert "session_feed" in text
+    assert "action='/actions/ax-scalper-live-start'" not in html
+    assert "SENDING REAL ORDERS" not in text
 
 
 def test_the_live_start_action_reports_the_first_blocker(tmp_path):
@@ -306,8 +308,8 @@ def test_the_live_start_action_reports_the_first_blocker(tmp_path):
     status, redirect, message = app.act("autopilot-live-start", {"nonce": [app.nonce]})
 
     assert int(status) == HTTPStatus.CONFLICT
-    assert redirect == "/autopilot"
-    assert "paper test" in message
+    assert redirect == "/live"
+    assert "older bar-based LIVE start is disabled" in message
 
 
 def test_the_live_start_action_without_a_bridge_says_so(tmp_path):
@@ -317,7 +319,7 @@ def test_the_live_start_action_without_a_bridge_says_so(tmp_path):
     status, _redirect, message = app.act("autopilot-live-start", {"nonce": [app.nonce]})
 
     assert int(status) == HTTPStatus.CONFLICT
-    assert "no live bridge" in message
+    assert "older bar-based LIVE start is disabled" in message
 
 
 def test_the_live_actions_go_through_the_page_and_report_back(tmp_path):
@@ -326,15 +328,13 @@ def test_the_live_actions_go_through_the_page_and_report_back(tmp_path):
     app.autopilot_live = pilot
 
     status, redirect, _message = app.act("autopilot-live-start", {"nonce": [app.nonce]})
-    assert int(status) == HTTPStatus.SEE_OTHER
-    assert redirect == "/autopilot"
-    assert pilot.state == "RUNNING"
-    assert "The live path says" in _text(_page(app))
+    assert int(status) == HTTPStatus.CONFLICT
+    assert redirect == "/live"
+    assert pilot._trading.started == 0
 
     status, redirect, _message = app.act("autopilot-live-stop", {"nonce": [app.nonce]})
     assert int(status) == HTTPStatus.SEE_OTHER
-    assert pilot.state == "STOPPED"
-    assert "Stopped and disarmed" in _text(_page(app))
+    assert pilot.status()["state"] == "STOPPED"
 
 
 def test_a_stale_live_form_is_refused_like_every_other_action(tmp_path):
@@ -364,5 +364,6 @@ def test_a_session_started_on_the_live_page_is_shown_not_restarted(tmp_path):
 
     # The same session, started from /live, is visible there and can be stopped.
     assert pilot.trading.started == 0
+    assert "Other LIVE session already active" in _text(html)
     assert "action='/actions/autopilot-live-stop'" in html
-    assert "SENDING REAL ORDERS" in _text(html)
+    assert "SENDING REAL ORDERS" not in _text(html)

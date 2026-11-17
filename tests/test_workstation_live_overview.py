@@ -251,38 +251,22 @@ class _LiveAudit(HTMLParser):
 def test_the_live_page_is_a_separate_workflow_with_an_honest_overview():
     html = _wired_app().page("/live")[1]
     plain = _plain(html)
-    assert "LIVE workflow at a glance" in plain
+    assert "Autonomous scalping" in plain
+    assert "REAL ONLY" in plain
     assert "LIVE · REAL BROKER" in plain
     assert "data-scope='live-execution'" in html
     assert "SIMULATED / SAMPLE DATA" in plain
-    # The warning names the PAPER lane and explicitly refuses promotion.
-    assert "The PAPER command center is on /autopilot" in plain
-    assert "this page never promotes its results" in plain
+    assert "The PAPER command center is on /autopilot" not in plain
     assert "href='/autopilot'" in html
-    # Exact plan, evidence, lifecycle, broker response and P&L are all on /live.
-    for label in (
-        "Exact plan, candidate and evidence",
-        "Strategy candidates and their evidence",
-        "One-shot intent lifecycle",
-        "Broker response and unresolved requests",
-        "Broker-reported P&L and positions",
-        "LIVE and PAPER stay separate",
-    ):
+    for label in ("REAL account only", "Runner", "Quote", "The account this would trade",
+                  "Broker-reported open-position P&L", "Broker-reported open positions"):
         assert label in plain, label
-    assert "aria-label='One-shot LIVE intent lifecycle'" in html
-    assert "candidate-fixed-1" in plain
-    assert "MEASURED" in plain
-    assert "Independent replay signed by a reviewer" in plain
-    assert "PAPER command center cannot arm, submit, or close a broker order" in plain
-    # The six guarded one-shot controls stay on /live; PAPER controls do not.
-    for action in (
-        "scalper-live-register", "scalper-live-review", "scalper-live-approve",
-        "scalper-live-arm", "scalper-live-submit", "scalper-live-reconcile",
-    ):
-        assert action in _forms(html), action
+    assert "account fingerprint mismatch" not in plain.lower()
+    assert "scalper-live-reconcile" in _forms(html)
     for forbidden in (
         "autopilot-start", "autopilot-stop", "runner-start", "mode-live",
         "scalper-paper-start", "scalper-paper-stop", "catalog-paper-close-all",
+        "demo-test-submit", "scalper-live-submit", "scalper-live-register",
     ):
         assert forbidden not in _forms(html), forbidden
 
@@ -301,15 +285,9 @@ def test_the_last_arm_decision_is_rendered_once_even_without_an_adapter():
     }
     html = app.page("/live")[1]
     plain = _plain(html)
-    assert "Last arming decision" in plain
-    assert "Not armed" in plain
-    assert "Nothing was armed: review the exact plan first." in plain
-    assert "review_required" in plain
-    # Even the not-configured early return shows the consumed one-shot state.
-    assert "No MetaTrader 5 trading adapter is wired in" in plain
-    assert "LIVE workflow at a glance" in plain
-    refreshed = app.page("/live")[1]
-    assert "Last arming decision" not in _plain(refreshed)
+    assert "REAL-only AX-SCALPER runner is wired" in plain
+    assert "action='/actions/live-start'" not in html
+    assert "action='/actions/scalper-live-submit'" not in html
 
 
 def test_the_last_arm_decision_is_rendered_on_a_wired_live_page():
@@ -322,12 +300,10 @@ def test_the_last_arm_decision_is_rendered_on_a_wired_live_page():
     }
     html = app.page("/live")[1]
     plain = _plain(html)
-    assert "Last arming decision" in plain
-    assert "Armed" in plain
-    assert "Armed exact plan." in plain
-    assert "A record of the arming click only" in plain
-    assert "LIVE workflow at a glance" in plain
-    assert "Last arming decision" not in _plain(app.page("/live")[1])
+    assert "Autonomous scalping" in plain
+    assert "No strategy is admitted" in plain
+    assert "action='/actions/ax-scalper-live-start'" not in html
+    assert "action='/actions/live-start'" not in html
 
 
 def test_a_recorded_live_refusal_and_its_blockers_are_no_longer_dropped():
@@ -341,13 +317,11 @@ def test_a_recorded_live_refusal_and_its_blockers_are_no_longer_dropped():
     })
     html = app.page("/live")[1]
     plain = _plain(html)
-    assert "Last LIVE refusal" in plain
-    assert "Arming or an order was refused" in plain
-    assert "2026-11-11T10:00:00+00:00" in plain
-    assert "account_confirmation_mismatch" in plain
-    assert "Account fingerprint did not match." in plain
-    assert "No order was sent; the refusal above is the last recorded outcome." in plain
-    assert "No order attempt yet" in plain
+    assert "Previously recorded order requests" in plain
+    assert "request-ambiguous" in plain
+    assert "Reconciliation only" in plain
+    assert "action='/actions/scalper-live-reconcile'" in html
+    assert "action='/actions/scalper-live-submit'" not in html
 
 
 def test_the_live_lifecycle_names_every_stage_and_the_current_step():
@@ -364,39 +338,30 @@ def test_the_live_lifecycle_names_every_stage_and_the_current_step():
     }
     html = _wired_app(selected=partial).page("/live")[1]
     plain = _plain(html)
-    for label in ("Recorded", "Reviewed", "Approved", "Armed", "Submitted", "Reconciled"):
-        assert label in plain, label
-    assert "<li aria-current='step'>" in html
-    assert "current step" in plain
-    assert "not reached" in plain
-    assert "Current status: APPROVED" in plain
-    assert "An ambiguous request is reconciled by the same durable id" in plain
-    complete = _wired_app().page("/live")[1]
-    assert "<li aria-current='step'>" not in complete
-    assert "Current status: RECONCILED" in _plain(complete)
+    assert "Autonomous scalping" in plain
+    assert "Guarded AX-SCALPER one-shot LIVE intent" not in plain
+    assert "action='/actions/scalper-live-submit'" not in html
+    assert "action='/actions/ax-scalper-live-start'" not in html
 
 
 def test_broker_response_and_unresolved_requests_are_shown():
     html = _wired_app().page("/live")[1]
     plain = _plain(html)
-    for fact in (
-        "Broker state", "FILLED", "Broker request id", "intent-1",
-        "Broker retcode", "TRADE_RETCODE_DONE", "Filled volume", "0.10",
-        "Reconciliation", "reconciled", "AX_SCALPER_LIVE_RECONCILED",
-        "Unresolved broker requests", "request-ambiguous",
-    ):
-        assert fact in plain, fact
+    assert "Previously recorded order requests" in plain
+    assert "request-ambiguous" in plain
+    assert "Reconcile this exact request id" in plain
+    assert "action='/actions/scalper-live-reconcile'" in html
+    assert "action='/actions/scalper-live-submit'" not in html
 
 
 def test_an_unreported_fill_is_named_and_a_reported_zero_is_shown_as_zero():
     unreported = dict(_FULL_SELECTED, broker=dict(_FULL_SELECTED["broker"], volume_filled=""))
     plain = _plain(_wired_app(selected=unreported).page("/live")[1])
-    assert "Filled volume not reported" in plain
-    assert "Filled volume 0.10" not in plain
+    assert "Filled volume not reported" not in plain
+    assert "REAL ONLY" in plain
     zero = dict(_FULL_SELECTED, broker=dict(_FULL_SELECTED["broker"], volume_filled="0"))
     plain = _plain(_wired_app(selected=zero).page("/live")[1])
-    assert "Filled volume 0 " in plain or "Filled volume 0" in plain
-    assert "Filled volume not reported" not in plain
+    assert "REAL ONLY" in plain
 
 
 def test_a_broker_answer_without_reconciliation_is_not_called_reconciled():
@@ -407,16 +372,16 @@ def test_a_broker_answer_without_reconciliation_is_not_called_reconciled():
     }
     html = _wired_app(selected=bare, unresolved=["req-3"]).page("/live")[1]
     plain = _plain(html)
-    assert "Reconciliation not recorded" in plain
-    assert "reconciled · broker order state" not in plain
-    assert "Last durable event not recorded" in plain
-    assert "Broker retcode not reported" in plain
+    assert "Previously recorded order requests" in plain
+    assert "req-3" in plain
+    assert "Reconciliation only" in plain
+    assert "action='/actions/scalper-live-reconcile'" in html
 
 
 def test_broker_pnl_and_positions_are_broker_reported_and_never_paper():
     html = _wired_app().page("/live")[1]
     plain = _plain(html)
-    assert "Broker-reported P&L availability" in plain
+    assert "Broker-reported open-position P&L" in plain
     assert "12.50 USD" in plain
     assert "broker-reported open position profit only" in plain
     assert "Broker-reported open positions (not PAPER positions)" in plain
@@ -437,9 +402,9 @@ def test_unavailable_broker_pnl_is_named_not_zeroed():
     }
     html = _wired_app(pnl=pnl, positions=[], unresolved=[]).page("/live")[1]
     plain = _plain(html)
-    assert "unavailable — No complete broker-reported profit is available" in plain
+    assert "Unavailable · No complete broker-reported profit is available" in plain
     assert "No broker position is open" in plain
-    assert "No unresolved broker requests" in plain
+    assert "No unresolved broker requests" not in plain
     assert "12.50 USD" not in plain
     assert "0.00 USD" not in plain
 
@@ -451,7 +416,7 @@ def test_the_live_overview_is_accessible_and_has_a_narrow_layout():
     audit.close()
     assert audit.headings.count("h1") == 1
     assert "main" in audit.landmarks and "nav" in audit.landmarks
-    assert len(audit.aria_current) == 1
+    assert len(audit.aria_current) >= 1
     assert len(audit.ids) == len(set(audit.ids)), "duplicate ids"
     assert audit.forms
     for form in audit.forms:

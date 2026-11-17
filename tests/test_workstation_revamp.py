@@ -1186,7 +1186,7 @@ def test_a_stopped_autopilot_says_where_the_blocker_is_cleared(tmp_path):
     assert "Connect the terminal" in text
     assert "href='/setup'" in html
     for href in re.findall(r"href='(/[^']*)'", html):
-        assert href.split("?")[0] in GET_ROUTES, href
+        assert href.split("#", 1)[0].split("?", 1)[0] in GET_ROUTES, href
 
 
 def test_the_autopilot_offers_the_pairs_the_terminal_verified(tmp_path):
@@ -1246,7 +1246,7 @@ def test_the_live_banner_says_a_state_and_not_a_colour(tmp_path):
     text = _text(html)
 
     assert "No real order can be sent right now" in text
-    assert "Not sending" in text
+    assert "Runner" in text
     # The bare tone word is gone; the dot carries the tone, the word carries the answer.
     assert ">ok</span>" not in html
     assert ">warn</span>" not in html

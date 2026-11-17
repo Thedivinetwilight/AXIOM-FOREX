@@ -1,118 +1,83 @@
-# AX-SCALPER on a real account: what is built, and what still blocks it
+# AX-SCALPER LIVE workstation lane
 
-This note records the increment that put AX-SCALPER on a verified **real-money**
-account, and — just as importantly — what it does **not** yet do. Nothing here is
-a claim of readiness, profitability, or admitted evidence.
+The continuous REAL-only AX-SCALPER runner is wired into `/live`. It uses the
+existing guarded MT5 adapter and order route. The controls do not connect,
+switch accounts, or send on page load. Nothing here claims profitability or
+that a strategy has been admitted.
 
-## The path, end to end
+## Guarded path
 
-```
-Connect (operator, explicit)
-   └─ MT5Terminal / MT5TradingAdapter            account_info() says REAL? server? login?
-        └─ scalper.live_account.verify_real_account   ← the gate this increment added
-             └─ LiveLeg.blockers()                     ← re-run before every submission
-                  └─ AutonomousScalper.on_tick()      ← one decision per validated quote
-                       ├─ TickCore.ingest             freshness, spread, gap, sequence
-                       ├─ AdmittedStrategy.evaluate   the ONE admitted strategy
-                       ├─ Guardian.evaluate           declared limits, equity, exposure
-                       ├─ size from risk fraction     clamped to the broker's grid
-                       └─ Trader.execute              submit once, then verify protection
-                            └─ BrokerVenue.submit     ← implements the scalper's venue protocol
-                                 └─ LiveLeg.execute   ← existing: blockers → gate → router
-                                      └─ MT5TradingAdapter.submit
-                                           write-ahead → order_check → order_send
-                   └─ PositionBook.on_tick            stop / target / time exits
-                        └─ BrokerVenue.close          ← the same leg, a close intent
-                   └─ BrokerVenue.query               ← the durable record, never a re-send
+```text
+explicit Connect on Setup
+  -> already-connected MT5 observation session
+  -> verified REAL account and exact local account binding
+  -> signed admission policy and independent raw replay
+  -> operator Arm and Start on /live
+  -> fresh quote validation and one admitted strategy
+  -> Guardian limits and broker-grid sizing
+  -> Trader -> BrokerVenue -> LiveLeg -> ExecutionRouter -> MT5TradingAdapter
+  -> broker read-back for entry protection
+  -> persisted position management, exits and exact-id reconciliation
 ```
 
-There is exactly one order route. `BrokerVenue` imports nothing from
-`axiom_forex.brokers.mt5`, holds no adapter, and cannot send what `LiveLeg`
-would not send.
+`BrokerVenue` implements the scalper venue protocol but holds no adapter. There
+is no direct order-send path in the workstation UI. `LiveLeg` and the adapter
+re-check REAL account identity, LIVE mode, arming, evidence lifecycle, symbol
+terms, unresolved work, volume grid, margin, quote age and protection before a
+submission. PAPER has no adapter and its local capital is never used by this
+LIVE lane.
 
-## What the real-account check does
+## What Arm and Start require
 
-`verify_real_account(status, expected)` reads the adapter's own report and asks:
+Arm is refused unless all these checks pass at the time of the action:
 
-| Question | Refusal reason |
-| --- | --- |
-| Is the terminal connected? | `mt5_not_connected` |
-| Did it confirm the account type at all? | `account_mode_not_confirmed` |
-| Is it REAL (not DEMO, not CONTEST, not unclassified)? | `real_account_required` / `account_mode_unknown` |
-| Is it the declared server? | `account_server_mismatch` |
-| Is it the declared login? (checked through the one-way fingerprint, because the adapter redacts logins) | `account_login_mismatch` |
-| Is it the declared fingerprint / currency? | `account_fingerprint_mismatch` / `account_currency_mismatch` |
+* MT5 is explicitly connected and positively reports `REAL`.
+* The local server, login fingerprint and currency exactly match MT5.
+* Execution mode is confirmed `LIVE`, and the shared adapter is available and
+  not held by another LIVE workflow.
+* The local LIVE settings parse against the terminal's exact, tradable Forex
+  symbol and broker-reported instrument terms.
+* Costs, margin and every required risk limit are explicitly declared.
+* A strategy's signed evidence passes the production independent raw-data
+  replay verifier and the active policy.
+* No unrelated broker position, unresolved order, pending protection change or
+  unsafe stored run state exists.
+* The broker reports a valid protective stop for the exact symbol.
 
-`LiveLeg(require_real_account=True)` runs that verdict inside `blockers()`, which
-every submission runs — so it is checked before **every** order, and a terminal
-that changes account mid-run stops the lane at the next attempt. AXIOM never
-switches accounts and never reconnects silently.
+Arm requires the account fingerprint and `ARM AX-SCALPER LIVE`. It sends no
+order. Start separately requires the same candidate and fingerprint plus
+`START AX-SCALPER LIVE`; it rechecks account, evidence, risk, recovery and mode.
+The host reads current balance and equity from the adapter; it does not derive
+capital from PAPER or copy account values into configuration.
 
-## What the autonomous run does
+## Stop, unknown outcomes and restart
 
-* **Arm** is refused without an admitted strategy, a verified REAL account,
-  confirmed LIVE mode, an armed adapter and a clean reconciliation.
-* **Start** begins entry decisions; **pause** stops them and keeps management;
-  **stop** stops entries, and reports the open positions at the broker without
-  closing anything unless the operator asks (`flatten`).
-* A versioned `JsonRunStateStore` uses atomic replacement plus file and
-  directory `fsync`. The run persists admission/config identity, guardian
-  observations and exposure, lifecycle counters, the complete PositionBook
-  (including partial exits and pending close/protection state), and any entry
-  intent. Live readiness refuses a missing or failed durable store.
-* Entry intents are fsynced before submission. A restart queries that exact
-  request id; a confirmed fill is adopted using its actual ticket, size, price
-  and protection terms, while an unknown outcome stays blocked and is never
-  resubmitted.
-* Close intents are likewise fsynced with a unique request id before the live
-  venue is called. An unknown close survives restart and can only be resolved
-  from that exact durable fill; broker position changes alone do not book a
-  close.
-* **Recovery** either restores the exact account, symbol/instrument terms,
-  strategy evidence, risk policy, durable entry fills, guardian state and full
-  position-management state, then verifies broker tickets, volumes, entry
-  prices, stops and targets; or leaves the run in `RECOVERY_REQUIRED`. It does
-  not adopt a partial or mismatched snapshot.
+Stop disables new entries but does not close broker positions. While the
+workstation is running, the owner thread continues to manage the exact open
+positions using fresh quotes and verified broker protections. If an entry or
+close result is unknown, the request stays latched and can only be reconciled by
+its original durable request id; it is never re-sent.
 
-## What is **not** built yet (and blocks a live run)
+Run state is written atomically and flushed to disk before a broker mutation.
+Recovery must match the exact account, strategy evidence, instrument, settings,
+guardian history, request ids and broker positions/protection. Missing or
+mismatched fields leave the book blocked. Shutdown stops entries, disarms and
+preserves run state; it never flattens. Once the process exits, only broker-side
+protection remains active until exact recovery resumes local management.
 
-1. **No admitted AX-SCALPER candidate exists.** The run refuses to arm without
-   one (`no_admitted_candidate`). Submission therefore stays blocked on a real
-   account, exactly as the admission policy requires. Nothing in this increment
-   fabricates evidence, costs, limits or a candidate.
-2. **The run is not yet wired into the workstation.** There is no Start/Stop
-   control on `/live` for it, no assembly in `build_live_workflow`, and no
-   background pump thread: `AutonomousScalper.on_tick` is driven by its caller.
-   The existing `/live` page and its actions are unchanged, so nothing in the UI
-   claims this lane is running.
-3. **Existing-position SL/TP changes use the guarded route.** `PositionBook`
-   writes the exact stop/target intent durably before calling `BrokerVenue`,
-   which resolves one exact ticket and dispatches through `LiveLeg` blockers,
-   LIVE confirmation, the router and the account-bound MT5 adapter. A broker
-   retcode is not confirmation: both requested protection fields must be read
-   back from that ticket, and the confirmed result is durably committed. An
-   unknown outcome remains pending and non-resendable; restart recovery accepts
-   only the exact ticket/size/entry/stop/target state. This internal route is not
-   wired to a workstation control.
-4. **Booking a fill back into the managed book** depends on the broker naming
-   the ticket; when it cannot (the fake terminal's record does not), the trader
-   reports `protective_orders_not_verified` and the existing guard refuses
-   further entries. That is fail-closed, and the test asserts it explicitly.
-5. **Windows / MT5 have not been exercised.** No terminal, account or order was
-   touched during this work; every test runs on `tests.fake_mt5.FakeMT5`.
+The workstation also leaves a reconciliation-only control for exact unresolved
+requests from the previous one-shot bridge. New one-shot and DEMO entry forms
+are disabled.
 
-## Tests
+## What is still required before it can place a trade
 
-The fake-terminal suite covers REAL-account verdicts without contacting a
-broker; guarded LIVE mode/arming/account gates; action-specific SLTP handling;
-exact-position identity; read-back-only confirmation of both fields; failure
-before durable pre-send intent; post-send ambiguity and idempotency; restart
-reconciliation for stop and target changes; and shutdown without implicit
-flattening. See `tests/test_mt5_adapter.py`,
-`tests/test_scalper_execution_positions.py`, and
-`tests/test_scalper_live_autonomous.py`.
+No genuine candidate is established as admitted in this checkout. Test
+fixtures, sample data and PAPER results are not strategy evidence. The current
+terminal is reported as DEMO, which this lane rejects. A real Windows/MT5
+machine must also verify the launcher, account identity, broker symbol and
+volume terms, protective stop read-back, entry/close outcomes, restart recovery
+and operator stop behavior. Until those items pass, the build can show the
+workflow and its blockers, but a live start must remain refused.
 
-PAPER remains isolated from the live lane. `PaperVenue` now tracks its own
-open volume so a simulated partial close preserves the remaining position's
-protection, and the trader still refuses a live venue unless the caller
-explicitly opts in *and* the venue declares `live_execution`.
+For the exact local LIVE JSON template, accepted field values, units and safe
+Windows setup, see `SCALPER_LIVE_WORKSTATION.md`.

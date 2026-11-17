@@ -58,6 +58,7 @@ MODIFICATION_UNSUPPORTED = "venue_modification_unsupported"
 NOT_AN_ENTRY = "venue_not_an_entry"
 CLOSE_QUOTE_REQUIRED = "venue_close_quote_required"
 CLOSE_OUTCOME_UNCONFIRMED = "venue_close_outcome_unconfirmed"
+STRATEGY_STOP_NOT_ALIGNED = "strategy_stop_not_aligned_with_broker_protection"
 
 
 def _d(value: Any) -> Decimal:
@@ -103,6 +104,7 @@ class BrokerVenue:
         position_reader: Callable[[], list[dict[str, Any]]] | None = None,
         clock_ms: Callable[[], int] | None = None,
         symbols: Mapping[str, str] | None = None,
+        stop_requirement: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self.leg = leg
         #: ``(order_or_ticket, quote) -> plan``.  The caller owns how a scalper
@@ -113,6 +115,10 @@ class BrokerVenue:
         self._clock_ms = clock_ms or (lambda: 0)
         #: scalper symbol -> broker symbol, so a close can name the right position.
         self._symbols = dict(symbols or {})
+        #: Current guarded-adapter stop requirements. A strategy is refused
+        #: before its plan reaches LiveLeg if its risk stop differs from the
+        #: broker-side stop the adapter will actually attach.
+        self._stop_requirement = stop_requirement
         self.record = VenueRecord()
         self._unresolved: set[str] = set()
         self._tickets: dict[str, str] = {}
@@ -224,6 +230,28 @@ class BrokerVenue:
                 "duplicate_request",
                 "this request id already produced an order",
             )
+        if self._stop_requirement is not None:
+            try:
+                requirement = dict(self._stop_requirement() or {})
+                required_points = requirement.get("distance_points")
+                point = _d(order.point)
+                side = str(order.side).upper()
+                reference = _d(quote.ask if side == "BUY" else quote.bid)
+                stop = None if order.stop_price is None else _d(order.stop_price)
+                if (not requirement.get("valid") or isinstance(required_points, bool)
+                        or int(required_points) <= 0 or point <= 0 or stop is None):
+                    raise ValueError("broker_stop_unavailable")
+                distance = reference - stop if side == "BUY" else stop - reference
+                strategy_points = distance / point
+                if distance <= 0 or strategy_points != Decimal(int(strategy_points)):
+                    raise ValueError("strategy_stop_not_on_point_grid")
+                if int(strategy_points) != int(required_points):
+                    raise ValueError(
+                        f"strategy declares {int(strategy_points)} points; broker attaches {int(required_points)}"
+                    )
+            except Exception as exc:
+                detail = str(exc) or type(exc).__name__
+                return self._refuse(order, STRATEGY_STOP_NOT_ALIGNED, detail)
         try:
             plan = self._plan_factory(order=order, quote=quote)
         except Exception as exc:
@@ -869,6 +897,7 @@ __all__ = [
     "NOT_AN_ENTRY",
     "CLOSE_QUOTE_REQUIRED",
     "CLOSE_OUTCOME_UNCONFIRMED",
+    "STRATEGY_STOP_NOT_ALIGNED",
 ]
 
 

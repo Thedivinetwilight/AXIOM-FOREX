@@ -235,6 +235,13 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "scalper-live-arm",
         "scalper-live-submit",
         "scalper-live-reconcile",
+        # Continuous AX-SCALPER REAL-account lifecycle. Each command is explicit,
+        # account-bound, and dispatches only to the existing guarded LiveLeg.
+        "ax-scalper-live-arm",
+        "ax-scalper-live-start",
+        "ax-scalper-live-stop",
+        "ax-scalper-live-reconcile",
+        "ax-scalper-live-reconcile-close",
         # The one-shot DEMO execution test: one real order to an account MT5
         # itself reports as DEMO, built from the broker's current terms, through
         # the same guarded live leg every strategy order uses.  It is not a
@@ -699,6 +706,8 @@ class WorkstationApp:
     def live_view(self) -> dict[str, Any]:
         """The live page's whole model.  Reads only, never sends."""
 
+        autonomous = self.scalper_autonomous_view()
+
         # The last arm result used to be written but never read.  It is consumed
         # here so /live has exactly one source for "what did arming decide".
         last_arm = dict(self.live_result)
@@ -722,6 +731,7 @@ class WorkstationApp:
                 "review": {},
                 "scalper_live": {"available": False, "submission_available": False,
                                  "one_shot_submission_available": False, "result": result},
+                "scalper_autonomous": autonomous,
             }
         try:
             view = dict(self.live.view())
@@ -731,6 +741,7 @@ class WorkstationApp:
                 scalper_live["result"] = dict(self.scalper_live_result)
                 self.scalper_live_result = {}
             view["scalper_live"] = scalper_live
+            view["scalper_autonomous"] = autonomous
             # The continuous guarded session is the live workflow's own bridge:
             # its status is read here, on the page an operator looks for it, and
             # it is the same object /autopilot used to host.  Reading it starts
@@ -758,7 +769,25 @@ class WorkstationApp:
                 "positions": [],
                 "scalper_live": {"available": False, "submission_available": False,
                                  "one_shot_submission_available": False},
+                "scalper_autonomous": autonomous,
             }
+
+    def scalper_autonomous_view(self) -> dict[str, Any]:
+        controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
+        if controller is None:
+            return {"available": False, "state": "UNAVAILABLE",
+                    "reason": "real_only_scalper_runner_unavailable",
+                    "blockers": [{"reason": "real_only_scalper_runner_unavailable",
+                                  "message": "No REAL-only AX-SCALPER runner is wired here.",
+                                  "hint": "Launch the workstation with the explicit MT5/provider setup."}]}
+        try:
+            return dict(controller.view() or {})
+        except Exception as exc:
+            return {"available": True, "state": "UNAVAILABLE",
+                    "reason": "live_scalper_view_unreadable",
+                    "blockers": [{"reason": "live_scalper_view_unreadable",
+                                  "message": f"The autonomous LIVE status could not be read ({type(exc).__name__}).",
+                                  "hint": "Do not arm or start while this status is unavailable."}]}
 
     def connected_account_fingerprint(self) -> str:
         """The account signature of the account in front of the operator right now.
@@ -1243,6 +1272,9 @@ class WorkstationApp:
     def _autopilot_action(
         self, action: str, form: Mapping[str, list[str]]
     ) -> tuple[int, str, str]:
+        if action == "autopilot-live-start":
+            return (HTTPStatus.CONFLICT, "/live",
+                    "The older bar-based LIVE start is disabled in this scalper-only build. Use the REAL-only AX-SCALPER arm and start controls on /live.")
         if self.autopilot is None and action not in {"scalper-paper-start", "scalper-paper-observe", "scalper-paper-stop", "scalper-paper-select-symbol", "scalper-paper-acknowledge-recovery"}:
             return (
                 HTTPStatus.CONFLICT,
@@ -1506,10 +1538,14 @@ class WorkstationApp:
         if action.startswith("kronos-"):
             return self._kronos_action(action, form)
         if action in {"demo-test-submit", "demo-test-reconcile"}:
-            # The one-shot DEMO execution test.  It is dispatched by its own name
-            # so no other action can reach the demo controller by accident.
-            return self._demo_test_action(action, form)
+            return (HTTPStatus.CONFLICT, "/live",
+                    "DEMO trading is disabled in this workstation. Only the explicitly armed REAL-account AX-SCALPER lane is available.")
+        if action.startswith("ax-scalper-live-"):
+            return self._scalper_autonomous_action(action, form)
         if action.startswith("scalper-live-"):
+            if action != "scalper-live-reconcile":
+                return (HTTPStatus.CONFLICT, "/live",
+                        "The one-shot LIVE intent path is disabled in this scalper-only build. Use the continuous REAL-only AX-SCALPER controls on /live; existing requests may still be reconciled by their exact id.")
             return self._scalper_live_action(action, form)
         if action.startswith("autopilot-") or action.startswith("scalper-paper-"):
             return self._autopilot_action(action, form)
@@ -1567,6 +1603,18 @@ class WorkstationApp:
             self._log(f"connect failed: {reason}")
             return HTTPStatus.SEE_OTHER, "/setup", f"Could not connect: {reason}"
         if action == "disconnect":
+            scalper_state = self.scalper_autonomous_view()
+            scalper_positions = list(scalper_state.get("open_positions") or ())
+            if scalper_positions:
+                controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
+                if controller is not None:
+                    controller.stop()
+                return (HTTPStatus.CONFLICT, "/live",
+                        "Disconnect blocked: AX-SCALPER has broker positions under management. Keep MT5 connected and LIVE enabled until those exact positions close or are reconciled. Stop prevents new entries; it does not close positions.")
+            if str(scalper_state.get("state") or "") in {"RUNNING", "PAUSED", "ARMED"}:
+                controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
+                if controller is not None:
+                    controller.stop()
             self._log("disconnect requested")
             if self.scalper_paper is not None:
                 try:
@@ -1602,6 +1650,18 @@ class WorkstationApp:
         if action == "mode-paper":
             if self.mode is None:
                 return HTTPStatus.INTERNAL_SERVER_ERROR, "/mode", "mode controller unavailable"
+            scalper_state = self.scalper_autonomous_view()
+            scalper_positions = list(scalper_state.get("open_positions") or ())
+            if scalper_positions:
+                controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
+                if controller is not None:
+                    controller.stop()
+                return (HTTPStatus.CONFLICT, "/live",
+                        "Switch to PAPER blocked while AX-SCALPER has broker positions under management. Stop has prevented new entries; keep LIVE connected until those positions close or are reconciled.")
+            if str(scalper_state.get("state") or "") in {"RUNNING", "PAUSED", "ARMED"}:
+                controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
+                if controller is not None:
+                    controller.stop()
             # Paper takes effect before anything else happens, so nothing can be
             # authorised in the gap.  Then the live session is stopped and disarmed:
             # simulated fills and real orders must never be one click apart.  No
@@ -1695,6 +1755,9 @@ class WorkstationApp:
             "live-stop",
             "live-stop-settings",
         }:
+            if action in {"live-arm", "live-start"}:
+                return (HTTPStatus.CONFLICT, "/live",
+                        "The manual non-scalper LIVE entry lane is disabled in this scalper-only build. Use AX-SCALPER on /live.")
             return self._live_action(action, form)
         if action in {"imports-refresh", "ticks-convert", "dataset-evaluate"}:
             return self._data_action(action, form)
@@ -1875,7 +1938,47 @@ class WorkstationApp:
         return status, "/live", f"AX-SCALPER LIVE {action}: {reason}. {message}"
 
 
-    # -- the one-shot DEMO execution test ---------------------------------
+    def _scalper_autonomous_action(self, action: str,
+                                   form: Mapping[str, list[str]]) -> tuple[int, str, str]:
+        controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
+        if controller is None:
+            return (HTTPStatus.BAD_REQUEST, "/live",
+                    "No REAL-only AX-SCALPER runner is wired into this workstation. Nothing was armed or started.")
+
+        def field(name: str) -> str:
+            raw = form.get(name)
+            if isinstance(raw, (list, tuple)):
+                raw = raw[0] if raw else ""
+            return str(raw if raw is not None else "").strip()
+
+        try:
+            if action == "ax-scalper-live-arm":
+                outcome = controller.arm(candidate_id=field("candidate_id"),
+                                          confirmation=field("confirmation"),
+                                          account_confirmation=field("account_confirmation"))
+            elif action == "ax-scalper-live-start":
+                outcome = controller.start(candidate_id=field("candidate_id"),
+                                            confirmation=field("confirmation"),
+                                            account_confirmation=field("account_confirmation"))
+            elif action == "ax-scalper-live-stop":
+                outcome = controller.stop()
+            elif action == "ax-scalper-live-reconcile":
+                outcome = controller.reconcile()
+            elif action == "ax-scalper-live-reconcile-close":
+                outcome = controller.reconcile_close(position_id=field("position_id"))
+            else:
+                return HTTPStatus.NOT_FOUND, "/live", "Unknown AX-SCALPER LIVE action."
+        except Exception as exc:
+            outcome = {"ok": False, "reason": type(exc).__name__,
+                       "message": "The guarded AX-SCALPER LIVE action failed. No retry was made."}
+        result = dict(outcome or {})
+        reason = str(result.get("reason") or ("accepted" if result.get("ok") else "refused"))
+        message = str(result.get("message") or reason)
+        self._log(f"AX-SCALPER REAL LIVE {action}: {reason}")
+        status = HTTPStatus.SEE_OTHER if result.get("ok") else HTTPStatus.CONFLICT
+        return status, "/live", f"AX-SCALPER LIVE: {reason}. {message}"
+
+    # -- DEMO execution test is disabled in this LIVE-only workstation ------
     def demo_test_view(self) -> dict[str, Any]:
         """The demo test's own model.  Reads only; sends nothing."""
 
@@ -1988,6 +2091,45 @@ class WorkstationApp:
             if isinstance(raw, (list, tuple)):
                 raw = raw[0] if raw else ""
             return str(raw if raw is not None else "").strip()
+
+        autonomous = self.scalper_autonomous_view()
+        autonomous_controller = getattr(live, "scalper_autonomous", None)
+        autonomous_state = str(autonomous.get("state") or "")
+        autonomous_positions = list(autonomous.get("open_positions") or ())
+        autonomous_reserved = autonomous_state in {
+            "ARMED", "RUNNING", "PAUSED", "RECOVERY_REQUIRED"
+        } or bool(autonomous_positions)
+
+        if action in {"live-arm", "live-start"} and autonomous_reserved:
+            return (
+                HTTPStatus.CONFLICT,
+                "/live",
+                "The AX-SCALPER LIVE lane already holds the adapter reservation. "
+                "Stop it and resolve its managed positions before arming or starting "
+                "the other LIVE strategy session.",
+            )
+
+        if action in {"live-disarm", "live-stop"} and autonomous_reserved:
+            stopped = (
+                dict(autonomous_controller.stop() or {})
+                if autonomous_controller is not None
+                else {"ok": False, "message": "The AX-SCALPER owner is unavailable."}
+            )
+            if autonomous_positions:
+                return (
+                    HTTPStatus.SEE_OTHER if stopped.get("ok") else HTTPStatus.CONFLICT,
+                    "/live",
+                    str(
+                        stopped.get("message")
+                        or "No new AX-SCALPER entries will be sent; managed broker "
+                        "positions remain open."
+                    ),
+                )
+            return (
+                HTTPStatus.SEE_OTHER if stopped.get("ok") else HTTPStatus.CONFLICT,
+                "/live",
+                str(stopped.get("message") or "AX-SCALPER stop was refused."),
+            )
 
         if action == "live-arm":
             values = {

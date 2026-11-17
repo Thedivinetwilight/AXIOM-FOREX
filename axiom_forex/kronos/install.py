@@ -570,7 +570,7 @@ def _extract_official_tree(archive: Path, destination: Path) -> tuple[FileFact, 
             continue
         files.append(
             FileFact(
-                path=str(item.relative_to(destination)),
+                path=item.relative_to(destination).as_posix(),
                 bytes=int(item.stat().st_size),
                 sha256=_sha256_file(item),
             )

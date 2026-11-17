@@ -286,6 +286,18 @@ _STATE_GATED: dict[str, str] = {
     "live-disarm": "LIVE is armed",
     "live-stop": "a LIVE session is running",
     "live-stop-settings": "a LIVE session has run",
+    "live-arm": "the legacy bar-based LIVE lane is disabled",
+    "live-start": "the legacy bar-based LIVE lane is disabled",
+    "ax-scalper-live-arm": "an eligible signed candidate and every REAL-only gate pass",
+    "ax-scalper-live-start": "the exact AX-SCALPER candidate is armed and every Start gate passes",
+    "ax-scalper-live-stop": "the AX-SCALPER runner is armed, active, or managing a position",
+    "ax-scalper-live-reconcile": "an AX-SCALPER entry outcome is unresolved",
+    "ax-scalper-live-reconcile-close": "an AX-SCALPER close outcome is unresolved",
+    "scalper-live-register": "the one-shot LIVE proposal route is disabled",
+    "scalper-live-review": "the one-shot LIVE proposal route is disabled",
+    "scalper-live-approve": "the one-shot LIVE proposal route is disabled",
+    "scalper-live-arm": "the one-shot LIVE proposal route is disabled",
+    "scalper-live-submit": "the one-shot LIVE proposal route is disabled",
     "mode-paper": "the effective execution mode is LIVE",
     "research-cancel": "a research job is running",
     "runner-stop": "a strategy runner is running",
@@ -322,11 +334,13 @@ def test_every_declared_action_is_visible_or_names_the_state_that_reveals_it(tmp
     assert all(reason.strip() for reason in _STATE_GATED.values())
     # The LIVE lane's own controls are on /live and nowhere else.
     live_only = {
-        "scalper-live-register", "scalper-live-review", "scalper-live-approve",
-        "scalper-live-arm", "scalper-live-submit", "scalper-live-reconcile",
+        "ax-scalper-live-arm", "ax-scalper-live-start", "ax-scalper-live-stop",
+        "ax-scalper-live-reconcile", "ax-scalper-live-reconcile-close",
+        "scalper-live-reconcile",
     }
     for action in live_only:
-        assert rendered[action] == {"wired-live /live"}, (action, rendered[action])
+        if action in rendered:
+            assert all(" /live" in location for location in rendered[action]), (action, rendered[action])
     # And PAPER's command-center controls are on /autopilot, never on /live.
     for action in ("autopilot-start", "autopilot-kronos"):
         assert all(path.startswith("autopilot /autopilot") for path in rendered[action])

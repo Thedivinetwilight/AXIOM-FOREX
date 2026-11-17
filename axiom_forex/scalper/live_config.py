@@ -1,4 +1,4 @@
-"""Strict, local configuration for a workstation-connected scalper PAPER desk.
+"""Strict, local configuration for workstation-connected scalper PAPER and LIVE lanes.
 
 No defaults in this module can silently turn an incomplete live setup into a
 trading configuration. Broker instrument facts come from the already-connected
@@ -17,6 +17,7 @@ from axiom_forex.paper_runner.accounting import read_capital
 from .config import CostTerms, InstrumentSpec, ScalperConfig, build_config
 
 SCHEMA = "axiom-scalper-paper-v1"
+LIVE_SCHEMA = "axiom-scalper-live-v1"
 RISK_KEYS = (
     "risk_fraction", "max_loss_per_trade_account", "max_aggregate_risk_fraction",
     "max_leverage", "max_currency_exposure_fraction", "max_correlated_positions",
@@ -37,20 +38,21 @@ def _decimal(value: Any, key: str) -> Decimal:
     try:
         result = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
-        raise LiveScalperConfigError(f"invalid_{key}", f"Set {key} to a finite decimal in the local scalper PAPER settings.") from None
+        raise LiveScalperConfigError(f"invalid_{key}", f"Set {key} to a finite decimal in the local scalper settings.") from None
     if not result.is_finite():
-        raise LiveScalperConfigError(f"invalid_{key}", f"Set {key} to a finite decimal in the local scalper PAPER settings.")
+        raise LiveScalperConfigError(f"invalid_{key}", f"Set {key} to a finite decimal in the local scalper settings.")
     return result
 
 
-def load_live_paper_config(*, session: Any, settings_path: str | Path,
-                           paper_root: str | Path) -> tuple[ScalperConfig, Decimal, str]:
-    """Build from fresh terminal facts and explicit local terms; never connects.
+def load_scalper_config_terms(*, session: Any, settings_path: str | Path,
+                              expected_schema: str = SCHEMA
+                              ) -> tuple[ScalperConfig, str, Mapping[str, Any] | None]:
+    """Parse explicit risk/cost terms against fresh broker facts; never connects.
 
     The JSON document contains ``schema``, exact broker ``symbol``, ``costs``,
     ``risk`` and an explicitly declared per-lot ``margin_rate``. It must not carry
-    account balance or starting capital: capital is read only from AXIOM's existing
-    local paper-capital document.
+    account balance or starting capital. PAPER capital is deliberately handled by
+    the PAPER-only wrapper below; LIVE uses a separate document and account binding.
     """
     path = Path(settings_path)
     if not bool(getattr(session, "connected", False)):
@@ -61,9 +63,12 @@ def load_live_paper_config(*, session: Any, settings_path: str | Path,
         raise LiveScalperConfigError("scalper_settings_missing", f"Create the local settings file at {path}; declare costs and every required risk limit. No values are assumed.") from None
     except (OSError, ValueError) as exc:
         raise LiveScalperConfigError("scalper_settings_unreadable", f"Repair {path} ({type(exc).__name__}); no settings were changed.") from None
-    if not isinstance(payload, Mapping) or payload.get("schema") != SCHEMA:
-        raise LiveScalperConfigError("scalper_settings_schema_invalid", f"Use schema {SCHEMA!r} in {path}.")
-    unknown_top = set(payload) - {"schema", "symbol", "margin_rate", "costs", "risk"}
+    if not isinstance(payload, Mapping) or payload.get("schema") != expected_schema:
+        raise LiveScalperConfigError("scalper_settings_schema_invalid", f"Use schema {expected_schema!r} in {path}.")
+    allowed_top = {"schema", "symbol", "margin_rate", "costs", "risk"}
+    if expected_schema == LIVE_SCHEMA:
+        allowed_top.add("account")
+    unknown_top = set(payload) - allowed_top
     if unknown_top:
         raise LiveScalperConfigError("unknown_scalper_setting", "Remove unsupported setting(s): " + ", ".join(sorted(map(str, unknown_top))))
     symbol = payload.get("symbol")
@@ -93,16 +98,10 @@ def load_live_paper_config(*, session: Any, settings_path: str | Path,
     if not account_currency or len(account_currency) != 3:
         raise LiveScalperConfigError("account_currency_unavailable", "Connect to an account whose currency is reported by the observation session.")
     if quote_currency != account_currency:
-        raise LiveScalperConfigError("conversion_rate_missing", f"The symbol quote currency ({quote_currency or 'unknown'}) differs from paper capital currency ({account_currency}); provide a separately verified conversion feed before using this pair.")
+        raise LiveScalperConfigError("conversion_rate_missing", f"The symbol quote currency ({quote_currency or 'unknown'}) differs from the account currency ({account_currency}); provide a separately verified conversion feed before using this pair.")
     base_currency = str(getattr(broker, "currency_base", "") or "").strip().upper()
     if len(base_currency) != 3 or len(quote_currency) != 3:
         raise LiveScalperConfigError("symbol_currency_facts_missing", "Use a terminal-verified Forex symbol with both currency legs reported.")
-
-    capital = read_capital(paper_root)
-    if not capital.configured:
-        raise LiveScalperConfigError("paper_capital_missing", "Set local simulated capital on the existing Performance page. Broker balance is never used.")
-    if capital.currency != account_currency:
-        raise LiveScalperConfigError("paper_capital_currency_mismatch", f"Set local paper capital in {account_currency}; it must not be copied from broker balance.")
 
     margin_rate = _decimal(payload.get("margin_rate"), "margin_rate")
     if not (Decimal(0) < margin_rate <= Decimal(1)):
@@ -121,7 +120,7 @@ def load_live_paper_config(*, session: Any, settings_path: str | Path,
 
     costs = payload.get("costs")
     if not isinstance(costs, Mapping):
-        raise LiveScalperConfigError("cost_terms_missing", "Declare commission, slippage and financing state in the local scalper PAPER settings.")
+        raise LiveScalperConfigError("cost_terms_missing", "Declare commission, slippage and financing state in the local scalper settings.")
     extra_costs = set(costs) - {"commission_per_lot", "commission_state", "slippage_points", "slippage_state", "swap_state"}
     if extra_costs:
         raise LiveScalperConfigError("unknown_cost_setting", "Remove unsupported cost field(s): " + ", ".join(sorted(map(str, extra_costs))))
@@ -182,4 +181,56 @@ def load_live_paper_config(*, session: Any, settings_path: str | Path,
     except (ValueError, TypeError) as exc:
         reason = str(getattr(exc, "reason", "scalper_config_invalid"))
         raise LiveScalperConfigError(reason, "Correct the local scalper settings using the validation reason; no defaults were substituted.") from None
-    return config, Decimal(capital.amount), account_currency
+    account_document = payload.get("account")
+    if expected_schema == LIVE_SCHEMA:
+        if not isinstance(account_document, Mapping):
+            raise LiveScalperConfigError("live_account_declaration_missing", "Declare the exact REAL account server, login, currency, and fingerprint in the local LIVE settings.")
+        if set(account_document) != {"server", "login", "currency", "fingerprint"}:
+            raise LiveScalperConfigError("live_account_declaration_invalid", "The LIVE account object must contain exactly server, login, currency, and fingerprint.")
+        server = str(account_document.get("server") or "").strip()
+        fingerprint = str(account_document.get("fingerprint") or "").strip()
+        declared_currency = str(account_document.get("currency") or "").strip().upper()
+        login_value = account_document.get("login")
+        try:
+            login = int(login_value)
+        except (TypeError, ValueError):
+            login = 0
+        if (not server or not fingerprint or login <= 0
+                or str(login_value).strip() != str(login)
+                or declared_currency != account_currency):
+            raise LiveScalperConfigError("live_account_declaration_invalid", "Declare a positive exact login, non-empty server and fingerprint, and the terminal-reported account currency.")
+    return config, account_currency, account_document
+
+
+def load_live_paper_config(*, session: Any, settings_path: str | Path,
+                           paper_root: str | Path) -> tuple[ScalperConfig, Decimal, str]:
+    """Load PAPER settings and the separate local simulated starting capital."""
+    config, currency, _account = load_scalper_config_terms(
+        session=session, settings_path=settings_path, expected_schema=SCHEMA
+    )
+    capital = read_capital(paper_root)
+    if not capital.configured:
+        raise LiveScalperConfigError("paper_capital_missing", "Set local simulated capital on the existing Performance page. Broker balance is never used.")
+    if capital.currency != currency:
+        raise LiveScalperConfigError("paper_capital_currency_mismatch", f"Set local paper capital in {currency}; it must not be copied from broker balance.")
+    return config, Decimal(capital.amount), currency
+
+
+def load_live_scalper_config(*, session: Any, settings_path: str | Path):
+    """Load the separate LIVE contract without reading PAPER capital or state."""
+    from .live_account import ExpectedAccount
+
+    config, currency, account = load_scalper_config_terms(
+        session=session, settings_path=settings_path, expected_schema=LIVE_SCHEMA
+    )
+    if not isinstance(account, Mapping):
+        raise LiveScalperConfigError("live_account_declaration_missing", "Declare the exact REAL account in the local LIVE settings.")
+    expected = ExpectedAccount(
+        server=str(account["server"]),
+        login=int(account["login"]),
+        currency=str(account["currency"]),
+        fingerprint=str(account["fingerprint"]),
+    )
+    if not expected.declared:
+        raise LiveScalperConfigError("live_account_declaration_invalid", "Correct the declared REAL account identity in the local LIVE settings.")
+    return config, currency, expected

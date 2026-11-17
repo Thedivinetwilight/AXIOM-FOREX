@@ -47,12 +47,11 @@ from __future__ import annotations
 
 import json
 import ctypes
-import os
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal
-from os import O_RDONLY, close, fdopen, fsync
+from os import O_RDONLY, close, fdopen, fsync, name as os_name
 from os import open as open_file
 from os import replace as replace_file
 from pathlib import Path
@@ -103,6 +102,8 @@ SPEC_UNKNOWN = "instrument_unknown"
 NOT_MANAGEABLE = "protection_not_restorable"
 DURABLE_STATE_REQUIRED = "durable_run_state_required"
 STATE_PERSISTENCE_FAILED = "run_state_persistence_failed"
+ADMISSION_REVOKED = "admission_revoked"
+LIVE_SESSION_CONFLICT = "another_live_session_running"
 RUN_STATE_SCHEMA = "axiom-scalper-live-run-v2"
 
 
@@ -115,7 +116,7 @@ def _fsync_directory(path: Path) -> None:
     run-state durability guarantee on the machine that can actually trade.
     """
 
-    if os.name != "nt":
+    if os_name != "nt":
         directory_fd = open_file(path, O_RDONLY)
         try:
             fsync(directory_fd)
@@ -386,6 +387,32 @@ class AutonomousScalper:
                     ),
                 }
             )
+        if self.approval_active is not None:
+            try:
+                approval_active = bool(self.approval_active())
+            except Exception:
+                approval_active = False
+            if not approval_active:
+                blockers.append(
+                    {
+                        "reason": ADMISSION_REVOKED,
+                        "message": "The signed candidate evidence or its exact LIVE approval changed or is no longer active.",
+                        "hint": "Stop this run, re-evaluate the exact signed evidence and arm it again only if it still passes.",
+                    }
+                )
+        if self.session_running is not None:
+            try:
+                competing_session = bool(self.session_running())
+            except Exception:
+                competing_session = True
+            if competing_session:
+                blockers.append(
+                    {
+                        "reason": LIVE_SESSION_CONFLICT,
+                        "message": "The ordinary LIVE strategy session is already running.",
+                        "hint": "Stop the other LIVE session before selecting the AX-SCALPER lane.",
+                    }
+                )
         verdict = self._account()
         if not verdict.ok:
             blockers.append(
@@ -496,7 +523,7 @@ class AutonomousScalper:
             "pending_closes": list(self.book.pending_closes),
             "pending_protection_modifications": self.book.snapshot()["pending_protection_modifications"],
             "venue": self.venue.stats if hasattr(self.venue, "stats") else {},
-            "order_sending": True,
+            "order_sending": self.state == RUNNING,
             "paper_only": False,
         }
 
@@ -1673,12 +1700,33 @@ class AutonomousScalper:
         source_time: datetime,
         now_ms: int,
         equity: Any = None,
+        balance: Any = None,
     ) -> dict[str, Any]:
         """Feed one quote.  Manages positions always; decides only when RUNNING."""
 
         spec = self.specs.get(symbol)
         if spec is None:
             return self._refuse(SPEC_UNKNOWN, symbol=symbol)
+        # Validate account and mode *before* PositionBook sees the tick.  The
+        # book may submit a close or protection change while managing exposure;
+        # doing that first could address a ticket on a newly selected account.
+        # The host refreshes the connected terminal on its owner thread before
+        # every call here.  A refused identity never reaches management or entry.
+        verdict = self._account()
+        if not verdict.ok:
+            if self.state == RUNNING:
+                self.state = PAUSED
+                self.pause_reason = ACCOUNT_NOT_REAL
+                self._emit("account_lost", detail=verdict.detail)
+                self._persist_state()
+            return self._refuse(ACCOUNT_NOT_REAL, symbol=symbol, detail=verdict.detail)
+        if self._mode_name() != LIVE or not self._live_effective():
+            if self.state == RUNNING:
+                self.state = PAUSED
+                self.pause_reason = MODE_NOT_LIVE
+                self._emit("mode_lost")
+                self._persist_state()
+            return self._refuse(MODE_NOT_LIVE, symbol=symbol)
         accepted = self.core.ingest(
             symbol=symbol,
             bid=bid,
@@ -1694,7 +1742,10 @@ class AutonomousScalper:
         if equity is not None and _d(equity) is not None:
             self._equity = _d(equity)
         self.guardian.observe_account(
-            at_ms=now_ms, equity=self._equity, balance=self._equity, day_key=None
+            at_ms=now_ms,
+            equity=self._equity,
+            balance=self._equity if balance is None else _d(balance),
+            day_key=datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc).date().isoformat(),
         )
 
         closed_before = len(self.book.closed)
@@ -1746,12 +1797,6 @@ class AutonomousScalper:
                 "execution": None,
                 "blocked": "not_running",
             }
-
-        verdict = self._account()
-        if not verdict.ok:
-            self.state = BLOCKED
-            self._emit("account_lost", detail=verdict.detail)
-            return self._refuse(ACCOUNT_NOT_REAL, symbol=symbol, detail=verdict.detail)
 
         blocked = self._entry_block(symbol, now_ms)
         if blocked is not None:

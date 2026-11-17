@@ -39,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+import threading
 from typing import Any, Callable, Mapping, Sequence
 
 from . import live_plan as plans
@@ -110,14 +111,41 @@ class ArmedStrategy:
 
     candidate_id: str = ""
     armed: bool = False
+    _delegated: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    _lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def approve_active(self) -> bool:
         return bool(self.armed and self.candidate_id)
 
     def for_strategy(self, strategy_id: str) -> "ArmedStrategy | None":
-        if not self.candidate_id or str(strategy_id) != self.candidate_id:
-            return None
-        return self
+        selected = str(strategy_id)
+        with self._lock:
+            if self.candidate_id and selected == self.candidate_id:
+                return self
+            return self._delegated.get(selected)
+
+    def register_delegate(self, strategy_id: str, lifecycle: Any) -> None:
+        """Register one independently admitted LIVE lane under its exact id.
+
+        This does not arm the adapter or authorize a caller by itself. The
+        delegated lifecycle must remain active, and the normal mode, account,
+        gate, duplicate, protection, and adapter checks still run for every order.
+        """
+        key = str(strategy_id or "")
+        if not key or lifecycle is None or not callable(getattr(lifecycle, "approve_active", None)):
+            raise ValueError("live_strategy_lifecycle_invalid")
+        with self._lock:
+            existing = self._delegated.get(key)
+            if existing is not None and existing is not lifecycle:
+                raise ValueError("live_strategy_lifecycle_already_registered")
+            self._delegated[key] = lifecycle
+
+    def unregister_delegate(self, strategy_id: str, lifecycle: Any = None) -> None:
+        key = str(strategy_id or "")
+        with self._lock:
+            existing = self._delegated.get(key)
+            if existing is not None and (lifecycle is None or existing is lifecycle):
+                del self._delegated[key]
 
     def audit_view(self) -> dict[str, Any]:
         return {"strategy_id": self.candidate_id, "active": self.armed}

@@ -949,6 +949,7 @@ def _wire_live(args, app, *, settings, settings_path: Path, extra_candidates: An
         # leaves the separate exact-plan LIVE bridge fail-closed.
         scalper_host=getattr(app, "scalper_paper", None),
         scalper_approval_path=settings_path.parent / "scalper_live_approval.local.json",
+        market_session=app.wizard.session,
     )
     if live is not None:
         print(
@@ -1169,8 +1170,16 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 pass
         if getattr(app, "live", None) is not None:
+            scalper_live = getattr(app.live, "scalper_autonomous", None)
+            if scalper_live is not None:
+                try:
+                    scalper_live.close()
+                except Exception:
+                    pass
             try:
-                app.live.stop_session(reason="workstation_shutdown", close=True)
+                # Shutdown must never flatten broker positions. The autonomous
+                # host above stops entries and preserves its exact run snapshot.
+                app.live.stop_session(reason="workstation_shutdown", close=False)
             except Exception:
                 pass
         if getattr(app, "runner", None) is not None:
