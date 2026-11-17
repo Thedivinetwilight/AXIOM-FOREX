@@ -891,7 +891,9 @@ class LiveTrading:
         if self.adapter is None:
             return {"connected": False, "reason": ADAPTER_MISSING}
         try:
-            self.adapter.connect()
+            # Never fall back to a second initialization or stored credentials
+            # if the observation terminal disappeared between the click and here.
+            self.adapter.connect_adopted()
         except Exception as exc:
             reason = str(getattr(exc, "reason", "") or type(exc).__name__)
             self._audit("LIVE_ADAPTER_CONNECT_REFUSED", reason=reason)

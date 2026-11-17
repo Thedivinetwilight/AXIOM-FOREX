@@ -819,3 +819,33 @@ def test_switching_to_paper_leaves_broker_positions_open_and_says_so(live, fake)
     # No close order, no modification: the position is untouched.
     assert fake.send_requests == []
     assert [item["ticket"] for item in fake.positions] == [77]
+
+
+def test_workstation_adapter_adopts_only_an_explicitly_connected_terminal(tmp_path, fake, terminal):
+    adapter = make_adapter(fake=fake, terminal=terminal, db_path=tmp_path / "adopt.sqlite3", connected=False)
+    live = LiveTrading(adapter=adapter)
+    before = list(fake.initialize_calls)
+    outcome = live.connect()
+    assert outcome["connected"] is True
+    assert fake.initialize_calls == before
+    assert not fake.login_calls and not fake.send_requests
+    adapter.disconnect(reason="test")
+
+
+def test_workstation_adapter_never_initializes_when_shared_session_missing(tmp_path, fake):
+    adapter = make_adapter(fake=fake, terminal=None, db_path=tmp_path / "missing.sqlite3", connected=False,
+                           settings={"use_existing_session": False})
+    live = LiveTrading(adapter=adapter)
+    outcome = live.connect()
+    assert outcome == {"connected": False, "reason": "mt5_observation_session_unavailable"}
+    assert not fake.initialize_calls and not fake.login_calls and not fake.send_requests
+
+
+def test_workstation_adapter_refuses_changed_shared_account(tmp_path, fake, terminal):
+    adapter = make_adapter(fake=fake, terminal=terminal, db_path=tmp_path / "changed.sqlite3", connected=False)
+    fake.account_login += 1
+    outcome = LiveTrading(adapter=adapter).connect()
+    assert outcome == {"connected": False, "reason": "mt5_account_mismatch"}
+    assert not adapter.connected
+    assert len(fake.initialize_calls) == 1
+    assert not fake.login_calls and not fake.send_requests

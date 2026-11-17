@@ -282,6 +282,28 @@ class MT5TradingAdapter:
             del login_attempt
         return self._finish_connect(terminal, status)
 
+    def connect_adopted(self) -> MT5TerminalStatus:
+        """Attach only to the workstation's already-connected terminal.
+
+        Unlike the standalone adapter's connect method, this never initializes a
+        terminal or uses the password store if the observation session vanished.
+        """
+        validation = self.settings.validate()
+        if not validation.valid:
+            raise MT5SubmitRefused("mt5_settings_invalid", validation.reason)
+        self.disarm(reason="connect")
+        terminal = self._adoptable_terminal()
+        if terminal is None:
+            raise MT5SubmitRefused("mt5_observation_session_unavailable")
+        status = terminal.status()
+        if not status.terminal_connected:
+            raise MT5SubmitRefused("mt5_terminal_not_connected")
+        if status.account_login != int(self.settings.account_login):
+            raise MT5SubmitRefused("mt5_account_mismatch")
+        if status.account_server.strip().lower() != self.settings.server.strip().lower():
+            raise MT5SubmitRefused("mt5_server_mismatch")
+        return self._finish_connect(terminal, status)
+
     def _adoptable_terminal(self) -> Any:
         """The already-connected terminal to share, or ``None``."""
 
