@@ -11,12 +11,12 @@ import json
 import queue
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ..scalper.admission import AdmissionError, evidence_digest, load_policy
+from ..scalper.admission import AdmissionError, evidence_digest, load_policy, sha256_file
 from ..scalper.config import LIVE, ScalperConfig
 from ..scalper.execution import Trader
 from ..scalper.guardian import Guardian, GuardianLimits
@@ -40,6 +40,7 @@ from ..scalper.live_config import (
 )
 from ..scalper.live_venue import BrokerPlanFactory, BrokerVenue
 from ..scalper.positions import ManagementSettings, PositionBook
+from ..scalper.raw_replay import source_digest
 from ..scalper.signals import default_strategies
 from ..scalper.ticks import TickCore
 
@@ -62,10 +63,15 @@ class _AdmissionLifecycle:
     """Exact evidence binding used by both LiveLeg and the MT5 adapter."""
 
     def __init__(self, owner: "ScalperLiveAutonomousHost", strategy_id: str,
-                 fingerprints: Mapping[str, str]):
+                 fingerprints: Mapping[str, str], *, data_path: Path,
+                 evidence_root: Path, expires_at: datetime, replay_source_digest: str):
         self.owner = owner
         self.strategy_id = strategy_id
         self.fingerprints = dict(fingerprints)
+        self.data_path = data_path
+        self.evidence_root = evidence_root
+        self.expires_at = expires_at
+        self.replay_source_digest = replay_source_digest
 
     def approve_active(self) -> bool:
         return self.owner._lifecycle_active(self)
@@ -280,7 +286,7 @@ class ScalperLiveAutonomousHost:
         prepared = self._prepare_candidate(candidate_id)
         if not prepared[0]:
             return prepared[1]
-        config_view, currency, expected, strategy, evidence, policy_version, fingerprints = prepared[1]
+        config_view, currency, expected, strategy, evidence, policy_version, fingerprints, binding = prepared[1]
         account_blocker = self._check_live_account(expected, account_confirmation=account_confirmation)
         if account_blocker:
             return account_blocker
@@ -306,7 +312,7 @@ class ScalperLiveAutonomousHost:
         if bool(getattr(self.adapter, "armed", False)) and not self._armed_by_host:
             return self._refuse("live_adapter_already_armed", "Disarm the existing LIVE plan before arming the separate AX-SCALPER lane.")
         strategy_id = f"ax-scalper-live:{strategy.fingerprint}"
-        lifecycle = _AdmissionLifecycle(self, strategy_id, fingerprints)
+        lifecycle = _AdmissionLifecycle(self, strategy_id, fingerprints, **binding)
         registry = getattr(self.live_workflow, "armed_strategy", None)
         try:
             if registry is None:
@@ -365,7 +371,7 @@ class ScalperLiveAutonomousHost:
         prepared = self._prepare_candidate(candidate_id)
         if not prepared[0]:
             return prepared[1]
-        _config_view, currency, expected, strategy, evidence, policy_version, fingerprints = prepared[1]
+        _config_view, currency, expected, strategy, evidence, policy_version, fingerprints, binding = prepared[1]
         if expected != self._expected or evidence != (self._admitted.evidence_digest if self._admitted else ""):
             return self._refuse("candidate_or_account_changed_after_arm", "The signed evidence or account declaration changed after arming. Stop and review again.")
         if self._other_live_session_running():
@@ -567,16 +573,43 @@ class ScalperLiveAutonomousHost:
             return False, self._refuse("admission_binding_unavailable", "The evidence or policy could not be re-read and fingerprinted.")
         if current_digest != digest or self._sha256_file(policy_path) != policy_version:
             return False, self._refuse("evidence_digest_changed", "The candidate evidence or policy changed after it was evaluated.")
+        try:
+            data = artifact_document["data"]
+            replay_source_digest = str(artifact_document["replay_config"]["strategy_source_digest"])
+            if not replay_source_digest or replay_source_digest != source_digest():
+                raise ValueError("replay source changed")
+            root = artifact_path.resolve(strict=True).parent
+            data_path = root / str(data["file"])
+            resolved = data_path.resolve(strict=True)
+            end = datetime.fromisoformat(str(data["end"]))
+            if (data_path.is_symlink() or not resolved.is_relative_to(root)
+                    or not resolved.is_file() or end.tzinfo is None):
+                raise ValueError("unsafe data path or time")
+            raw_digest = self._sha256_file(data_path)
+            if not raw_digest or raw_digest != str(data["sha256"]).lower():
+                raise ValueError("data digest changed")
+            expires_at = end + timedelta(days=policy.maximum_artifact_age_days + 1)
+            if datetime.now(UTC) < end or datetime.now(UTC) >= expires_at:
+                raise ValueError("data outside admission age")
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            return False, self._refuse("evidence_data_binding_invalid", "The independently replayed dataset is missing, changed, unsafe or outside the admission age.")
         fingerprints = {
             str(self.settings_path): self._sha256_file(self.settings_path),
             str(policy_path): policy_version,
             str(artifact_path): artifact_digest,
+            str(data_path): raw_digest,
         }
+        for path in (getattr(self.live_workflow, "setup_path", None),
+                     getattr(self.live_workflow, "settings_path", None)):
+            if path is not None:
+                fingerprints[str(path)] = self._sha256_file(Path(path))
         if not all(fingerprints.values()):
             return False, self._refuse("admission_binding_unavailable", "The local evidence/configuration bindings could not be verified.")
+        binding = {"data_path": data_path, "evidence_root": root, "expires_at": expires_at,
+                   "replay_source_digest": replay_source_digest}
         return True, (preview["config"], preview["config"]["account_currency"],
                       ExpectedAccount(**preview["config"]["expected_account"]), strategy,
-                      digest, policy_version, fingerprints)
+                      digest, policy_version, fingerprints, binding)
 
     # -- run construction and polling ---------------------------------
 
@@ -800,6 +833,12 @@ class ScalperLiveAutonomousHost:
         if self._other_live_session_running():
             return False
         try:
+            if (datetime.now(UTC) >= lifecycle.expires_at
+                    or source_digest() != lifecycle.replay_source_digest):
+                return False
+            if (lifecycle.data_path.is_symlink()
+                    or not lifecycle.data_path.resolve(strict=True).is_relative_to(lifecycle.evidence_root)):
+                return False
             return all(self._sha256_file(Path(path)) == digest
                        for path, digest in lifecycle.fingerprints.items())
         except Exception:
@@ -854,7 +893,7 @@ class ScalperLiveAutonomousHost:
     @staticmethod
     def _sha256_file(path: Path) -> str:
         try:
-            return hashlib.sha256(path.read_bytes()).hexdigest()
+            return sha256_file(path)
         except OSError:
             return ""
 

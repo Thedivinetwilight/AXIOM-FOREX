@@ -167,7 +167,13 @@ def _host(tmp_path: Path):
     settings = tmp_path / "scalper_live_settings.local.json"
     _settings(settings)
     artifact = tmp_path / "signed-evidence.fixture.json"
-    artifact.write_text('{"fixture":true}', encoding="utf-8")
+    raw = tmp_path / "raw.fixture.csv"
+    raw.write_text("synthetic data only\n", encoding="utf-8")
+    from axiom_forex.scalper.raw_replay import source_digest
+    artifact.write_text(json.dumps({"fixture": True, "data": {
+        "file": raw.name, "sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        "end": datetime.now(timezone.utc).isoformat(),
+    }, "replay_config": {"strategy_source_digest": source_digest()}}), encoding="utf-8")
     policy = tmp_path / "policy.fixture.json"
     from tests.test_scalper_admission import policy_payload
     policy.write_text(json.dumps(policy_payload(bytes(32))), encoding="utf-8")
@@ -390,3 +396,33 @@ def test_runner_refuses_changed_evidence_after_admission_review(tmp_path):
     ok, refusal = host._prepare_candidate(default_strategies()[0].fingerprint)
     assert not ok
     assert refusal["reason"] == "evidence_digest_changed"
+
+
+def test_admission_lifecycle_revokes_changed_raw_data_or_expired_evidence(tmp_path):
+    from datetime import timedelta
+    from axiom_forex.paper_runner.scalper_live_host import _AdmissionLifecycle
+
+    host, _adapter, _ = _host(tmp_path)
+    candidate = default_strategies()[0].fingerprint
+    ok, prepared = host._prepare_candidate(candidate)
+    assert ok, prepared
+    lifecycle = _AdmissionLifecycle(host, "strategy", prepared[6], **prepared[7])
+    host._candidate_id = candidate
+    host._strategy_id = "strategy"
+    host._lifecycle = lifecycle
+    host._armed_by_host = True
+    assert host._lifecycle_active(lifecycle)
+    lifecycle.data_path.write_text("changed synthetic data\n", encoding="utf-8")
+    assert not host._lifecycle_active(lifecycle)
+    lifecycle.data_path.write_text("synthetic data only\n", encoding="utf-8")
+    assert host._lifecycle_active(lifecycle)
+    lifecycle.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert not host._lifecycle_active(lifecycle)
+
+
+def test_candidate_binding_refuses_tampered_raw_data(tmp_path):
+    host, _adapter, _ = _host(tmp_path)
+    (tmp_path / "raw.fixture.csv").write_text("tampered\n", encoding="utf-8")
+    ok, refusal = host._prepare_candidate(default_strategies()[0].fingerprint)
+    assert not ok
+    assert refusal["reason"] == "evidence_data_binding_invalid"
