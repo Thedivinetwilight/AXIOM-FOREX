@@ -1096,7 +1096,7 @@ class MT5TradingAdapter:
         return {"resolved": sorted(resolved), "unresolved": remaining}
 
     def recover(self) -> tuple[RecoveryResult, ...]:
-        """Resolve what happened to every MT5 order left in doubt."""
+        """Read in-doubt orders only under their complete durable account binding."""
 
         results: list[RecoveryResult] = []
         for record in self.account_orders():
@@ -1104,27 +1104,51 @@ class MT5TradingAdapter:
             if state not in MT5_BLOCKING_STATES:
                 continue
             try:
-                result = reconcile_record(self.terminal, record)
-            except MT5Error as exc:
-                result = RecoveryResult(
-                    request_id=str(record.get("request_id", "")),
-                    previous_state=state,
-                    state="UNRESOLVED",
-                    evidence="recovery_failed",
-                    order_ticket=int(record.get("order_ticket") or 0),
-                    deal_tickets=(),
-                    volume_matched=Decimal(0),
-                    resolved=False,
-                    resend_allowed=False,
-                    detail=exc.reason,
+                ticket = int(record.get("order_ticket") or 0)
+            except (ValueError, TypeError):
+                ticket = 0
+
+            def unresolved(reason: str, detail: str = "") -> RecoveryResult:
+                return RecoveryResult(
+                    request_id=str(record.get("request_id", "")), previous_state=state,
+                    state="UNRESOLVED", evidence=reason, order_ticket=ticket,
+                    deal_tickets=(), volume_matched=Decimal(0), resolved=False,
+                    resend_allowed=False, detail=detail,
                 )
-            self._persist_recovery(record, result)
+
+            def account_matches() -> bool:
+                self.refresh_account()
+                status = self._status
+                return bool(status is not None and status.terminal_connected
+                    and status.account_mode_confirmed
+                    and status.account_mode in {"DEMO", "REAL"}
+                    and str(record.get("account_fingerprint") or "") == self.account_fingerprint()
+                    and str(record.get("account_login") or "") == str(status.account_login)
+                    and str(record.get("account_server") or "") == status.account_server
+                    and str(record.get("account_mode") or "") == status.account_mode
+                    and str(record.get("account_currency") or "") == status.account_currency)
+
+            try:
+                if not account_matches():
+                    result = unresolved("recovery_account_identity_mismatch")
+                else:
+                    result = reconcile_record(self.terminal, record)
+                    if not account_matches():
+                        result = unresolved("recovery_account_changed_during_query")
+            except Exception as exc:
+                result = unresolved("recovery_failed", type(exc).__name__)
+            # The autonomous run must first validate its entire saved state and
+            # explicitly select this request. Connect-time history scans have no
+            # run context and therefore cannot commit an AX-SCALPER outcome.
+            if result.resolved and str(record.get("strategy_id") or "").startswith("ax-scalper-live:"):
+                result = unresolved("explicit_exact_reconciliation_required")
+            # An inconclusive or mismatched observation must not rewrite the
+            # original durable evidence, including its lifecycle and timestamp.
+            if result.resolved:
+                self._persist_recovery(record, result)
             results.append(result)
         self._last_recovery = tuple(results)
-        if any(item.state in {"UNRESOLVED", "ACCEPTED"} for item in results):
-            # An order in doubt is a trading gate, not an account artifact: no
-            # new order goes out until it is explained.  (A partial fill is
-            # likewise already blocking through ``unresolved_request_ids``.)
+        if any(not item.resolved for item in results):
             self.disarm(reason="unresolved_order_after_recovery")
         return tuple(results)
 
@@ -1888,6 +1912,7 @@ class MT5TradingAdapter:
             if self._status is not None
             else "",
             "account_mode": self.account_mode,
+            "account_currency": self._status.account_currency if self._status else "",
             "close_position_id": intent.close_position_id,
             "spec_version": intent.spec_version,
             "sent_at": self.clock(),

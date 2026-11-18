@@ -44,7 +44,11 @@ Do not delete or rewrite a snapshot to bypass this check. While a run is in
 `RECOVERY_REQUIRED`, Stop and Shutdown keep its existing snapshot unchanged and
 send no flatten order; local management is paused, so verify broker protection
 independently. An inconclusive exact-request query also leaves the snapshot
-unchanged. This guard does not make restart reconciliation complete.
+unchanged. Broker order recovery also requires the original account mode,
+server, fingerprint, login and currency and a matching broker order ticket;
+older records lacking those facts remain blocked and preserved. Connecting does
+not resolve an autonomous request without validating its run context. These
+guards do not make restart reconciliation complete.
 
 ## Local LIVE configuration
 

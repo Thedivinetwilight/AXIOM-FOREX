@@ -573,7 +573,7 @@ def test_durable_query_binding_requires_current_real_account_and_exact_record(tm
                               "account_fingerprint": fingerprint,
                               "redacted_account": {"server": SERVER, "currency": "USD"}}
     row = {"broker_id": "mt5_terminal", "account_fingerprint": fingerprint,
-           "account_server": SERVER, "account_mode": "REAL", "provider_symbol": SYMBOL,
+           "account_server": SERVER, "account_mode": "REAL", "account_currency": "USD", "provider_symbol": SYMBOL,
            "strategy_id": "strategy"}
     host._bound_mode = "REAL"
     check = lambda record: host._matches_durable_request(record, expected=expected,

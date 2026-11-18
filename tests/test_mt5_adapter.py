@@ -57,6 +57,7 @@ from axiom_forex.brokers.mt5 import (
     to_broker_volume,
 )
 from axiom_forex.brokers.mt5.terminal import MT5Terminal
+from axiom_forex.brokers.mt5.identity import account_fingerprint
 from axiom_forex.config.vault import SecureStorageUnavailable
 from axiom_forex.database.repository import ForexRepository
 from tests.fake_mt5 import (
@@ -1453,6 +1454,10 @@ def _unresolved_record(**overrides) -> dict:
         # Order records are account-scoped; recovery only looks at the account
         # the terminal currently has selected.
         "account_login": 55500123,
+        "account_server": "Broker-Demo",
+        "account_mode": "DEMO",
+        "account_currency": "USD",
+        "account_fingerprint": account_fingerprint(55500123),
         "request_id": "req-1",
         "simulation_id": "",
         "state": "UNRESOLVED",
@@ -1505,7 +1510,7 @@ def test_recovery_resolves_from_deal_history():
         ]
     )
     repository = ForexRepository(":memory:")
-    repository.save_orders([_unresolved_record()])
+    repository.save_orders([_unresolved_record(order_ticket=7001)])
     adapter, audit = _frozen_clock_adapter(fake, repository)
     try:
         adapter.connect()
@@ -1557,8 +1562,8 @@ def test_recovery_does_not_infer_not_placed_from_empty_history():
         adapter.connect()
         stored = repository.get_order("req-1")
         assert stored["state"] == "UNRESOLVED"
-        assert stored["recovery"]["evidence"] == "history_absence_inconclusive"
-        assert stored["recovery"]["resend_allowed"] is False
+        assert adapter._last_recovery[0].evidence == "history_absence_inconclusive"
+        assert adapter._last_recovery[0].resend_allowed is False
         assert adapter.unresolved_request_ids() == ["req-1"]
         assert not fake.send_requests
     finally:
@@ -1576,7 +1581,7 @@ def test_recovery_stays_unresolved_when_history_is_unavailable():
         adapter.connect()
         stored = repository.get_order("req-1")
         assert stored["state"] == "UNRESOLVED"
-        assert stored["recovery"]["evidence"] == "history_unavailable"
+        assert adapter._last_recovery[0].evidence == "history_unavailable"
         assert adapter.unresolved_request_ids() == ["req-1"]
     finally:
         adapter.disconnect(reason="test")
@@ -1595,8 +1600,8 @@ def test_recovery_keeps_an_open_position_unresolved():
     try:
         adapter.connect()
         stored = repository.get_order("req-1")
-        assert stored["state"] == "ACCEPTED"
-        assert stored["recovery"]["evidence"] == "open_position_magic_match"
+        assert stored["state"] == "UNRESOLVED"
+        assert adapter._last_recovery[0].evidence == "open_position_magic_match"
         assert adapter.unresolved_request_ids() == ["req-1"]
     finally:
         adapter.disconnect(reason="test")
@@ -1841,7 +1846,130 @@ def test_recovery_does_not_discard_execution_on_canceled_order():
         adapter.connect()
         stored = repository.get_order("req-1")
         assert stored["state"] == "UNRESOLVED"
-        assert stored["recovery"]["evidence"] == "terminal_order_with_deals"
+        assert adapter._last_recovery[0].evidence == "terminal_order_with_deals"
+        assert adapter.unresolved_request_ids() == ["req-1"]
+        assert not fake.send_requests
+    finally:
+        adapter.disconnect(reason="test")
+        repository.close()
+
+
+@pytest.mark.parametrize("case", ["missing_ticket", "wrong_ticket_same_comment", "wrong_symbol",
+                                  "wrong_side", "overfilled", "filled_without_deals", "wrong_action"])
+def test_recovery_never_accepts_inexact_history_evidence(case):
+    order_ticket = 7001
+    deal = make_history_deal(ticket=9001, order=7001, position_id=42, symbol="EURUSD.pro",
+        side="BUY", entry=0, volume=0.1, price=1.1, magic=26081001, comment="req-1", time=AT)
+    order = make_history_order(ticket=7001, symbol="EURUSD.pro", side="BUY", volume=0.1,
+        state=4, magic=26081001, comment="req-1", time=AT)
+    record = _unresolved_record(order_ticket=order_ticket)
+    if case == "missing_ticket":
+        record["order_ticket"] = 0
+    elif case == "wrong_ticket_same_comment":
+        order["ticket"] = 7002
+        deal["order"] = 7002
+    elif case == "wrong_symbol":
+        order["symbol"] = "GBPUSD.pro"
+    elif case == "wrong_side":
+        deal["type"] = 1
+    elif case == "overfilled":
+        deal["volume"] = 0.2
+    elif case == "wrong_action":
+        deal["entry"] = 1
+    fake = FakeMT5(history_orders=[order],
+                   history_deals=[] if case == "filled_without_deals" else [deal])
+    repository = ForexRepository(":memory:")
+    repository.save_orders([record])
+    adapter, _ = _frozen_clock_adapter(fake, repository)
+    try:
+        adapter.connect()
+        assert repository.get_order("req-1")["state"] == "UNRESOLVED"
+        assert adapter.unresolved_request_ids() == ["req-1"]
+        assert not fake.send_requests
+    finally:
+        adapter.disconnect(reason="test")
+        repository.close()
+
+
+def test_recovery_close_counts_only_exact_out_deal_and_position():
+    deal = make_history_deal(ticket=9001, order=7001, position_id=42, symbol="EURUSD.pro",
+        side="SELL", entry=1, volume=0.1, price=1.1, magic=26081001, comment="req-1", time=AT)
+    fake = FakeMT5(history_deals=[deal])
+    repository = ForexRepository(":memory:")
+    repository.save_orders([_unresolved_record(order_ticket=7001, side="SELL", close_position_id="42")])
+    adapter, _ = _frozen_clock_adapter(fake, repository)
+    try:
+        adapter.connect()
+        stored = repository.get_order("req-1")
+        assert stored["state"] == "FILLED"
+        assert Decimal(str(stored["recovery"]["volume_matched"])) == Decimal("0.1")
+        assert not fake.send_requests
+    finally:
+        adapter.disconnect(reason="test")
+        repository.close()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("account_server", "Wrong-server"), ("account_mode", "REAL"),
+    ("account_currency", "EUR"), ("account_fingerprint", ""),
+])
+def test_recovery_never_rewrites_incomplete_or_mismatched_account(field, value):
+    fake = FakeMT5(history_deals=[make_history_deal(ticket=9001, order=7001, position_id=42,
+        symbol="EURUSD.pro", side="BUY", entry=0, volume=0.1, price=1.1,
+        magic=26081001, comment="req-1", time=AT)])
+    repository = ForexRepository(":memory:")
+    record = _unresolved_record(order_ticket=7001)
+    record[field] = value
+    repository.save_orders([record])
+    original = repository.get_order("req-1")
+    adapter, _ = _frozen_clock_adapter(fake, repository)
+    try:
+        adapter.connect()
+        assert repository.get_order("req-1") == original
+        assert adapter._last_recovery[0].evidence == "recovery_account_identity_mismatch"
+        assert adapter.unresolved_request_ids() == ["req-1"]
+        assert not fake.send_requests
+    finally:
+        adapter.disconnect(reason="test")
+        repository.close()
+
+
+def test_recovery_preserves_record_if_account_changes_during_history_read():
+    fake = FakeMT5(history_deals=[make_history_deal(ticket=9001, order=7001, position_id=42,
+        symbol="EURUSD.pro", side="BUY", entry=0, volume=0.1, price=1.1,
+        magic=26081001, comment="req-1", time=AT)])
+    history = fake.history_deals_get
+    def switch_account(*args, **kwargs):
+        result = history(*args, **kwargs)
+        fake.account_server = "Other-server"
+        return result
+    fake.history_deals_get = switch_account
+    repository = ForexRepository(":memory:")
+    repository.save_orders([_unresolved_record(order_ticket=7001)])
+    original = repository.get_order("req-1")
+    adapter, _ = _frozen_clock_adapter(fake, repository)
+    try:
+        adapter.connect()
+        assert repository.get_order("req-1") == original
+        assert adapter._last_recovery[0].evidence == "recovery_account_changed_during_query"
+        assert not fake.send_requests
+    finally:
+        adapter.disconnect(reason="test")
+        repository.close()
+
+
+def test_connect_does_not_resolve_scalper_without_validated_run_context():
+    fake = FakeMT5(history_deals=[make_history_deal(ticket=9001, order=7001, position_id=42,
+        symbol="EURUSD.pro", side="BUY", entry=0, volume=0.1, price=1.1,
+        magic=26081001, comment="req-1", time=AT)])
+    repository = ForexRepository(":memory:")
+    repository.save_orders([_unresolved_record(order_ticket=7001, strategy_id="ax-scalper-live:strategy")])
+    original = repository.get_order("req-1")
+    adapter, _ = _frozen_clock_adapter(fake, repository)
+    try:
+        adapter.connect()
+        assert repository.get_order("req-1") == original
+        assert adapter._last_recovery[0].evidence == "explicit_exact_reconciliation_required"
         assert adapter.unresolved_request_ids() == ["req-1"]
         assert not fake.send_requests
     finally:

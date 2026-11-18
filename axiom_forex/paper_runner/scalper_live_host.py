@@ -806,6 +806,7 @@ class ScalperLiveAutonomousHost:
                     and str(record.get("account_fingerprint") or "") == expected.fingerprint
                     and str(record.get("account_server") or "") == expected.server
                     and str(record.get("account_mode") or "") == verdict.mode
+                    and str(record.get("account_currency") or "") == expected.currency
                     and str(record.get("provider_symbol") or "") == symbol
                     and str(record.get("strategy_id") or "") == strategy_id)
         except Exception:

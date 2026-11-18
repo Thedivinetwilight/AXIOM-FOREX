@@ -175,7 +175,7 @@ def history_deals(
         volume = _decimal(_field(entry, "volume"))
         price = _decimal(_field(entry, "price"))
         if volume is None or price is None:
-            continue
+            raise MT5ReconciliationError("mt5_deal_history_incomplete", "deal volume or price unavailable")
         deals.append(
             MT5Deal(
                 ticket=int(_field(entry, "ticket", 0) or 0),
@@ -215,8 +215,8 @@ def history_orders(
     for entry in _sequence(raw):
         initial = _decimal(_field(entry, "volume_initial"))
         current = _decimal(_field(entry, "volume_current"))
-        if initial is None:
-            continue
+        if initial is None or current is None:
+            raise MT5ReconciliationError("mt5_order_history_incomplete", "order volume unavailable")
         orders.append(
             MT5HistoryOrder(
                 ticket=int(_field(entry, "ticket", 0) or 0),
@@ -225,7 +225,7 @@ def history_orders(
                 if int(_field(entry, "type", POSITION_TYPE_BUY)) == POSITION_TYPE_BUY
                 else "SELL",
                 volume_initial=initial,
-                volume_current=current if current is not None else initial,
+                volume_current=current,
                 price_open=_decimal(_field(entry, "price_open")),
                 state=int(_field(entry, "state", 0) or 0),
                 magic=int(_field(entry, "magic", 0) or 0),
@@ -471,7 +471,6 @@ def reconcile_record(
     previous = str(record.get("state", "UNRESOLVED")).upper()
     request_id = str(record.get("request_id", ""))
     magic = int(record.get("magic") or 0)
-    comment = str(record.get("comment") or request_id)[:31]
     symbol = str(record.get("provider_symbol") or record.get("symbol") or "")
     side = str(record.get("side") or "")
     ticket = int(record.get("order_ticket") or 0)
@@ -495,38 +494,68 @@ def reconcile_record(
             detail=exc.reason,
         )
 
-    matching_orders = [
-        item
-        for item in orders
-        if (ticket and item.ticket == ticket)
-        or (
-            (not ticket)
-            and item.magic == magic
-            and item.comment[: len(comment)] == comment
-            and item.symbol.upper() == symbol.upper()
-        )
-    ]
-    matching_deals = [
-        item
-        for item in deals
-        if (ticket and item.order == ticket)
-        or (
-            item.magic == magic
-            and item.comment[: len(comment)] == comment
-            and item.symbol.upper() == symbol.upper()
-            and item.side.upper() == side.upper()
-        )
-    ]
-    filled = sum(
-        (item.volume for item in matching_deals if item.entry in (DEAL_ENTRY_IN, DEAL_ENTRY_INOUT)),
-        Decimal(0),
+    # A comment is broker-limited to 31 characters and may be rewritten. It
+    # cannot, on its own, prove the original request ID. Once a durable order
+    # ticket exists, never fall back to another order's matching comment.
+    ticket_orders = [item for item in orders if ticket > 0 and item.ticket == ticket]
+    ticket_deals = [item for item in deals if ticket > 0 and item.order == ticket]
+    try:
+        requested = Decimal(str(record.get("volume") or record.get("volume_requested") or 0))
+    except Exception:
+        requested = Decimal(0)
+    close_position_id = str(record.get("close_position_id") or "")
+    expected_entry = DEAL_ENTRY_OUT if close_position_id else DEAL_ENTRY_IN
+    valid_identity = (
+        bool(request_id) and ticket > 0 and magic > 0 and bool(symbol)
+        and side.upper() in {"BUY", "SELL"} and requested.is_finite() and requested > 0
     )
-    requested = Decimal(str(record.get("volume") or record.get("volume_requested") or 0))
+    rows_valid = (
+        len(ticket_orders) <= 1
+        and all(item.symbol.upper() == symbol.upper() and item.side.upper() == side.upper()
+                and item.magic == magic and item.volume_initial == requested
+                for item in ticket_orders)
+        and len({item.ticket for item in ticket_deals}) == len(ticket_deals)
+        and all(item.ticket > 0 and item.symbol.upper() == symbol.upper()
+                and item.side.upper() == side.upper() and item.magic == magic
+                and item.entry == expected_entry and item.position_id > 0
+                and item.volume.is_finite() and item.volume > 0
+                and item.price.is_finite() and item.price > 0
+                and (not close_position_id or str(item.position_id) == close_position_id)
+                for item in ticket_deals)
+    )
+    if ticket_orders or ticket_deals:
+        if not valid_identity or not rows_valid:
+            return RecoveryResult(
+                request_id=request_id, previous_state=previous, state="UNRESOLVED",
+                evidence="broker_identity_mismatch", order_ticket=ticket,
+                deal_tickets=tuple(item.ticket for item in ticket_deals),
+                volume_matched=Decimal(0), resolved=False, resend_allowed=False,
+                detail="broker history does not match the durable order, action and account-bound terms",
+            )
+    matching_orders = ticket_orders
+    matching_deals = ticket_deals
+    filled = sum((item.volume for item in matching_deals), Decimal(0))
     deal_tickets = tuple(item.ticket for item in matching_deals)
+    if filled > requested:
+        return RecoveryResult(
+            request_id=request_id, previous_state=previous, state="UNRESOLVED",
+            evidence="broker_volume_mismatch", order_ticket=ticket,
+            deal_tickets=deal_tickets, volume_matched=filled,
+            resolved=False, resend_allowed=False,
+            detail="broker deal volume exceeds the durable requested volume",
+        )
 
     if matching_orders:
         state = matching_orders[-1].state_name
         if state == "FILLED":
+            if not matching_deals or filled != requested:
+                return RecoveryResult(
+                    request_id=request_id, previous_state=previous, state="UNRESOLVED",
+                    evidence="filled_order_deal_evidence_incomplete", order_ticket=ticket,
+                    deal_tickets=deal_tickets, volume_matched=filled,
+                    resolved=False, resend_allowed=False,
+                    detail="a filled order requires matching deals for the full requested volume",
+                )
             return RecoveryResult(
                 request_id=request_id,
                 previous_state=previous,
@@ -539,7 +568,7 @@ def reconcile_record(
                 resend_allowed=False,
             )
         if state in {"CANCELED", "REJECTED", "EXPIRED"}:
-            if matching_deals:
+            if matching_deals or matching_orders[-1].volume_current != requested:
                 # A final cancellation can follow a partial execution. Never
                 # discard that exposure as a simple rejection.
                 return RecoveryResult(
