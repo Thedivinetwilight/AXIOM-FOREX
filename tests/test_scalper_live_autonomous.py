@@ -1114,12 +1114,13 @@ def test_the_stop_blocks_new_entries_and_reports_what_stays_open(real):
     assert run.start()["ok"] is True
     warm(run, real, count=60)
     sent_before = len(real["fake"].send_requests)
+    state_before = run.state
     stopped = run.stop(reason="operator_stop")
-    assert stopped["state"] == "STOPPED"
-    assert "No new entry will be submitted" in stopped["message"]
+    assert stopped["state"] == (RECOVERY_REQUIRED if state_before == RECOVERY_REQUIRED else "STOPPED")
+    assert "entr" in stopped["message"].lower()
     outcome = run.on_tick(**tick_kwargs(real))
     assert outcome["execution"] is None
-    assert outcome["blocked"] == "not_running"
+    assert outcome["blocked"] == ("recovery_required" if state_before == RECOVERY_REQUIRED else "not_running")
     assert len(real["fake"].send_requests) == sent_before
 
 
@@ -1653,3 +1654,89 @@ def test_legacy_real_only_leg_cannot_be_weakened_by_a_demo_binding(real):
     real["leg"].required_account_mode = "DEMO"
     assert REAL_ACCOUNT_REQUIRED in {blocker.reason for blocker in real["leg"].blockers()}
     assert real["fake"].send_requests == []
+
+
+def test_recovery_refusal_and_stop_preserve_corrupt_state_bytes(real):
+    store = JsonRunStateStore(real["tmp"] / "corrupt-stop.json")
+    store.path.write_bytes(b'{damaged and preserve exactly')
+    before = store.path.read_bytes()
+    run, _, _ = build_run(real, state_store=store)
+    assert not run.recover()["ok"]
+    assert not run.start()["ok"] and run.state == RECOVERY_REQUIRED
+    assert not run.arm()["ok"] and run.state == RECOVERY_REQUIRED
+    assert run.flatten() == []
+    result = run.stop(close_positions=True)
+    assert result["ok"] and result["state"] == RECOVERY_REQUIRED
+    assert result["state_preserved"] and not result["closed"]
+    assert store.path.read_bytes() == before
+    assert not real["fake"].send_requests
+
+
+def test_ambiguous_entry_query_and_stop_leave_original_state_unchanged(real):
+    store = JsonRunStateStore(real["tmp"] / "unknown-entry-preserved.json")
+    run, venue, _ = build_run(real, state_store=store)
+    run._pending_submission = {"request_id": "entry-original"}
+    run.state = "RUNNING"
+    store.save(run.snapshot())
+    before = store.path.read_bytes()
+    venue.query = lambda _request_id: None
+    assert not run.reconcile_submission()["resolved"]
+    assert store.path.read_bytes() == before
+    assert run.stop()["state"] == RECOVERY_REQUIRED
+    assert store.path.read_bytes() == before
+    assert not real["fake"].send_requests
+
+
+@pytest.mark.parametrize("status,simulated,mismatched_id", [
+    (UNKNOWN_OUTCOME, False, False),
+    ("rejected", True, False),
+    ("rejected", False, True),
+])
+def test_ambiguous_close_reconcile_preserves_original_state(real, status, simulated, mismatched_id):
+    store = JsonRunStateStore(real["tmp"] / "unknown-close-preserved.json")
+    run, venue, _ = build_run(real, state_store=store)
+    position = run.book.open_position(
+        position_id="31415", symbol=PAIR, side="BUY", lots=Decimal("0.10"),
+        entry_price=Decimal("1.10000"), stop_price=Decimal("1.09500"),
+        target_price=None, now_ms=int(START.timestamp() * 1000), request_id="entry-31415",
+    )
+    assert run._record_position_risk(position)
+    run.book._pending_closes["31415"] = {
+        "position_id": "31415", "request_id": "close-original", "requested_lots": "0.10"
+    }
+    run.state = RECOVERY_REQUIRED
+    store.save(run.snapshot())
+    before = store.path.read_bytes()
+    queried = []
+    def query(request_id):
+        queried.append(request_id)
+        return Fill(request_id="wrong-request" if mismatched_id else request_id, status=status,
+                    filled_lots=Decimal(0), requested_lots=Decimal("0.10"), price=None,
+                    spread_points=Decimal(0), slippage_points=Decimal(0), latency_ms=0,
+                    ticket="31415", simulated=simulated)
+    venue.query = query
+    result = run.reconcile_close(position_id="31415")
+    assert not result["resolved"] and queried == ["close-original"]
+    assert store.path.read_bytes() == before
+    assert run.book.get("31415") is not None
+    assert not real["fake"].send_requests
+
+
+def test_recovery_required_tick_never_manages_or_persists(real):
+    run, venue, _ = build_run(real)
+    position = run.book.open_position(
+        position_id="31415", symbol=PAIR, side="BUY", lots=Decimal("0.10"),
+        entry_price=Decimal("1.10000"), stop_price=Decimal("1.09500"),
+        target_price=None, now_ms=int(START.timestamp() * 1000), request_id="entry-31415",
+    )
+    assert run._record_position_risk(position)
+    run.state = RECOVERY_REQUIRED
+    run.state_store.save(run.snapshot())
+    before = run.state_store.path.read_bytes()
+    def forbidden(**kwargs):
+        raise AssertionError("recovery must not reach management")
+    run.book.on_tick = forbidden
+    outcome = run.on_tick(**tick_kwargs(real))
+    assert outcome["blocked"] == "recovery_required"
+    assert run.state_store.path.read_bytes() == before
+    assert not real["fake"].send_requests

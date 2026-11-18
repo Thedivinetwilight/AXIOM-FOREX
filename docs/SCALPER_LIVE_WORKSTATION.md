@@ -40,7 +40,11 @@ resolved and independently verified.
 Run-state snapshots now bind account type and currency in addition to server
 and fingerprint. Older v2 snapshots lack those fields and are deliberately
 refused; preserve the original file and broker records for exact reconciliation.
-Do not delete or rewrite a snapshot to bypass this check.
+Do not delete or rewrite a snapshot to bypass this check. While a run is in
+`RECOVERY_REQUIRED`, Stop and Shutdown keep its existing snapshot unchanged and
+send no flatten order; local management is paused, so verify broker protection
+independently. An inconclusive exact-request query also leaves the snapshot
+unchanged. This guard does not make restart reconciliation complete.
 
 ## Local LIVE configuration
 

@@ -1670,7 +1670,7 @@ class PositionBook:
                 reason=CLOSE_UNCONFIRMED,
                 detail="the broker outcome is still unknown; the position remains latched",
             )
-        if fill.status == "rejected":
+        if fill.status == "rejected" and not fill.simulated:
             self._pending_closes.pop(position_id, None)
             self._close_blockers[position_id] = "close_resolved_without_fill"
             self._blocked_exits.append(

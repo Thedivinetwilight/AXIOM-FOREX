@@ -642,6 +642,9 @@ class AutonomousScalper:
     def arm(self) -> dict[str, Any]:
         """Move to ARMED when every precondition holds.  Sends nothing."""
 
+        if self.state == RECOVERY_REQUIRED:
+            return {"ok": False, "state": self.state, "reason": RECOVERY,
+                    "recovery": dict(self._recovery)}
         blockers = self.readiness()
         if blockers:
             self.state = BLOCKED
@@ -660,6 +663,9 @@ class AutonomousScalper:
     def start(self) -> dict[str, Any]:
         """Begin autonomous entries.  Refuses unless armed and ready."""
 
+        if self.state == RECOVERY_REQUIRED:
+            return {"ok": False, "state": self.state, "reason": RECOVERY,
+                    "recovery": dict(self._recovery)}
         if self.state in {RUNNING}:
             return {"ok": False, "state": self.state, "reason": ALREADY_RUNNING}
         if self.state in {BLOCKED, IDLE, STOPPED}:
@@ -711,6 +717,18 @@ class AutonomousScalper:
     ) -> dict[str, Any]:
         """Stop new entries; only explicitly close positions against fresh ticks."""
 
+        # A recovery-required snapshot must remain byte-for-byte intact. A
+        # stop is still effective in memory (RECOVERY_REQUIRED cannot enter),
+        # but cannot rewrite the last durable evidence or flatten the broker.
+        if self.state == RECOVERY_REQUIRED:
+            self.stop_reason = reason
+            return {
+                "ok": True, "state": RECOVERY_REQUIRED, "reason": reason,
+                "open_positions": [item.audit_view() for item in self.book.open_positions],
+                "broker_positions": self._broker_positions(), "closed": [],
+                "state_persisted": None, "state_preserved": True,
+                "message": "New entries are blocked. Unresolved recovery state was preserved; no position was closed.",
+            }
         previous = self.state
         self.state = STOPPED
         self.stop_reason = reason
@@ -759,6 +777,8 @@ class AutonomousScalper:
     ) -> list[dict[str, Any]]:
         """Explicitly request exits at caller-supplied current quotes; never invent a price."""
 
+        if self.state == RECOVERY_REQUIRED:
+            return []
         now = self.clock()
         now_ms = int(now.timestamp() * 1000)
         actions = self.book.flatten_all(ticks=ticks or {}, now_ms=now_ms, reason=reason)
@@ -810,6 +830,18 @@ class AutonomousScalper:
         action = self.book.resolve_pending_close(
             position_id=position_id, fill=fill, now_ms=now_ms
         )
+        if (any(item.get("position_id") == position_id for item in self.book.pending_closes)
+                and len(self.book.closed) == closed_before):
+            # No exact conclusion: keep the original durable bytes unchanged.
+            self.state = RECOVERY_REQUIRED
+            self._recovery = {
+                "detail": "the exact close outcome remains unresolved or mismatched",
+                "hint": "Preserve the original request and broker records; do not resend.",
+            }
+            return {"ok": False, "resolved": False, "state": self.state,
+                    "reason": "close_outcome_unresolved", "position_id": position_id,
+                    "request_id": request_id,
+                    "action": None if action is None else action.audit_view()}
         for trade in self.book.closed[closed_before:]:
             if trade.gross_account is None:
                 self.guardian.suspend_entries("position_realized_pnl_unavailable")
@@ -923,7 +955,6 @@ class AutonomousScalper:
             }
             if query_error:
                 self._recovery["query_error"] = query_error
-            self._persist_state()
             return {
                 "ok": False,
                 "resolved": False,
@@ -937,7 +968,6 @@ class AutonomousScalper:
                 "detail": "the durable outcome does not match the persisted entry request id",
                 "hint": "Keep entries disabled and reconcile the exact request identity with the durable order record.",
             }
-            self._persist_state()
             return {"ok": False, "resolved": False, "reason": "submission_request_mismatch"}
 
         status = str(getattr(fill, "status", ""))
@@ -947,7 +977,6 @@ class AutonomousScalper:
                 "detail": "the queried entry outcome is not a durable terminal broker result",
                 "hint": "Keep entries disabled until the exact request has a confirmed booked fill or terminal refusal.",
             }
-            self._persist_state()
             return {"ok": False, "resolved": False, "reason": "submission_outcome_not_terminal"}
 
         accepted_ticket = ""
@@ -1630,7 +1659,6 @@ class AutonomousScalper:
             }
             self.state = RECOVERY_REQUIRED
             self._emit("recovery_required", reason="pending_close")
-            self._persist_state()
             return {"ok": False, "state": self.state, "recovery": dict(self._recovery)}
 
         if self._pending_submission is not None:
@@ -1719,6 +1747,9 @@ class AutonomousScalper:
     ) -> dict[str, Any]:
         """Feed one quote.  Manages positions always; decides only when RUNNING."""
 
+        if self.state == RECOVERY_REQUIRED:
+            return {"state": self.state, "blocked": RECOVERY, "execution": None,
+                    "managed": [], "detail": dict(self._recovery)}
         spec = self.specs.get(symbol)
         if spec is None:
             return self._refuse(SPEC_UNKNOWN, symbol=symbol)

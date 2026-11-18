@@ -553,7 +553,11 @@ class ScalperLiveAutonomousHost:
             self._release_arm()
         self._audit("AX_SCALPER_LIVE_STOPPED", open_positions=len(result.get("open_positions") or ()))
         result["message"] = str(result.get("message") or "No new entry will be submitted.")
-        if still_open:
+        if still_open and result.get("state") == RECOVERY_REQUIRED:
+            result["message"] += (
+                " Local management is paused during recovery; verify broker protection independently."
+            )
+        elif still_open:
             result["message"] += (
                 " The owner thread will attempt local management while connected and "
                 "all account, quote and execution guards pass. Broker protection must "
