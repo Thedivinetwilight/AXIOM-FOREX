@@ -626,3 +626,57 @@ def test_host_arms_exact_selected_mt5_type_only_after_typed_confirmation(tmp_pat
         assert adapter.arm_calls == 1 and adapter.send_calls == 0
     finally:
         host.close()
+
+
+def test_stored_request_identity_is_visible_as_unverified_not_invented(tmp_path):
+    from axiom_forex.workstation.ui.pages.live import autonomous_scalper_section
+
+    host, adapter, _ = _host(tmp_path)
+    state = {
+        "schema": "stored-schema", "state": "RECOVERY_REQUIRED", "run_id": "run-123",
+        "account_identity": {"account_mode": "DEMO", "server": "stored-server",
+                             "fingerprint": "stored-fingerprint", "currency": "USD"},
+        "admission": {"candidate_id": "candidate-123", "evidence_digest": "evidence-123",
+                      "policy_version": "policy-123"},
+        "strategy_fingerprint": "strategy-123",
+        "pending_submission": {"request_id": "entry-123", "symbol": "EURUSD",
+                               "side": "BUY", "lots": "0.1"},
+        "position_book": {"open_positions": [{"position_id": "77", "symbol": "EURUSD"}],
+                          "pending_closes": [{"position_id": "77", "request_id": "close-123",
+                                              "requested_lots": "0.1"}],
+                          "pending_protection_modifications": [{"position_id": "77",
+                              "request_id": "protection-123", "stop_price": "1.12345"}]},
+    }
+    host.state_store.path.write_text(json.dumps(state), encoding="utf-8")
+    before = host.state_store.path.read_bytes()
+    try:
+        view = host.view()
+        rows = view["saved_recovery"]["requests"]
+        assert len(rows) == 3
+        assert all(row["run_id"] == "run-123" and row["symbol"] == "EURUSD" for row in rows)
+        html = autonomous_scalper_section({"scalper_autonomous": view}, "nonce")
+        for identity in ("stored-server", "stored-fingerprint", "run-123", "strategy-123",
+                         "evidence-123", "policy-123", "close-123", "protection-123", "1.12345"):
+            assert identity in html
+        assert "Unverified stored requests" in html
+        assert before == host.state_store.path.read_bytes()
+        assert adapter.send_calls == adapter.arm_calls == 0
+    finally:
+        host.close()
+
+
+def test_duplicate_stored_request_ids_are_reported_damaged_without_writes(tmp_path):
+    host, adapter, _ = _host(tmp_path)
+    state = {"pending_submission": {"request_id": "duplicate"},
+             "position_book": {"pending_closes": [{"request_id": "duplicate", "position_id": "77"}],
+                               "pending_protection_modifications": []}}
+    host.state_store.path.write_text(json.dumps(state), encoding="utf-8")
+    before = host.state_store.path.read_bytes()
+    try:
+        saved = host.view()["saved_recovery"]
+        assert saved["error"] == "stored_run_state_unreadable"
+        assert len(saved["requests"]) == 2
+        assert host.state_store.path.read_bytes() == before
+        assert adapter.send_calls == adapter.arm_calls == 0
+    finally:
+        host.close()

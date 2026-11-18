@@ -1351,11 +1351,22 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
         stored_rows = [
             [cell(fmt.text(item.get("kind") or "unavailable"), label="Kind"),
              cell(fmt.text(item.get("request_id") or "unavailable"), label="Original request ID"),
-             cell(fmt.text(item.get("position_id") or "not recorded"), label="Position")]
+             cell(fmt.text(item.get("position_id") or "not recorded"), label="Position"),
+             cell(fmt.text(" / ".join(str(item.get(key) or "not recorded") for key in
+                                      ("account_mode", "account_server", "account_fingerprint", "account_currency"))), label="Stored account"),
+             cell(fmt.text(" / ".join(str(item.get(key) or "not recorded") for key in
+                                      ("run_id", "run_schema", "run_state"))), label="Stored run"),
+             cell(fmt.text(" / ".join(str(item.get(key) or "not recorded") for key in
+                                      ("candidate_id", "strategy_fingerprint", "evidence_digest", "policy_version"))), label="Stored strategy and evidence"),
+             cell(fmt.text(item.get("symbol") or "not recorded"), label="Instrument"),
+             cell(fmt.text(item.get("requested_values") or "not recorded"), label="Requested values")]
             for item in saved_recovery.get("requests", ()) if isinstance(item, Mapping)
         ]
         controls += notice("Stored recovery state", fmt.text(saved_recovery.get("note") or "Preserve this state."), tone="warn")
-        controls += table((("Kind", False), ("Original request ID", False), ("Position", False)), stored_rows,
+        controls += table((("Kind", False), ("Original request ID", False), ("Position", False),
+                           ("Stored account", False), ("Stored run", False),
+                           ("Stored strategy and evidence", False), ("Instrument", False),
+                           ("Requested values", False)), stored_rows,
                           caption="Unverified stored requests; never resend. Restart recovery may require offline reconciliation.",
                           empty=empty_state("Stored requests unavailable", "Preserve the state and reconcile with broker records."))
 

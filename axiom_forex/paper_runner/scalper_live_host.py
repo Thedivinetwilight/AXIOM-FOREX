@@ -316,6 +316,57 @@ class ScalperLiveAutonomousHost:
                         continue
                     rows.append({"kind": kind, "request_id": str(item.get("request_id") or ""),
                                  "position_id": str(item.get("position_id") or "")})
+        # All fields below are *stored* claims, not verified account facts. Do
+        # not infer a missing run identity or attribute a ticket on coincidence.
+        account = state.get("account_identity")
+        account = account if isinstance(account, Mapping) else {}
+        admission = state.get("admission")
+        admission = admission if isinstance(admission, Mapping) else {}
+        stored_positions = book.get("open_positions") if isinstance(book, Mapping) else []
+        stored_positions = stored_positions if isinstance(stored_positions, list) else []
+        source_by_id = {}
+        if isinstance(entry, Mapping) and entry.get("request_id"):
+            source_by_id[("entry", str(entry["request_id"]))] = [entry]
+        if isinstance(book, Mapping):
+            for key, kind in (("pending_closes", "close"),
+                              ("pending_protection_modifications", "protection")):
+                values = book.get(key)
+                if isinstance(values, list):
+                    for item in values:
+                        if isinstance(item, Mapping) and item.get("request_id"):
+                            source_by_id.setdefault((kind, str(item["request_id"])), []).append(item)
+        request_ids = [row["request_id"] for row in rows if row["request_id"]]
+        if (len(request_ids) != len(set(request_ids))
+                or any(len(items) != 1 for items in source_by_id.values())):
+            damaged = True
+        for row in rows:
+            sources = source_by_id.get((row["kind"], row["request_id"]), [])
+            source = sources[0] if len(sources) == 1 else {}
+            positions = [item for item in stored_positions if isinstance(item, Mapping)
+                         and str(item.get("position_id") or "") == row["position_id"]]
+            symbol = source.get("symbol")
+            if not symbol and row["position_id"] and len(positions) == 1:
+                symbol = positions[0].get("symbol")
+            row.update({
+                "account_mode": str(account.get("account_mode") or ""),
+                "account_server": str(account.get("server") or ""),
+                "account_fingerprint": str(account.get("fingerprint") or ""),
+                "account_currency": str(account.get("currency") or ""),
+                "run_id": str(state.get("run_id") or ""),
+                "run_schema": str(state.get("schema") or ""),
+                "run_state": str(state.get("state") or ""),
+                "strategy_fingerprint": str(state.get("strategy_fingerprint") or ""),
+                "candidate_id": str(admission.get("candidate_id") or ""),
+                "evidence_digest": str(admission.get("evidence_digest") or ""),
+                "policy_version": str(admission.get("policy_version") or ""),
+                "symbol": str(symbol or ""),
+                "requested_values": ", ".join(
+                    f"{key}={source[key]}" for key in (
+                        "side", "lots", "requested_lots", "stop_price", "target_price",
+                        "previous_stop_price", "previous_target_price", "reason"
+                    ) if key in source
+                ),
+            })
         damaged = damaged or any(not row["request_id"] for row in rows)
         return {"present": True, "requests": rows,
                 "error": "stored_run_state_unreadable" if damaged else "",
