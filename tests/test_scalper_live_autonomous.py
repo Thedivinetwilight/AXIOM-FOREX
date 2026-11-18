@@ -1831,3 +1831,58 @@ def test_pending_close_without_original_id_is_not_adopted_or_rewritten(real):
     assert "position-book state is not restorable" in result["recovery"]["detail"]
     assert store.path.read_bytes() == before
     assert not real["fake"].send_requests
+
+
+@pytest.mark.parametrize("overrides", [
+    {"submitted": False},
+    {"classification": "REJECTED"},
+    {"state": "REJECTED", "unknown": True, "volume_filled": "0"},
+    {"state": "REJECTED", "unknown": False, "volume_filled": "0.1"},
+])
+def test_guarded_query_does_not_clear_contradictory_unknown_outcome(overrides):
+    record = {"request_id": "request-original", "state": "UNRESOLVED", **overrides}
+    leg = SimpleNamespace(repository=SimpleNamespace(get_order=lambda _id: record))
+    venue = BrokerVenue(leg=leg, plan_factory=lambda **kw: None, query_guard=lambda _row: True)
+    result = venue.query("request-original")
+    assert result is None or result.status == UNKNOWN_OUTCOME
+    assert venue.has_unresolved
+    assert venue.record.submissions == []
+
+
+def test_guarded_query_refuses_nested_outcome_relabeling_durable_request():
+    record = {"request_id": "original", "state": "UNRESOLVED",
+              "leg_outcome": {"request_id": "original", "state": "REJECTED"}}
+    leg = SimpleNamespace(repository=SimpleNamespace(get_order=lambda _id: record))
+    venue = BrokerVenue(leg=leg, plan_factory=lambda **kw: None, query_guard=lambda _row: True)
+    assert venue.query("original") is None
+    assert venue.has_unresolved
+    assert venue.record.submissions == []
+
+
+@pytest.mark.parametrize("booked,booking_booked", [(True, False), (False, True), ("true", True)])
+def test_guarded_query_requires_durable_booking_consensus(booked, booking_booked):
+    record = {"request_id": "original", "state": "FILLED", "volume_filled": "0.1",
+              "volume_requested": "0.1", "booked": booked,
+              "booking": {"booked": booking_booked, "action": "OPEN", "position_id": "42", "price": "1.1"}}
+    leg = SimpleNamespace(repository=SimpleNamespace(get_order=lambda _id: record))
+    venue = BrokerVenue(leg=leg, plan_factory=lambda **kw: None, query_guard=lambda _row: True)
+    assert venue.query("original").status == UNKNOWN_OUTCOME
+    assert venue.has_unresolved
+    assert venue.record.submissions == []
+
+
+def test_guarded_query_accepts_only_consistent_durable_booking():
+    booking = {"booked": True, "action": "OPEN", "position_id": "42", "price": "1.1"}
+    record = {"request_id": "original", "state": "FILLED", "volume_filled": "0.1",
+              "volume_requested": "0.1", "booked": True, "booking": booking,
+              "leg_outcome": {"request_id": "original", "state": "FILLED", "submitted": True,
+                              "volume_filled": "0.1", "volume_requested": "0.1",
+                              "booked": True, "booking": dict(booking)}}
+    leg = SimpleNamespace(repository=SimpleNamespace(get_order=lambda _id: record))
+    venue = BrokerVenue(leg=leg, plan_factory=lambda **kw: None, query_guard=lambda _row: True)
+    fill = venue.query("original")
+    assert fill.status == ACCEPTED and fill.ticket == "42"
+    record["leg_outcome"]["booking"]["position_id"] = "99"
+    assert venue.query("original") is None
+    assert venue.has_unresolved
+    assert venue.record.submissions == []

@@ -459,6 +459,15 @@ class BrokerVenue:
 
         leg_outcome = raw.get("leg_outcome")
         if isinstance(leg_outcome, Mapping):
+            # A nested execution outcome cannot relabel the durable order row.
+            if (str(leg_outcome.get("request_id") or "") != str(request_id)
+                    or str(leg_outcome.get("state") or "").upper()
+                       != str(raw.get("state") or "").upper()
+                    or leg_outcome.get("booked") != raw.get("booked")
+                    or leg_outcome.get("booking") != raw.get("booking")
+                    or _d(leg_outcome.get("volume_filled")) != _d(raw.get("volume_filled"))):
+                self._unresolved.add(request_id)
+                return None
             combined = {**raw, **dict(leg_outcome)}
         else:
             broker_outcome = raw.get("outcome")
@@ -469,7 +478,7 @@ class BrokerVenue:
         booking = combined.get("booking")
         booking = dict(booking) if isinstance(booking, Mapping) else {}
         state = str(combined.get("state") or "").upper()
-        submitted = bool(combined.get("submitted", True))
+        submitted = combined.get("submitted", True)
         unknown = bool(combined.get("unknown")) or state in {"SUBMITTING", "UNRESOLVED", ""}
         filled = _d(combined.get("volume_filled"))
         requested = _d(
@@ -485,7 +494,7 @@ class BrokerVenue:
         booking_id = str(booking.get("position_id") or "")
         expected_id = str(combined.get("close_position_id") or "")
         action = str(booking.get("action") or "").upper()
-        booked = bool(combined.get("booked")) or bool(booking.get("booked"))
+        booked = combined.get("booked") is True and booking.get("booked") is True
         if expected_id:
             identity_matches = action == "CLOSE" and booking_id == expected_id
             position_id = expected_id
@@ -496,7 +505,7 @@ class BrokerVenue:
             identity_matches = action == "OPEN" and bool(booking_id)
             position_id = booking_id
 
-        if not submitted:
+        if submitted is False and state == "BLOCKED" and not unknown:
             self._unresolved.discard(request_id)
             return Fill(
                 request_id=request_id,
@@ -512,7 +521,8 @@ class BrokerVenue:
                 detail=str(combined.get("detail") or ""),
                 simulated=False,
             )
-        if state == "REJECTED" or "REJECT" in str(combined.get("classification") or "").upper():
+        if (submitted is True and state == "REJECTED" and not unknown and not booked
+                and "volume_filled" in combined and filled.is_finite() and filled == 0):
             self._unresolved.discard(request_id)
             return Fill(
                 request_id=request_id,
@@ -531,6 +541,7 @@ class BrokerVenue:
 
         if (
             unknown
+            or submitted is not True
             or state not in {"FILLED", "PARTIAL"}
             or not booked
             or not identity_matches
