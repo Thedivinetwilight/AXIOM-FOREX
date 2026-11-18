@@ -1884,3 +1884,15 @@ def test_guarded_query_accepts_only_consistent_durable_booking():
     assert venue.query("original") is None
     assert venue.has_unresolved
     assert venue.record.submissions == []
+
+
+def test_guarded_fake_broker_booking_is_queryable_without_resending(real):
+    venue = _venue(real)
+    quote = real["harness"].adapter.quote(real["platform"].spec)
+    first = venue.submit(_order("fake-query-booked"), quote)
+    assert first.status == ACCEPTED
+    before = len(real["fake"].send_requests)
+    queried = venue.query("fake-query-booked")
+    assert queried is not None and queried.status == ACCEPTED, queried
+    assert queried.request_id == first.request_id and queried.ticket == first.ticket
+    assert len(real["fake"].send_requests) == before
