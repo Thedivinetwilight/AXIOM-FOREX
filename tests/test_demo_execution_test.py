@@ -472,7 +472,7 @@ def test_the_live_page_does_not_offer_a_demo_order_smoke_test():
     app = WorkstationApp(wizard=simulated_wizard())
     html = render_page(app._context("live", "Live execution"))
     assert "Autonomous scalping" in html
-    assert "REAL ONLY" in html
+    assert "DEMO and REAL share the same checks" in html
     assert "action='/actions/demo-test-submit'" not in html
     assert "DEMO execution test" not in html
 

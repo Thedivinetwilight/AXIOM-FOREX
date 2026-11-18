@@ -259,7 +259,7 @@ def test_a_blocked_live_deck_offers_no_start_and_each_blocker_has_its_fix(tmp_pa
     html = render_page(app._context("live", "Live execution"))
     deck = _deck(html)
     assert "action='/actions/ax-scalper-live-start'" not in html
-    assert "No REAL-only AX-SCALPER runner is wired" in _text(deck)
+    assert "No MT5 AX-SCALPER runner is wired" in _text(deck)
     assert "ax-scalper-live" in deck
 
 
@@ -330,7 +330,7 @@ def test_without_an_admitted_candidate_there_is_no_submit_control(live_app):
 
     html = render_page(live_app._context("live", "Live execution"))
     text = _text(html)
-    assert "REAL-only AX-SCALPER runner" in text or "REAL ONLY" in text
+    assert "DEMO and REAL share the same checks" in text
     assert "action='/actions/scalper-live-submit'" not in html
     assert "action='/actions/ax-scalper-live-start'" not in html
 

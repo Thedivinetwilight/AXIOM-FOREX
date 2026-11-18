@@ -262,11 +262,11 @@ def test_a_ready_bridge_offers_the_start_on_the_live_page(tmp_path):
     text = _text(html)
 
     assert "Autonomous scalping" in text
-    assert "REAL ONLY" in text
+    assert "DEMO and REAL share the same checks" in text
     # The old bar-based bridge does not authorize this separate scalper lane.
     assert "action='/actions/autopilot-live-start'" not in html
     assert "action='/actions/ax-scalper-live-start'" not in html
-    assert "No REAL-only AX-SCALPER runner" in text or "not wired" in text
+    assert "No MT5 AX-SCALPER runner" in text or "not wired" in text
 
 
 def test_the_paper_page_hands_the_live_session_over_instead_of_starting_it(tmp_path):

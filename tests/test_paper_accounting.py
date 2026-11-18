@@ -1042,7 +1042,7 @@ def test_the_live_page_still_warns_before_any_live_action(tmp_path):
 
     assert "Before you use this page" in text
     assert "real order" in text
-    assert "Paper mode is the default" in text
+    assert "Paper mode is separate" in text
     assert "No MetaTrader 5 trading adapter is wired in" in text or "No real order can be sent" in text
     # The warning comes before every live control, so nothing that can lead to a
     # real order is reachable without having passed it.  (A shell-level

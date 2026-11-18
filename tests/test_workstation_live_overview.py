@@ -252,13 +252,13 @@ def test_the_live_page_is_a_separate_workflow_with_an_honest_overview():
     html = _wired_app().page("/live")[1]
     plain = _plain(html)
     assert "Autonomous scalping" in plain
-    assert "REAL ONLY" in plain
+    assert "DEMO and REAL share the same checks" in plain
     assert "LIVE · REAL BROKER" in plain
     assert "data-scope='live-execution'" in html
     assert "SIMULATED / SAMPLE DATA" in plain
     assert "The PAPER command center is on /autopilot" not in plain
     assert "href='/autopilot'" in html
-    for label in ("REAL account only", "Runner", "Quote", "The account this would trade",
+    for label in ("Terminal account type", "Runner", "Quote", "The account this would trade",
                   "Broker-reported open-position P&L", "Broker-reported open positions"):
         assert label in plain, label
     assert "account fingerprint mismatch" not in plain.lower()
@@ -285,7 +285,7 @@ def test_the_last_arm_decision_is_rendered_once_even_without_an_adapter():
     }
     html = app.page("/live")[1]
     plain = _plain(html)
-    assert "REAL-only AX-SCALPER runner is wired" in plain
+    assert "MT5 AX-SCALPER runner is wired" in plain
     assert "action='/actions/live-start'" not in html
     assert "action='/actions/scalper-live-submit'" not in html
 
@@ -358,10 +358,10 @@ def test_an_unreported_fill_is_named_and_a_reported_zero_is_shown_as_zero():
     unreported = dict(_FULL_SELECTED, broker=dict(_FULL_SELECTED["broker"], volume_filled=""))
     plain = _plain(_wired_app(selected=unreported).page("/live")[1])
     assert "Filled volume not reported" not in plain
-    assert "REAL ONLY" in plain
+    assert "DEMO and REAL share the same checks" in plain
     zero = dict(_FULL_SELECTED, broker=dict(_FULL_SELECTED["broker"], volume_filled="0"))
     plain = _plain(_wired_app(selected=zero).page("/live")[1])
-    assert "REAL ONLY" in plain
+    assert "DEMO and REAL share the same checks" in plain
 
 
 def test_a_broker_answer_without_reconciliation_is_not_called_reconciled():

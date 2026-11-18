@@ -134,7 +134,7 @@ def test_live_execution_owns_the_continuous_session():
     text = _text(html)
 
     assert "Autonomous scalping" in text
-    assert "REAL ONLY" in text
+    assert "DEMO and REAL share the same checks" in text
     assert html.index("id='ax-scalper-live'") < html.index("id='scalper-activity'")
     assert "Guarded AX-SCALPER one-shot LIVE intent" not in text
     assert "DEMO execution test" not in text
@@ -152,8 +152,8 @@ def test_the_continuous_panel_states_whether_it_is_sending_and_why_not():
     html = _live(app)
     text = _text(html)
 
-    assert "REAL ONLY" in text
-    assert "No REAL-only AX-SCALPER runner" in text or "not wired" in text
+    assert "DEMO and REAL share the same checks" in text
+    assert "No MT5 AX-SCALPER runner" in text or "not wired" in text
     assert "action='/actions/autopilot-live-start'" not in html
     assert "action='/actions/ax-scalper-live-start'" not in html
 
@@ -171,7 +171,7 @@ def test_a_ready_continuous_panel_offers_the_start_and_one_place_to_stop_it():
     # admission, account, recovery and configuration gates.
     assert "action='/actions/autopilot-live-start'" not in html
     assert "action='/actions/ax-scalper-live-start'" not in html
-    assert "REAL ONLY" in text
+    assert "DEMO and REAL share the same checks" in text
 
     pilot.start()
     html = _live(app)
@@ -196,7 +196,7 @@ def test_the_scalper_bridge_is_labelled_one_shot_and_never_a_loop():
     text = _text(html)
 
     assert "Autonomous scalping" in text
-    assert "REAL ONLY" in text
+    assert "DEMO and REAL share the same checks" in text
     assert "Guarded AX-SCALPER one-shot LIVE intent" not in text
     assert "action='/actions/scalper-live-submit'" not in html
     assert "action='/actions/demo-test-submit'" not in html
