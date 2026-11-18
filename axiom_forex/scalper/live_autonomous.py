@@ -1619,6 +1619,11 @@ class AutonomousScalper:
                 pending_protection_rows = [dict(item) for item in raw_protection_rows]
             else:
                 problems.append("stored pending-protection rows are invalid")
+        if pending_protection_rows:
+            # A broker SL/TP echo proves current position state, not which
+            # request caused it. Never erase a pending identity during ordinary
+            # restoration; exact durable-request reconciliation must own it.
+            problems.append("pending protection requires exact durable-request reconciliation")
         if pending_submission_state is not None and pending_close_ids:
             problems.append("a submission intent and unresolved close cannot be adopted together")
         if pending_submission_state is None:

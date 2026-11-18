@@ -831,14 +831,16 @@ def test_confirmed_protection_is_not_adopted_until_result_state_is_durable(real)
 
     recovered, recovered_venue, _ = build_run(real, state_store=run.state_store)
     recovered_venue._protection_reader = venue._protection_reader
+    before = run.state_store.path.read_bytes()
     outcome = recovered.recover(state=saved)
-    assert outcome["ok"] is True, outcome
-    assert recovered.book.snapshot()["pending_protection_modifications"] == []
-    assert recovered.book.get(fill.ticket).target_price == requested_target
+    assert not outcome["ok"] and recovered.state == RECOVERY_REQUIRED
+    assert "pending protection requires exact durable-request" in outcome["recovery"]["detail"]
+    assert recovered.book.open_positions == ()
+    assert run.state_store.path.read_bytes() == before
     assert len(real["fake"].send_requests) == 2
 
 
-def test_pending_target_modification_recovers_only_from_exact_broker_echo(real):
+def test_pending_target_modification_is_not_adopted_from_broker_echo_alone(real):
     run, venue, _ = build_run(real)
     fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
     requested_target = Decimal("1.11500")
@@ -881,14 +883,12 @@ def test_pending_target_modification_recovers_only_from_exact_broker_echo(real):
     real["fake"].positions[0]["tp"] = float(requested_target)
     recovered, recovered_venue, _ = build_run(real, state_store=run.state_store)
     recovered_venue._protection_reader = venue._protection_reader
+    before = run.state_store.path.read_bytes()
     outcome = recovered.recover(state=saved)
-    assert outcome["ok"] is True, outcome
-    assert recovered.book.snapshot()["pending_protection_modifications"] == []
-    restored = recovered.book.get(fill.ticket)
-    assert restored is not None
-    assert restored.stop_price == position.stop_price
-    assert restored.target_price == requested_target
-    assert restored.protection_verified is True
+    assert not outcome["ok"] and recovered.state == RECOVERY_REQUIRED
+    assert "pending protection requires exact durable-request" in outcome["recovery"]["detail"]
+    assert recovered.book.open_positions == ()
+    assert run.state_store.path.read_bytes() == before
     assert len(real["fake"].send_requests) == 2
     assert recovered.start()["ok"] is False
     assert len(real["fake"].send_requests) == 2
@@ -944,7 +944,7 @@ def test_protection_changes_preserve_mode_arming_and_real_account_gates(
         assert run.book.snapshot()["pending_protection_modifications"] == []
 
 
-def test_unknown_protection_change_survives_shutdown_and_recovers_by_readback(real):
+def test_unknown_protection_change_survives_shutdown_and_stays_unresolved(real):
     run, venue, _ = build_run(real)
     fill, position, _read_protection = _seed_guarded_scalper_position(real, run, venue)
     bid = fill.price + Decimal("0.00100")
@@ -992,21 +992,19 @@ def test_unknown_protection_change_survives_shutdown_and_recovers_by_readback(re
     assert "protection differs" in unresolved["recovery"]["detail"]
     assert fresh.book.open_positions == ()
 
-    # Simulate the terminal reflecting the timed-out request later. Recovery
-    # accepts only this broker echo, clears the pending intent, and never resends.
+    # A matching broker echo is not, by itself, proof of the original request.
     broker_row = next(
         row for row in real["fake"].positions if int(row["ticket"]) == int(fill.ticket)
     )
     broker_row["sl"] = float(requested_stop)
     recovered, recovered_venue, _ = build_run(real, state_store=run.state_store)
     recovered_venue._protection_reader = venue._protection_reader
+    before = run.state_store.path.read_bytes()
     result = recovered.recover(state=saved)
-    assert result["ok"] is True, result
-    assert recovered.state == "ARMED"
-    assert recovered.book.snapshot()["pending_protection_modifications"] == []
-    assert recovered.book.get(fill.ticket).stop_price == requested_stop
-    assert recovered.book.get(fill.ticket).protection_verified is True
-    assert recovered.guardian.open_positions[0].protected is True
+    assert not result["ok"] and recovered.state == RECOVERY_REQUIRED
+    assert "pending protection requires exact durable-request" in result["recovery"]["detail"]
+    assert recovered.book.open_positions == ()
+    assert run.state_store.path.read_bytes() == before
     assert len(real["fake"].send_requests) == 2
 
     # Recovery does not re-arm the disconnected/uncertain live session.

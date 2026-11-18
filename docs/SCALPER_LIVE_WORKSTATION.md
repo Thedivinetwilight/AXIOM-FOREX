@@ -48,7 +48,9 @@ unchanged. Broker order recovery also requires the original account mode,
 server, fingerprint, login and currency and a matching broker order ticket;
 older records lacking those facts remain blocked and preserved. Connecting does
 not resolve an autonomous request without validating its run context. These
-guards do not make restart reconciliation complete.
+guards do not make restart reconciliation complete. A matching SL/TP read-back
+alone does not clear a pending protection request on restart; its original
+identity and broker result still require exact reconciliation.
 
 ## Local LIVE configuration
 
