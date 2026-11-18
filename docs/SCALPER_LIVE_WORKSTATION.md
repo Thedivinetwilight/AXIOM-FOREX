@@ -25,7 +25,10 @@ account before using the runner. AXIOM does not switch accounts.
 unresolved autonomous request returns a refusal, the workstation host discards
 the recovery runtime, so the `/live` reconciliation control cannot always
 reach that request after restart. Preserve the state and broker records; do not
-resend, delete or rewrite them to get past the blocker. The broker monitor
+resend, delete or rewrite them to get past the blocker. Empty broker history
+is not proof that an order was never placed: without affirmative evidence the
+request stays unresolved. A cancelled order with reported deals also stays
+blocked for exact execution reconciliation. The broker monitor
 shows account-bound broker positions and locally recorded orders when available;
 its open-position profit is not a complete accounting of closed P&L or costs.
 An unreadable position makes the position list and profit unavailable rather

@@ -6,8 +6,8 @@ Two questions, both answered from broker evidence and never from assumption:
    AXIOM's ledger so a mismatch is visible instead of being averaged away.
 2. *What happened to an order whose outcome we never learned?* -- an
    ``UNRESOLVED`` record is reconciled against order and deal history.  It is
-   marked resolved only when the evidence covers the window in which the order
-   was sent; otherwise it stays unresolved and keeps blocking new orders.
+   marked resolved only on affirmative broker evidence; an empty history
+   response cannot establish coverage and keeps blocking new orders.
 
 No function here submits, modifies, or cancels anything.
 """
@@ -464,10 +464,8 @@ def reconcile_record(
     """Determine what happened to one unresolved order.  Sends nothing.
 
     Evidence order: the order ticket (if one was returned before the failure),
-    then deal history for the send window.  Only when *both* history queries
-    succeed and cover the window, and neither finds a matching order or deal,
-    and no matching open position exists, is the request concluded
-    ``RESOLVED_NOT_PLACED``.
+    then deal history for the send window. An empty response does not prove
+    that the broker supplied complete history, so absence remains unresolved.
     """
 
     previous = str(record.get("state", "UNRESOLVED")).upper()
@@ -483,7 +481,6 @@ def reconcile_record(
         orders = history_orders(terminal, start=start, end=end)
         deals = history_deals(terminal, start=start, end=end)
         positions = terminal_positions(terminal)
-        history_ok = True
     except MT5ReconciliationError as exc:
         return RecoveryResult(
             request_id=request_id,
@@ -542,6 +539,17 @@ def reconcile_record(
                 resend_allowed=False,
             )
         if state in {"CANCELED", "REJECTED", "EXPIRED"}:
+            if matching_deals:
+                # A final cancellation can follow a partial execution. Never
+                # discard that exposure as a simple rejection.
+                return RecoveryResult(
+                    request_id=request_id, previous_state=previous,
+                    state="UNRESOLVED", evidence="terminal_order_with_deals",
+                    order_ticket=matching_orders[-1].ticket,
+                    deal_tickets=deal_tickets, volume_matched=filled,
+                    resolved=False, resend_allowed=False,
+                    detail="terminal order has deal history; exact execution requires reconciliation",
+                )
             return RecoveryResult(
                 request_id=request_id,
                 previous_state=previous,
@@ -612,29 +620,19 @@ def reconcile_record(
             resend_allowed=False,
         )
 
-    if history_ok:
-        return RecoveryResult(
-            request_id=request_id,
-            previous_state=previous,
-            state="RESOLVED_NOT_PLACED",
-            evidence="history_absence",
-            order_ticket=ticket,
-            deal_tickets=(),
-            volume_matched=Decimal(0),
-            resolved=True,
-            resend_allowed=False,
-            detail=f"window={start.isoformat()}..{end.isoformat()}",
-        )
-    return RecoveryResult(  # pragma: no cover - guarded above
+    # MT5's successful history query does not attest coverage or retention;
+    # absence cannot prove that the broker never received the request.
+    return RecoveryResult(
         request_id=request_id,
         previous_state=previous,
         state="UNRESOLVED",
-        evidence="history_unavailable",
+        evidence="history_absence_inconclusive",
         order_ticket=ticket,
         deal_tickets=(),
         volume_matched=Decimal(0),
         resolved=False,
         resend_allowed=False,
+        detail=f"history coverage is unverified; window={start.isoformat()}..{end.isoformat()}",
     )
 
 

@@ -1548,7 +1548,7 @@ def test_recovery_marks_a_cancelled_order_rejected():
         repository.close()
 
 
-def test_recovery_concludes_not_placed_only_from_a_covered_window():
+def test_recovery_does_not_infer_not_placed_from_empty_history():
     fake = FakeMT5()
     repository = ForexRepository(":memory:")
     repository.save_orders([_unresolved_record()])
@@ -1556,9 +1556,11 @@ def test_recovery_concludes_not_placed_only_from_a_covered_window():
     try:
         adapter.connect()
         stored = repository.get_order("req-1")
-        assert stored["state"] == "RESOLVED_NOT_PLACED"
-        assert stored["recovery"]["evidence"] == "history_absence"
+        assert stored["state"] == "UNRESOLVED"
+        assert stored["recovery"]["evidence"] == "history_absence_inconclusive"
         assert stored["recovery"]["resend_allowed"] is False
+        assert adapter.unresolved_request_ids() == ["req-1"]
+        assert not fake.send_requests
     finally:
         adapter.disconnect(reason="test")
         repository.close()
@@ -1822,3 +1824,26 @@ def test_arm_rechecks_selected_account_type_after_terminal_refresh(harness):
     assert exc.value.reason == "mt5_arming_account_changed_during_refresh"
     assert not harness.adapter.armed
     assert harness.fake.send_requests == []
+
+
+def test_recovery_does_not_discard_execution_on_canceled_order():
+    fake = FakeMT5(
+        history_orders=[make_history_order(ticket=7001, symbol="EURUSD.pro", side="BUY",
+            volume=0.1, state=2, magic=26081001, comment="req-1", time=AT)],
+        history_deals=[make_history_deal(ticket=9001, order=7001, position_id=42,
+            symbol="EURUSD.pro", side="BUY", entry=0, volume=0.05, price=1.1,
+            magic=26081001, comment="req-1", time=AT)],
+    )
+    repository = ForexRepository(":memory:")
+    repository.save_orders([_unresolved_record(order_ticket=7001)])
+    adapter, _ = _frozen_clock_adapter(fake, repository)
+    try:
+        adapter.connect()
+        stored = repository.get_order("req-1")
+        assert stored["state"] == "UNRESOLVED"
+        assert stored["recovery"]["evidence"] == "terminal_order_with_deals"
+        assert adapter.unresolved_request_ids() == ["req-1"]
+        assert not fake.send_requests
+    finally:
+        adapter.disconnect(reason="test")
+        repository.close()
