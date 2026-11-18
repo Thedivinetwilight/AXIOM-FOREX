@@ -1223,13 +1223,16 @@ def test_durable_run_recovery_restores_full_managed_and_guardian_exposure(real):
 def test_persisted_entry_intent_is_reconciled_without_resubmission(real):
     store = JsonRunStateStore(real["tmp"] / "pending-entry-state.json")
     run, _venue_instance, _ = build_run(real, state_store=store)
+    tick_id = "tick-recovery-1"
+    fingerprint = run.admitted.strategy.fingerprint
+    request_id = f"{fingerprint[:12]}:{tick_id[:12]}:BUY"
     intent = {
-        "request_id": "entry-request-recovery-1",
+        "request_id": request_id,
         "symbol": PAIR,
         "side": "BUY",
         "lots": "0.10",
-        "signal_fingerprint": "recovered-entry-fingerprint",
-        "tick_id": "tick-recovery-1",
+        "signal_fingerprint": fingerprint,
+        "tick_id": tick_id,
         "source_time": START.isoformat(),
         "bid": "1.09990",
         "ask": "1.10010",
@@ -1259,11 +1262,11 @@ def test_persisted_entry_intent_is_reconciled_without_resubmission(real):
     first_recovery = unresolved.recover()
     assert first_recovery["ok"] is False
     assert unresolved.state == RECOVERY_REQUIRED
-    assert unresolved._pending_submission["request_id"] == "entry-request-recovery-1"
+    assert unresolved._pending_submission["request_id"] == request_id
     assert real["fake"].send_requests == []
 
     accepted_fill = Fill(
-        request_id="entry-request-recovery-1",
+        request_id=request_id,
         status=ACCEPTED,
         filled_lots=Decimal("0.10"),
         requested_lots=Decimal("0.10"),
@@ -1281,14 +1284,14 @@ def test_persisted_entry_intent_is_reconciled_without_resubmission(real):
         Decimal("1.09500"), Decimal("1.11000")
     )
     recovered_venue.query = lambda request_id: (
-        accepted_fill if request_id == "entry-request-recovery-1" else None
+        accepted_fill if request_id == request_id else None
     )
     result = recovered.recover()
     assert result["ok"] is True, result
     assert recovered.state == "ARMED"
     assert recovered._pending_submission is None
     assert recovered.book.get("31415") is not None
-    assert recovered.book.get("31415").entry_request_id == "entry-request-recovery-1"
+    assert recovered.book.get("31415").entry_request_id == request_id
     assert recovered.guardian.open_positions[0].position_id == "31415"
     assert real["fake"].send_requests == []
 
@@ -1739,4 +1742,92 @@ def test_recovery_required_tick_never_manages_or_persists(real):
     outcome = run.on_tick(**tick_kwargs(real))
     assert outcome["blocked"] == "recovery_required"
     assert run.state_store.path.read_bytes() == before
+    assert not real["fake"].send_requests
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"schema":"one","schema":"two"}',
+    b'{"schema":"one","equity":NaN}',
+    b'{"schema":"one","equity":Infinity}',
+])
+def test_invalid_json_state_is_preserved_and_cannot_arm(real, raw):
+    store = JsonRunStateStore(real["tmp"] / "invalid-json-state.json")
+    store.path.write_bytes(raw)
+    run, _, _ = build_run(real, state_store=store)
+    assert not run.recover()["ok"]
+    assert not run.start()["ok"]
+    assert run.stop()["state"] == RECOVERY_REQUIRED
+    assert store.path.read_bytes() == raw
+    assert not real["fake"].send_requests
+
+
+@pytest.mark.parametrize("removed", ["target_price", "previous_stop_price", "previous_target_price"])
+def test_incomplete_pending_protection_is_rejected_and_preserved(real, removed):
+    store = JsonRunStateStore(real["tmp"] / "incomplete-protection.json")
+    run, venue, _ = build_run(real, state_store=store)
+    fill, position, _ = _seed_guarded_scalper_position(real, run, venue)
+    real["fake"].protection_script = [None]
+    run.book.modify_protection(position_id=fill.ticket,
+        stop_price=position.stop_price, target_price=Decimal("1.11500"),
+        now_ms=int(START.timestamp() * 1000), request_id="protect-original")
+    state = store.load()
+    del state["position_book"]["pending_protection_modifications"][0][removed]
+    store.save(state)
+    before = store.path.read_bytes()
+    recovered, _, _ = build_run(real, state_store=store)
+    result = recovered.recover()
+    assert not result["ok"] and recovered.state == RECOVERY_REQUIRED
+    assert "position-book state is not restorable" in result["recovery"]["detail"]
+    assert store.path.read_bytes() == before
+    assert len(real["fake"].protection_requests) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("request_id", "different-request"), ("signal_fingerprint", "different-strategy"),
+    ("source_time", "not-a-time"), ("lots", "NaN"), ("tick_id", ""),
+    ("risk_account", "0"), ("target_price", "NaN"), ("symbol", "OTHER"),
+    ("requested_at_ms", True),
+])
+def test_damaged_pending_entry_is_not_adopted_or_rewritten(real, field, value):
+    store = JsonRunStateStore(real["tmp"] / "damaged-entry.json")
+    run, _, _ = build_run(real, state_store=store)
+    fingerprint = run.admitted.strategy.fingerprint
+    tick_id = "tick-recovery-1"
+    run._pending_submission = {
+        "request_id": f"{fingerprint[:12]}:{tick_id[:12]}:BUY", "symbol": PAIR,
+        "side": "BUY", "lots": "0.10", "signal_fingerprint": fingerprint,
+        "tick_id": tick_id, "source_time": START.isoformat(), "bid": "1.09990",
+        "ask": "1.10010", "stop_price": "1.09500", "target_price": "1.11000",
+        "requested_at_ms": int(START.timestamp() * 1000), "risk_account": "50",
+        "notional_account": "11000",
+    }
+    run._pending_submission[field] = value
+    store.save(run.snapshot())
+    before = store.path.read_bytes()
+    recovered, venue, _ = build_run(real, state_store=store)
+    venue.query = lambda _request_id: pytest.fail("damaged intent must not be queried")
+    result = recovered.recover()
+    assert not result["ok"] and recovered.state == RECOVERY_REQUIRED
+    assert "submission intent is incomplete or inconsistent" in result["recovery"]["detail"]
+    assert recovered._pending_submission is None
+    assert store.path.read_bytes() == before
+    assert not real["fake"].send_requests
+
+
+def test_pending_close_without_original_id_is_not_adopted_or_rewritten(real):
+    store = JsonRunStateStore(real["tmp"] / "damaged-close.json")
+    run, _, _ = build_run(real, state_store=store)
+    position = run.book.open_position(position_id="31415", symbol=PAIR, side="BUY",
+        lots=Decimal("0.10"), entry_price=Decimal("1.10000"),
+        stop_price=Decimal("1.09500"), target_price=None,
+        now_ms=int(START.timestamp() * 1000), request_id="entry-31415")
+    assert run._record_position_risk(position)
+    run.book._pending_closes["31415"] = {"request_id": "", "requested_lots": "0.10"}
+    store.save(run.snapshot())
+    before = store.path.read_bytes()
+    recovered, _, _ = build_run(real, state_store=store)
+    result = recovered.recover()
+    assert not result["ok"] and recovered.state == RECOVERY_REQUIRED
+    assert "position-book state is not restorable" in result["recovery"]["detail"]
+    assert store.path.read_bytes() == before
     assert not real["fake"].send_requests

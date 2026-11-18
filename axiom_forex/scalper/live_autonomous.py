@@ -201,8 +201,20 @@ class JsonRunStateStore:
     def load(self) -> dict[str, Any] | None:
         if not self.path.exists():
             return None
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate_json_key")
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> None:
+            raise ValueError("nonfinite_json_constant:" + value)
+
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            value = json.loads(self.path.read_text(encoding="utf-8"),
+                               object_pairs_hook=unique_object, parse_constant=reject_constant)
         except Exception as exc:
             raise RunStateStoreError("run_state_read_failed") from exc
         if not isinstance(value, dict):
@@ -1490,6 +1502,38 @@ class AutonomousScalper:
                 problems.append("persisted submission intent is malformed or lacks its exact request id")
             else:
                 pending_submission_state = dict(pending_submission)
+                try:
+                    intent = pending_submission_state
+                    request_id = intent["request_id"]
+                    symbol = intent["symbol"]
+                    side = intent["side"]
+                    fingerprint = intent["signal_fingerprint"]
+                    tick_id = intent["tick_id"]
+                    source_time = datetime.fromisoformat(intent["source_time"])
+                    requested_at = intent["requested_at_ms"]
+                    spec = self.specs[symbol]
+                    lots = _d(intent["lots"])
+                    bid = _d(intent["bid"])
+                    ask = _d(intent["ask"])
+                    stop = _d(intent["stop_price"])
+                    risk = _d(intent["risk_account"])
+                    notional = _d(intent["notional_account"])
+                    raw_target = intent["target_price"]
+                    target = None if raw_target is None else _d(raw_target)
+                    if (not isinstance(request_id, str) or not request_id or len(request_id) > 128
+                            or not isinstance(fingerprint, str) or fingerprint != current_strategy
+                            or not isinstance(tick_id, str) or not tick_id
+                            or side not in {"BUY", "SELL"} or source_time.utcoffset() is None
+                            or not isinstance(requested_at, int) or isinstance(requested_at, bool)
+                            or requested_at < 0 or any(value is None or value <= 0
+                                for value in (lots, bid, ask, stop, risk, notional))
+                            or bid > ask or lots < spec.volume_min or lots > spec.volume_max
+                            or lots % spec.volume_step != 0
+                            or raw_target is not None and (target is None or target <= 0)
+                            or request_id != f"{fingerprint[:12]}:{tick_id[:12]}:{side}"):
+                        raise ValueError("submission_intent_invalid")
+                except Exception:
+                    problems.append("persisted submission intent is incomplete or inconsistent")
 
         def parse_timestamp(value: Any, name: str, *, optional: bool = False) -> int | None:
             if value is None and optional:

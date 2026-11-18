@@ -567,7 +567,8 @@ class PositionBook:
                 raise ValueError("invalid_pending_close")
             position_id = str(row.get("position_id") or "")
             request_id = str(row.get("request_id") or "")
-            if position_id not in restored_open or position_id in pending_closes:
+            if (position_id not in restored_open or position_id in pending_closes
+                    or not request_id or len(request_id) > 128):
                 raise ValueError("pending_close_identity_invalid")
             requested = decimal_value(row.get("requested_lots"), "pending_close_quantity")
             if requested <= 0 or requested > restored_open[position_id].lots:
@@ -589,6 +590,8 @@ class PositionBook:
             position_id = str(row.get("position_id") or "")
             request_id = str(row.get("request_id") or "")
             position = restored_open.get(position_id)
+            if not {"stop_price", "target_price", "previous_stop_price", "previous_target_price"}.issubset(row):
+                raise ValueError("pending_protection_terms_incomplete")
             stop = decimal_value(row.get("stop_price"), "pending_protection_stop")
             target_raw = (
                 row.get("target_price")
