@@ -1,6 +1,6 @@
 # AX-SCALPER LIVE workstation lane
 
-The continuous REAL-only AX-SCALPER runner is wired into `/live`. It uses the
+The continuous MT5 AX-SCALPER runner is wired into `/live`. It uses the
 existing guarded MT5 adapter and order route. The controls do not connect,
 switch accounts, or send on page load. Nothing here claims profitability or
 that a strategy has been admitted.
@@ -18,7 +18,7 @@ the current limitations and safe update steps.
 ```text
 explicit Connect on Setup
   -> already-connected MT5 observation session
-  -> verified REAL account and exact local account binding
+  -> verified DEMO or REAL account and exact local account binding
   -> signed admission policy and independent raw replay
   -> operator Arm and Start on /live
   -> fresh quote validation and one admitted strategy
@@ -30,7 +30,7 @@ explicit Connect on Setup
 
 `BrokerVenue` implements the scalper venue protocol but holds no adapter. There
 is no direct order-send path in the workstation UI. `LiveLeg` and the adapter
-re-check REAL account identity, LIVE mode, arming, evidence lifecycle, symbol
+re-check the bound account identity, LIVE mode, arming, evidence lifecycle, symbol
 terms, unresolved work, volume grid, margin, quote age and protection before a
 submission. PAPER has no adapter and its local capital is never used by this
 LIVE lane.
@@ -39,7 +39,7 @@ LIVE lane.
 
 Arm is refused unless all these checks pass at the time of the action:
 
-* MT5 is explicitly connected and positively reports `REAL`.
+* MT5 is explicitly connected and positively reports `DEMO` or `REAL`.
 * The local server, login fingerprint and currency exactly match MT5.
 * Execution mode is confirmed `LIVE`, and the shared adapter is available and
   not held by another LIVE workflow.
@@ -52,8 +52,8 @@ Arm is refused unless all these checks pass at the time of the action:
   unsafe stored run state exists.
 * The broker reports a valid protective stop for the exact symbol.
 
-Arm requires the account fingerprint and `ARM AX-SCALPER LIVE`. It sends no
-order. Start separately requires the same candidate and fingerprint plus
+Arm requires the account type, a space, and fingerprint and `ARM AX-SCALPER LIVE`. It sends no
+order. Start separately requires the same candidate, account type and fingerprint plus
 `START AX-SCALPER LIVE`; it rechecks account, evidence, risk, recovery and mode.
 The host reads current balance and equity from the adapter; it does not derive
 capital from PAPER or copy account values into configuration.
@@ -81,7 +81,7 @@ are disabled.
 
 No genuine candidate is established as admitted in this checkout. Test
 fixtures, sample data and PAPER results are not strategy evidence. The current
-terminal is reported as DEMO, which this lane rejects. A real Windows/MT5
+terminal account has not been checked in this work. A real Windows/MT5
 machine must also verify the launcher, account identity, broker symbol and
 volume terms, protective stop read-back, entry/close outcomes, restart recovery
 and operator stop behavior. Until those items pass, the build can show the

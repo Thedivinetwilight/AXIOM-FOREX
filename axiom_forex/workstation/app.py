@@ -778,7 +778,7 @@ class WorkstationApp:
             return {"available": False, "state": "UNAVAILABLE",
                     "reason": "real_only_scalper_runner_unavailable",
                     "blockers": [{"reason": "real_only_scalper_runner_unavailable",
-                                  "message": "No REAL-only AX-SCALPER runner is wired here.",
+                                  "message": "No MT5 AX-SCALPER runner is wired here.",
                                   "hint": "Launch the workstation with the explicit MT5/provider setup."}]}
         try:
             return dict(controller.view() or {})
@@ -1274,7 +1274,7 @@ class WorkstationApp:
     ) -> tuple[int, str, str]:
         if action == "autopilot-live-start":
             return (HTTPStatus.CONFLICT, "/live",
-                    "The older bar-based LIVE start is disabled in this scalper-only build. Use the REAL-only AX-SCALPER arm and start controls on /live.")
+                    "The older bar-based LIVE start is disabled in this scalper-only build. Use the MT5 AX-SCALPER arm and start controls on /live.")
         if self.autopilot is None and action not in {"scalper-paper-start", "scalper-paper-observe", "scalper-paper-stop", "scalper-paper-select-symbol", "scalper-paper-acknowledge-recovery"}:
             return (
                 HTTPStatus.CONFLICT,
@@ -1545,7 +1545,7 @@ class WorkstationApp:
         if action.startswith("scalper-live-"):
             if action != "scalper-live-reconcile":
                 return (HTTPStatus.CONFLICT, "/live",
-                        "The one-shot LIVE intent path is disabled in this scalper-only build. Use the continuous REAL-only AX-SCALPER controls on /live; existing requests may still be reconciled by their exact id.")
+                        "The one-shot LIVE intent path is disabled in this scalper-only build. Use the continuous MT5 AX-SCALPER controls on /live; existing requests may still be reconciled by their exact id.")
             return self._scalper_live_action(action, form)
         if action.startswith("autopilot-") or action.startswith("scalper-paper-"):
             return self._autopilot_action(action, form)
@@ -1943,7 +1943,7 @@ class WorkstationApp:
         controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
         if controller is None:
             return (HTTPStatus.BAD_REQUEST, "/live",
-                    "No REAL-only AX-SCALPER runner is wired into this workstation. Nothing was armed or started.")
+                    "No MT5 AX-SCALPER runner is wired into this workstation. Nothing was armed or started.")
 
         def field(name: str) -> str:
             raw = form.get(name)

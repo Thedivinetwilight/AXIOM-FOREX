@@ -557,8 +557,8 @@ def test_the_live_page_says_when_no_order_can_be_sent():
     app = _app(None)
     status, html = app.page("/live")
     assert int(status) == 200
-    assert "REAL ONLY" in html
-    assert "REAL-only AX-SCALPER runner" in html
+    assert "MT5 LIVE" in html
+    assert "MT5 AX-SCALPER runner" in html
     assert "action='/actions/live-start'" not in html
 
 
@@ -596,7 +596,7 @@ def test_the_live_page_says_when_the_next_signal_will_send():
     status, html = app.page("/live")
     assert int(status) == 200
     assert "Autonomous scalping" in html
-    assert "REAL-only AX-SCALPER runner" in html
+    assert "MT5 AX-SCALPER runner" in html
     assert "action='/actions/autopilot-live-start'" not in html
     assert "action='/actions/ax-scalper-live-start'" not in html
 

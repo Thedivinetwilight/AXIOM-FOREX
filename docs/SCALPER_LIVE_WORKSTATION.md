@@ -1,7 +1,7 @@
 # Start AX-SCALPER LIVE on the workstation
 
-This guide describes the continuous REAL-only runner on `/live`. It never
-accepts a DEMO account. It uses the workstation's already-connected MT5 session
+This guide describes the continuous MT5 runner on `/live` for a positively identified
+DEMO or REAL account. The checks are the same for both. It uses the workstation's already-connected MT5 session
 and existing guarded adapter; it does not connect, switch accounts, or send on
 page load.
 
@@ -11,14 +11,14 @@ The runner and its `/live` controls are wired. **The branch does not contain a
 candidate proven eligible for live trading.** A real signed evidence package
 must pass the independent raw-data replay and current admission policy before
 the Arm control can appear. Synthetic test fixtures are not strategy evidence.
-The REAL account and all broker-specific values below must also match. Until
+The selected account and all broker-specific values below must also match. Until
 those conditions are true, the page explains the blocker and Start stays
 unavailable. Do not bypass an admission refusal or use this as a profitability
 claim.
 
 A previous report described the terminal account as DEMO; its current state has
-not been checked during this change. This lane refuses DEMO. Sign in to the
-intended REAL account in MetaTrader 5 yourself and confirm the server and
+not been checked during this change. Sign in to the
+intended DEMO or REAL account in MetaTrader 5 yourself and confirm the server and
 account before using the runner. AXIOM does not switch accounts.
 
 **Integration remains incomplete.** In particular, when restart recovery of an
@@ -42,7 +42,7 @@ Do not delete or rewrite a snapshot to bypass this check.
 ## Local LIVE configuration
 
 The ignored file is `scalper_live_settings.local.json` in the repository root.
-Create it only after connecting to the intended REAL account. The template below
+Create it only after connecting to the intended MT5 account. The template below
 is intentionally incomplete: replace every blank with a broker-verified or
 operator-approved value. Empty values fail validation. Do not copy PAPER
 capital or guess a cost, contract size, margin term, or risk limit.
@@ -112,7 +112,7 @@ file private and local.
 
 All risk and cost fields are required. Additional tick-quality and decision
 parameters use only the validated defaults defined by the current code. The
-runner reads starting balance and equity from the confirmed REAL terminal at
+runner reads starting balance and equity from the confirmed MT5 terminal at
 explicit Start; no balance is entered or copied into this file.
 
 ## Evidence and explicit controls
@@ -121,7 +121,7 @@ explicit Start; no balance is entered or copied into this file.
    settings used for the already-connected terminal. Keep the workstation bound
    to loopback.
 2. On **Setup**, press **Connect** yourself. Confirm the page reports the
-   intended server, REAL account type, account currency, and fingerprint.
+   intended server, DEMO or REAL account type, account currency, and fingerprint.
 3. Put the independently reviewed, signed evidence and admission policy in the
    local paths documented by `SCALPER_ADMISSION.md` and
    `SCALPER_RAW_REPLAY_V2.md`. They must bind the exact strategy, symbol,
@@ -129,10 +129,10 @@ explicit Start; no balance is entered or copied into this file.
    candidate.
 4. Fill the LIVE settings file with actual verified terms. Reload `/live` and
    resolve every displayed blocker. Do not arm while any blocker remains.
-5. **Arm AX-SCALPER** requires the exact candidate, account fingerprint and
+5. **Arm AX-SCALPER** requires the exact candidate, account type plus fingerprint and
    phrase `ARM AX-SCALPER LIVE`. Arm changes no broker position and sends no
    order. **Start AX-SCALPER LIVE** is a separate action requiring the same
-   candidate, fingerprint and `START AX-SCALPER LIVE`.
+   candidate, account type plus fingerprint and `START AX-SCALPER LIVE`.
 6. The page reports quote age, decisions/refusals, runner state and managed
    positions, with the monitoring limitations noted above. **Stop new entries**
    does not close broker positions. The local manager attempts to continue only

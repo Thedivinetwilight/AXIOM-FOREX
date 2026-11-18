@@ -1,4 +1,4 @@
-"""Autonomous AX-SCALPER, on one declared real-money account, once armed.
+"""Autonomous AX-SCALPER on one explicitly bound MT5 account.
 
 This is the loop the LIVE lane was missing: fresh broker quotes in, decisions by
 one *admitted* strategy, the existing risk guardian, one submission through the
@@ -12,13 +12,12 @@ It is not a second execution path.  Every order goes through
 ``LiveLeg.execute`` — the same blockers, gate, router and ``MT5TradingAdapter``
 a strategy order already uses.  It is not a strategy shortcut: the only strategy
 it may run is the one named by an admission verdict it was handed at
-construction, and it refuses to start without one.  It is not a demo/PAPER mode:
-the venue is a live venue, the account must verify as REAL, and PAPER keeps the
+construction, and it refuses to start without one.  The venue uses MT5 for either a verified DEMO or REAL account, and PAPER keeps the
 desk it already has.
 
 The steps of one decision, in order
 -----------------------------------
-1. **the account** — :func:`~axiom_forex.scalper.live_account.verify_real_account`
+1. **the account** — :func:`~axiom_forex.scalper.live_account.verify_mt5_account`
    on the adapter's own status, before every decision, not once at start-up;
 2. **the quote** — the tick core validates symbol, sequence, age, spread and
    gap; a stale or crossed quote cannot produce a decision;
@@ -66,7 +65,7 @@ from .execution import (
     UNKNOWN_OUTCOME,
 )
 from .guardian import Guardian, OpenPositionRisk
-from .live_account import AccountVerdict, ExpectedAccount, verify_real_account
+from .live_account import AccountVerdict, ExpectedAccount, verify_mt5_account
 from .positions import CLOSE_UNCONFIRMED, PositionBook
 from .signals import Strategy
 from .ticks import Tick, TickCore
@@ -260,7 +259,7 @@ class RunEvent:
 
 
 class AutonomousScalper:
-    """The LIVE loop: verified REAL account, admitted strategy, guarded orders."""
+    """The LIVE loop: verified MT5 account, admitted strategy, guarded orders."""
 
     def __init__(
         self,
@@ -286,10 +285,12 @@ class AutonomousScalper:
         session_running: Callable[[], bool] | None = None,
         approval_active: Callable[[], bool] | None = None,
         state_store: JsonRunStateStore | Any = None,
+        expected_account_mode: str = "REAL",
     ) -> None:
         self.adapter = adapter
         self.mode = mode
         self.expected_account = expected_account
+        self.expected_account_mode = expected_account_mode
         self.admitted = admitted
         self.venue = venue
         self.trader = trader
@@ -340,7 +341,7 @@ class AutonomousScalper:
             status = dict(self.adapter.status() or {})
         except Exception:
             status = {}
-        return verify_real_account(status, self.expected_account)
+        return verify_mt5_account(status, self.expected_account, expected_mode=self.expected_account_mode)
 
     def _mode_name(self) -> str:
         return str(getattr(self.mode, "mode", "") or "").upper()
@@ -417,10 +418,10 @@ class AutonomousScalper:
         if not verdict.ok:
             blockers.append(
                 {
-                    "reason": ACCOUNT_NOT_REAL if verdict.mode != "REAL" else ACCOUNT_UNVERIFIED,
-                    "message": "The account is not the verified real-money account: "
+                    "reason": ACCOUNT_NOT_REAL if verdict.mode not in {"REAL", "DEMO"} else ACCOUNT_UNVERIFIED,
+                    "message": "The account is not the verified run account: "
                     + (verdict.detail or verdict.mode),
-                    "hint": "Sign the terminal in to the declared real account and connect "
+                    "hint": "Sign the terminal in to the declared account and connect "
                     "again. AXIOM never switches accounts by itself.",
                 }
             )
@@ -1338,7 +1339,7 @@ class AutonomousScalper:
             "account_mode": current_account.mode,
         }
         if not current_account.ok:
-            problems.append("current real account is not verified")
+            problems.append("current MT5 account is not verified")
         if not isinstance(stored_account, Mapping) or dict(stored_account) != expected_account:
             problems.append("account identity differs or was not stored")
 
@@ -1657,8 +1658,7 @@ class AutonomousScalper:
         """Return the complete versioned state required for an exact restart."""
 
         # Persist the run's declared identity, never the newly selected terminal
-        # account after a mismatch or disconnect. This lane is currently REAL-only;
-        # a future multi-mode lane must bind its observed type at explicit arm.
+        # account after a mismatch or disconnect. The type was bound at arm.
         expected = self.expected_account
         book_state = self.book.snapshot()
         return {
@@ -1669,7 +1669,7 @@ class AutonomousScalper:
                 "server": "" if expected is None else expected.server,
                 "fingerprint": "" if expected is None else expected.fingerprint,
                 "currency": "" if expected is None else expected.currency,
-                "account_mode": "REAL",
+                "account_mode": self.expected_account_mode,
             },
             "symbols": dict(self.symbols),
             "instrument_specs": {

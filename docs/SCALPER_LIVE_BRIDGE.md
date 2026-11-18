@@ -1,7 +1,7 @@
 # Guarded AX-SCALPER one-shot LIVE bridge
 
 > Historical implementation reference: the current workstation disables new
-> one-shot submissions and uses the separate continuous REAL-only controls on
+> one-shot submissions and uses the separate continuous MT5 controls on
 > `/live`. Its old branch-specific updater commands below are not instructions
 > for the current feature branch. See `SCALPER_LIVE_WORKSTATION.md` for current
 > blockers, including the unresolved autonomous restart-reconciliation gap.

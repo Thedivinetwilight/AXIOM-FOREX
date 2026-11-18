@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -199,7 +200,7 @@ def test_demo_identity_refuses_before_platform_adapter_or_order_mutation(tmp_pat
             account_confirmation=account_fingerprint(LOGIN),
         )
         assert result["ok"] is False
-        assert result["reason"] == "real_account_required"
+        assert result["reason"] == "account_confirmation_mismatch"
         assert adapter.arm_calls == 0
         assert adapter.send_calls == 0
         assert platform_calls == []
@@ -225,7 +226,7 @@ def test_workstation_arm_action_reaches_runner_and_preserves_demo_refusal(tmp_pa
         })
         assert int(result) == 409
         assert redirect == "/live"
-        assert "real_account_required" in message
+        assert "account_confirmation_mismatch" in message
         assert adapter.arm_calls == 0
         assert adapter.send_calls == 0
         assert platform_calls == []
@@ -289,13 +290,13 @@ def test_live_page_is_one_real_only_autopilot_and_has_no_demo_or_legacy_start():
     )
     html = render_live(ctx)
     assert "Autonomous scalping" in html
-    assert "REAL ONLY" in html
+    assert "MT5 LIVE" in html
     assert "The selected terminal account is DEMO." in html
     assert "action='/actions/demo-test-submit'" not in html
     assert "action='/actions/live-start'" not in html
     assert "action='/actions/autopilot-live-start'" not in html
     assert "action='/actions/scalper-live-submit'" not in html
-    assert "Only a terminal-confirmed REAL account" in html
+    assert "DEMO and REAL share the same checks" in html
 
 
 def test_live_page_renders_explicit_arm_and_start_forms_only_for_ready_admission():
@@ -478,7 +479,9 @@ def test_broker_monitor_reports_incomplete_position_read_as_unavailable(tmp_path
 
 def test_broker_monitor_does_not_report_other_account_as_real(tmp_path):
     host, adapter, _ = _host(tmp_path)
-    # The fixture remains DEMO even if it happens to have matching identity.
+    adapter.status = lambda: {"connected": True, "account_mode": "CONTEST", "account_mode_confirmed": True,
+                              "account_fingerprint": account_fingerprint(LOGIN),
+                              "redacted_account": {"server": SERVER, "currency": "USD"}}
     monitor = host._broker_monitor(host._configuration_review())
     assert not monitor["available"]
     assert not monitor["pnl"]["available"]
@@ -572,6 +575,7 @@ def test_durable_query_binding_requires_current_real_account_and_exact_record(tm
     row = {"broker_id": "mt5_terminal", "account_fingerprint": fingerprint,
            "account_server": SERVER, "account_mode": "REAL", "provider_symbol": SYMBOL,
            "strategy_id": "strategy"}
+    host._bound_mode = "REAL"
     check = lambda record: host._matches_durable_request(record, expected=expected,
                                                          symbol=SYMBOL, strategy_id="strategy")
     assert check(row)
@@ -591,7 +595,34 @@ def test_account_type_notice_does_not_claim_demo_or_contest_are_supported():
     demo = _account_kind_notice({"account_mode": "DEMO"})
     contest = _account_kind_notice({"account_mode": "CONTEST"})
     real = _account_kind_notice({"account_mode": "REAL"})
-    assert "currently refuses DEMO" in demo
+    assert "same admission, risk and execution checks" in demo
     assert "refuses CONTEST" in contest
     assert "No real money is at risk" not in contest
     assert "incomplete restart-recovery" in real
+
+
+@pytest.mark.parametrize("mode", ["DEMO", "REAL"])
+def test_host_arms_exact_selected_mt5_type_only_after_typed_confirmation(tmp_path, mode):
+    from axiom_forex.scalper.live_account import ExpectedAccount
+
+    host, adapter, _ = _host(tmp_path)
+    adapter.status = lambda: {"connected": True, "account_mode": mode, "account_mode_confirmed": True,
+                              "account_fingerprint": account_fingerprint(LOGIN),
+                              "redacted_account": {"server": SERVER, "currency": "USD"},
+                              "trading_enabled_setting": True, "armed": adapter.armed}
+    adapter.stop_requirement = lambda *_a, **_kw: {"valid": True}
+    host.platform_factory = lambda _pair: SimpleNamespace(broker_symbol=SYMBOL, spec=object())
+    host.live_workflow.armed_strategy = SimpleNamespace(register_delegate=lambda *_a: None,
+                                                          unregister_delegate=lambda *_a: None)
+    candidate = default_strategies()[0].fingerprint
+    try:
+        wrong = host.arm(candidate_id=candidate, confirmation=ARM_PHRASE,
+                         account_confirmation=f"{'REAL' if mode == 'DEMO' else 'DEMO'} {account_fingerprint(LOGIN)}")
+        assert not wrong["ok"] and adapter.arm_calls == 0
+        right = host.arm(candidate_id=candidate, confirmation=ARM_PHRASE,
+                         account_confirmation=f"{mode} {account_fingerprint(LOGIN)}")
+        assert right["ok"], right
+        assert host._bound_mode == mode
+        assert adapter.arm_calls == 1 and adapter.send_calls == 0
+    finally:
+        host.close()

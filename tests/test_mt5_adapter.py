@@ -1808,3 +1808,17 @@ def test_a_switch_after_arming_keeps_arming_but_matches_nothing():
         assert harness.adapter.armed_account_matches_current is True
     finally:
         harness.repository.close()
+
+
+def test_arm_rechecks_selected_account_type_after_terminal_refresh(harness):
+    harness.fake.trade_mode = 2
+    harness.adapter.refresh_account()
+    fingerprint = harness.adapter.account_fingerprint()
+    harness.fake.trade_mode = 0  # switched between operator review and the arm refresh
+    with pytest.raises(MT5SubmitRefused) as exc:
+        harness.adapter.arm_trading(confirm="ENABLE LIVE TRADING", account_login=harness.fake.account_login,
+                                   server=harness.fake.account_server, account_fingerprint=fingerprint,
+                                   account_mode="REAL", account_currency="USD")
+    assert exc.value.reason == "mt5_arming_account_changed_during_refresh"
+    assert not harness.adapter.armed
+    assert harness.fake.send_requests == []

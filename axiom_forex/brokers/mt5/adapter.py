@@ -649,6 +649,8 @@ class MT5TradingAdapter:
         account_login: int | None = None,
         server: str | None = None,
         account_fingerprint: str | None = None,
+        account_mode: str | None = None,
+        account_currency: str | None = None,
     ) -> dict[str, Any]:
         """Explicit local authorisation to submit live orders.
 
@@ -699,6 +701,15 @@ class MT5TradingAdapter:
             raise MT5SubmitRefused(
                 "mt5_account_profile_invalid", ",".join(validation["problems"])
             )
+        # Refresh may have observed a switch after the first acknowledgement.
+        if (account_login is not None and int(account_login) != self._status.account_login
+                or server is not None and str(server).strip() != self._status.account_server
+                or account_fingerprint is not None and str(account_fingerprint).strip() != self.account_fingerprint()
+                or account_mode is not None and (account_mode not in {"DEMO", "REAL"}
+                                                or not self.account_mode_confirmed
+                                                or self.account_mode != account_mode)
+                or account_currency is not None and str(account_currency).strip() != self._status.account_currency):
+            raise MT5SubmitRefused("mt5_arming_account_changed_during_refresh")
         unresolved = self.unresolved_request_ids()
         if unresolved:
             raise MT5SubmitRefused("mt5_unresolved_order_present", ",".join(unresolved))

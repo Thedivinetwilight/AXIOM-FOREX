@@ -277,7 +277,7 @@ def continuous_live_section(view: Mapping[str, Any], ctx: Any) -> str:
         ),
         readout(
             "Order sending",
-            chip("SENDING REAL ORDERS", "danger", dot=True) if sending else chip("not sending", "muted"),
+            chip("ORDER SENDING ENABLED", "danger", dot=True) if sending else chip("not sending", "muted"),
             foot="adapter preflight decides every order",
             tone="live" if sending else "",
         ),
@@ -460,8 +460,8 @@ def _account_kind_notice(view: Mapping[str, Any]) -> str:
     if kind == "DEMO":
         return notice(
             "The connected account is a DEMO account",
-            "AX-SCALPER currently refuses DEMO accounts; equivalent DEMO and REAL support "
-            "has not yet been implemented. Other tools have their own restrictions.",
+            "DEMO is selected in MT5. The same admission, risk and execution checks apply; "
+            "other tools have their own restrictions.",
             tone="warn",
         )
     if kind == "CONTEST":
@@ -1221,7 +1221,7 @@ def _last_path_section(view: Mapping[str, Any]) -> str:
 
 
 def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
-    """One REAL-only AX-SCALPER run surface, backed by its owner-thread host."""
+    """One MT5 AX-SCALPER run surface, backed by its owner-thread host."""
 
     scalper = dict(view.get("scalper_autonomous") or {})
     state = str(scalper.get("state") or "UNAVAILABLE")
@@ -1246,7 +1246,7 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     tone = "danger" if state == "RUNNING" else "warn" if state in {"PAUSED", "RECOVERY_REQUIRED"} else "ok" if state == "ARMED" else "muted"
     readouts = [
         readout("Runner", chip(state, tone, dot=state == "RUNNING"), foot="one strategy, one verified symbol", tone="live" if state == "RUNNING" else ""),
-        readout("Account", chip(str(scalper.get("account_mode") or "UNKNOWN"), "danger" if str(scalper.get("account_mode") or "").upper() != "REAL" else "ok", dot=True), foot="REAL only; DEMO is refused", small=True),
+        readout("Account", chip(str(scalper.get("account_mode") or "UNKNOWN"), "danger" if str(scalper.get("account_mode") or "").upper() == "REAL" else "warn", dot=True), foot="MT5 selected account; REAL can risk money", small=True),
         readout("MT5 connection", chip("connected" if scalper.get("connected") else "not connected", "ok" if scalper.get("connected") else "warn"), foot=fmt.text(scalper.get("account_server") or "server not reported"), small=True),
         readout("Quote", chip("fresh" if tick.get("fresh") else "unavailable / stale", "ok" if tick.get("fresh") else "warn"), foot=f"{fmt.text(tick.get('age_ms') if tick.get('age_ms') is not None else '—')} ms · {fmt.text(tick.get('symbol') or config.get('symbol') or 'no symbol')}", small=True),
         readout("Managed positions", fmt.text(len(positions)), foot="broker positions remain open after Stop", small=True),
@@ -1292,13 +1292,13 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     else:
         readiness_banner = notice(
             "No real order can be sent right now",
-            "The AX-SCALPER REAL runner is not running. Its account, evidence, configuration, recovery and quote gates must pass before Arm and Start are offered.",
+            "The AX-SCALPER MT5 runner is not running. Its account, evidence, configuration, recovery and quote gates must pass before Arm and Start are offered.",
             tone="info",
         )
     if execution_mode != "LIVE":
         readiness_banner += notice(
             "Before you use this page",
-            "Paper mode is the default. It cannot send a real order; the REAL-only runner requires a confirmed LIVE mode and an MT5 account positively identified as REAL.",
+            "Paper mode is separate. This runner requires confirmed LIVE mode and an MT5 account positively identified as DEMO or REAL.",
             tone="warn",
         )
 
@@ -1322,10 +1322,10 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     if (candidates and not blockers_list and not adapter_armed and not positions
             and not saved_recovery.get("error") and not saved_recovery.get("requests")):
         controls += (
-            "<h3>Arm this exact admitted strategy</h3><p class='small muted'>Arming changes no broker position and sends no order. It requires the exact LIVE account fingerprint and phrase.</p>"
-            + action_form("ax-scalper-live-arm", nonce, "Arm AX-SCALPER for this REAL account", tone="danger",
+            "<h3>Arm this exact admitted strategy</h3><p class='small muted'>Arming changes no broker position and sends no order. It requires the exact displayed account type, fingerprint and phrase.</p>"
+            + action_form("ax-scalper-live-arm", nonce, "Arm AX-SCALPER for the displayed account", tone="danger",
                           fields=field("candidate_id", "Admitted strategy", kind="select", options=options, required=True, field_id="ax-scalper-arm-candidate")
-                          + field("account_confirmation", "Type the exact account fingerprint", required=True, field_id="ax-scalper-arm-account", value=str(scalper.get("account_fingerprint") or ""))
+                          + field("account_confirmation", "Type account type, a space, then the exact fingerprint", required=True, field_id="ax-scalper-arm-account")
                           + field("confirmation", "Type ARM AX-SCALPER LIVE", required=True, field_id="ax-scalper-arm-phrase", placeholder="ARM AX-SCALPER LIVE"))
         )
     if state == "ARMED" and adapter_armed and candidates and not blockers_list:
@@ -1333,7 +1333,7 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             "<h3>Start autonomous entries</h3><p class='small muted'>This begins continuous decisions on fresh live MT5 quotes. Every entry uses the guarded adapter, declared risk and broker-confirmed protection.</p>"
             + action_form("ax-scalper-live-start", nonce, "Start AX-SCALPER LIVE", tone="danger",
                           fields=field("candidate_id", "Same admitted strategy", kind="select", options=options, value=selected_id, required=True, field_id="ax-scalper-start-candidate")
-                          + field("account_confirmation", "Repeat the exact account fingerprint", required=True, field_id="ax-scalper-start-account", value=str(scalper.get("account_fingerprint") or ""))
+                          + field("account_confirmation", "Repeat account type, a space, then the exact fingerprint", required=True, field_id="ax-scalper-start-account")
                           + field("confirmation", "Type START AX-SCALPER LIVE", required=True, field_id="ax-scalper-start-phrase", placeholder="START AX-SCALPER LIVE"))
         )
     if active or adapter_armed or positions:
@@ -1401,14 +1401,14 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     ]
     recovery = dict(run.get("recovery") or {})
     top = deck(
-        "AX-SCALPER · REAL LIVE runner",
+        "AX-SCALPER · MT5 LIVE runner",
         id="ax-scalper-live", lane="live", state=state,
         note="one admitted strategy · live MT5 quotes · guarded real orders",
         readouts=readouts,
         body=(
             readiness_banner
             +
-            notice("REAL account only", "This runner refuses DEMO, CONTEST, unknown account types, changed account identity, missing signed independent replay admission, stale quotes, and unverified broker protection. It never sends on Connect.", tone="danger", role="alert")
+            notice("MT5 account identity", "DEMO and REAL use the same guarded checks. CONTEST, unknown or changed account identity, missing admission, stale quotes and unverified protection are refused. REAL can risk money; Connect never sends an order.", tone="danger", role="alert")
             + blocker_html
             + last_result_html
             + config_body
@@ -1418,11 +1418,11 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
             + controls
             + (notice("Exact recovery required", fmt.text(recovery.get("detail") or "The persisted run cannot be resumed safely."), tone="danger") if recovery else "")
             + "<details class='fold' id='local-settings'><summary><span class='fold-h'>Local LIVE setup and missing values</span><span class='fold-n'>no capital, costs, contract size, or risk limits are guessed</span></summary><div class='fold-body'>"
-            + notice("Settings are incomplete or unavailable", "Create the ignored local file shown below using broker-verified terms. Do not copy PAPER capital or use a demo account fingerprint.", tone="warn")
+            + notice("Settings are incomplete or unavailable", "Create the ignored local file shown below using broker-verified terms. Do not copy PAPER capital or guess account details.", tone="warn")
             + f"<p class='small'>Local LIVE settings: <code>{fmt.text(scalper.get('settings_path') or 'not wired')}</code></p>"
             + f"<p class='small'>Durable LIVE run state: <code>{fmt.text(scalper.get('state_path') or 'not wired')}</code>. Preserve it across restarts.</p>"
             + "<p class='small'>The exact blank template, field units, accepted cost labels and safe launch/update steps are in <code>docs/SCALPER_LIVE_WORKSTATION.md</code> in the project folder.</p>"
-            + "<p class='small'>Required values: exact terminal-verified symbol; broker margin fraction; commission and whether observed or estimated; slippage points and state; swap state; every validated risk limit; and exact REAL server, login, currency and account fingerprint. The runner validates units and ranges and refuses missing fields.</p>"
+            + "<p class='small'>Required values: exact terminal-verified symbol; broker margin fraction; commission and whether observed or estimated; slippage points and state; swap state; every validated risk limit; and exact MT5 server, login, currency and account fingerprint. The runner validates units and ranges and refuses missing fields.</p>"
             + "</div></details>"
         ),
         foot="Stop prevents new entries and never closes a position. Local management continues only while the process and all required guards remain healthy.",
@@ -1764,11 +1764,11 @@ def render_live(ctx: Any) -> str:
     scalper = dict(view.get("scalper_autonomous") or {})
     state = str(scalper.get("state") or "UNAVAILABLE")
     head = page_head(
-        "REAL LIVE · AX-SCALPER",
+        "MT5 LIVE · AX-SCALPER",
         "Autonomous scalping",
-        "One admitted AX-SCALPER strategy, on verified live MT5 quotes, through the existing guarded order route. Only a terminal-confirmed REAL account is accepted. A demo account, missing signed replay evidence, unknown costs, or incomplete risk terms cannot start.",
-        badges=chip("REAL ONLY", "danger", dot=True)
-        + chip(str(scalper.get("account_mode") or "ACCOUNT UNKNOWN"), "danger" if str(scalper.get("account_mode") or "").upper() != "REAL" else "ok")
+        "One admitted strategy, verified MT5 quotes and the guarded order route. DEMO and REAL share the same checks; unknown or CONTEST accounts are refused.",
+        badges=chip("MT5 LIVE", "warn", dot=True)
+        + chip(str(scalper.get("account_mode") or "ACCOUNT UNKNOWN"), "danger" if str(scalper.get("account_mode") or "").upper() == "REAL" else "warn")
         + chip(state, "danger" if state == "RUNNING" else "warn" if state in {"PAUSED", "RECOVERY_REQUIRED"} else "muted"),
         actions=button_link("/autopilot", "Open PAPER", small=True),
     )

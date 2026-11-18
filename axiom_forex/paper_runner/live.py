@@ -215,6 +215,7 @@ class LiveLeg:
         clock: Callable[[], datetime] | None = None,
         expected_account: Any = None,
         require_real_account: bool = False,
+        required_account_mode: str | None = None,
     ) -> None:
         self.router = router
         self.adapter = adapter
@@ -236,6 +237,7 @@ class LiveLeg:
         #: before the gate is consulted, every time, not once at start-up.
         self.expected_account = expected_account
         self.require_real_account = bool(require_real_account)
+        self.required_account_mode = required_account_mode
         self.history: list[dict[str, Any]] = []
         self.protection_history: list[dict[str, Any]] = []
         self.booked: list[dict[str, Any]] = []
@@ -435,28 +437,30 @@ class LiveLeg:
                     "shows the durable requested stop and target, then re-arm explicitly.",
                 )
             )
-        if self.require_real_account and not demo_test:
-            from ..scalper.live_account import verify_real_account
+        if (self.require_real_account or self.required_account_mode is not None) and not demo_test:
+            from ..scalper.live_account import verify_mt5_account, verify_real_account
 
-            verdict = verify_real_account(status, self.expected_account)
+            verdict = (verify_real_account(status, self.expected_account)
+                       if self.require_real_account else
+                       verify_mt5_account(status, self.expected_account,
+                                          expected_mode=self.required_account_mode))
+            if self.require_real_account and self.required_account_mode not in (None, "REAL"):
+                blockers.append(LiveBlocker(REAL_ACCOUNT_REQUIRED,
+                                            "The requested account requirements conflict.",
+                                            "Correct the account mode binding before proceeding."))
             if not verdict.ok:
                 reasons = set(verdict.reasons or ())
                 account_reason = (
                     REAL_ACCOUNT_REQUIRED
                     if reasons & {"real_account_required", "account_mode_unknown",
-                                  "account_mode_not_confirmed"}
+                                  "account_mode_not_confirmed", "account_mode_mismatch"}
                     else ACCOUNT_IDENTITY_MISMATCH
                 )
-                blockers.append(
-                    LiveBlocker(
-                        account_reason,
-                        f"This lane trades a verified real-money account only: "
-                        f"{verdict.detail or 'the terminal did not identify it'}.",
-                        "Sign the terminal in to the exact real account this run was "
-                        "configured for, then connect again. AXIOM never switches "
-                        "accounts by itself.",
-                    )
-                )
+                blockers.append(LiveBlocker(
+                    account_reason,
+                    f"The terminal account does not match the verified run: {verdict.detail or 'identity unavailable'}.",
+                    "Select the exact account in MT5 and explicitly connect; AXIOM never switches accounts.",
+                ))
         if demo_test:
             # A demo execution test is not a strategy, so it never claims an
             # approval; it must instead be the demo identity, close nothing, and

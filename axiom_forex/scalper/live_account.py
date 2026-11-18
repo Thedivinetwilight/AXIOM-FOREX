@@ -1,22 +1,4 @@
-"""Which account is behind the terminal — proved, not assumed.
-
-AX-SCALPER's LIVE lane is for one thing only: trading a **real-money** account
-that the operator named in advance.  Everything in this repository that can send
-an order already checks *that* the adapter is armed and *that* the armed account
-is the selected one; this module adds the question those checks do not ask:
-
-    is the selected account the real account this run was configured for?
-
-The answer comes from the terminal's own account record (``account_info()``,
-surfaced by :class:`~axiom_forex.brokers.mt5.adapter.MT5TradingAdapter.status`),
-never from a configuration file's hope.  A demo account, a contest account, an
-account the terminal cannot classify, or any of the identity fields disagreeing
-is a refusal with one named reason per disagreement.
-
-There is no "assume real if it looks real" branch and no way to pass a flag that
-turns the check off: the only way to satisfy it is for the terminal to say REAL
-and for the server/login to be the ones the operator declared.
-"""
+"""Identify the terminal's DEMO or REAL account without guessing its identity."""
 
 from __future__ import annotations
 
@@ -142,11 +124,14 @@ def _field(status: Mapping[str, Any], key: str) -> Any:
     return None
 
 
-def verify_real_account(
+def verify_mt5_account(
     status: Mapping[str, Any] | None,
     expected: ExpectedAccount | None,
+    *,
+    expected_mode: str | None = None,
+    real_only: bool = False,
 ) -> AccountVerdict:
-    """Judge one adapter status against one declared real account.
+    """Judge one adapter status against a declared account and optional bound mode.
 
     ``status`` is ``MT5TradingAdapter.status()``.  Nothing is inferred: a field
     the terminal did not report is a refusal, not a pass.
@@ -183,14 +168,15 @@ def verify_real_account(
     if not confirmed:
         reasons.append(MODE_NOT_CONFIRMED)
         details.append(f"the terminal did not confirm the account type (reported {mode})")
-    if mode != REAL:
-        # DEMO, CONTEST and anything unclassifiable land here.  A demo account can
-        # never satisfy this check, whatever else it matches.
-        reasons.append(MODE_NOT_REAL if mode in {DEMO, CONTEST} else MODE_UNKNOWN)
-        details.append(
-            f"the connected account is {mode}, and this lane trades a real-money "
-            "account only"
-        )
+    if mode not in {DEMO, REAL}:
+        reasons.append(MODE_NOT_REAL if real_only and mode == CONTEST else MODE_UNKNOWN)
+        details.append(f"the terminal account type {mode} is not supported")
+    elif real_only and mode != REAL:
+        reasons.append(MODE_NOT_REAL)
+        details.append("this caller requires a REAL account")
+    if expected_mode is not None and (expected_mode not in {DEMO, REAL} or mode != expected_mode):
+        reasons.append("account_mode_mismatch")
+        details.append(f"the terminal account type {mode} differs from the bound type {expected_mode}")
 
     if expected is None:
         reasons.append(NOT_DECLARED)
@@ -238,6 +224,12 @@ def verify_real_account(
     )
 
 
+def verify_real_account(status: Mapping[str, Any] | None,
+                        expected: ExpectedAccount | None) -> AccountVerdict:
+    """Compatibility check for workflows that explicitly require REAL."""
+    return verify_mt5_account(status, expected, real_only=True)
+
+
 __all__ = [
     "CONTEST",
     "DEMO",
@@ -254,4 +246,5 @@ __all__ = [
     "SERVER_MISMATCH",
     "UNCONFIRMED",
     "verify_real_account",
+    "verify_mt5_account",
 ]

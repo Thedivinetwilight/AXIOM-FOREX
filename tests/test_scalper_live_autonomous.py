@@ -561,7 +561,7 @@ class AlwaysBuy:
         return Evaluation(strategy=self.name, family=self.family, outcome="signal", detail="test", signal=signal)
 
 
-def build_run(real, *, admitted=True, strategy=None, state_store=None):
+def build_run(real, *, admitted=True, strategy=None, state_store=None, account_mode="REAL"):
     platform = real["platform"]
     spec = instrument_spec(platform)
     venue = _venue(real)
@@ -588,6 +588,7 @@ def build_run(real, *, admitted=True, strategy=None, state_store=None):
     run = AutonomousScalper(
         adapter=real["harness"].adapter,
         mode=real["mode"],
+        expected_account_mode=account_mode,
         expected_account=ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=derived_fingerprint()),
         admitted=(
             AdmittedStrategy(
@@ -1054,7 +1055,7 @@ def test_the_run_refuses_a_demo_account(real):
     started = run.start()
     assert started["ok"] is False
     reasons = {item["reason"] for item in started["blockers"]}
-    assert "real_account_required" in reasons
+    assert "account_unverified" in reasons
     assert real["fake"].send_requests == []
 
 
@@ -1570,3 +1571,85 @@ def test_guarded_query_refuses_a_guard_exception():
         raise ValueError("identity unavailable")
     venue = BrokerVenue(leg=leg, plan_factory=lambda **kw: None, query_guard=broken)
     assert venue.query("r") is None
+
+
+@pytest.mark.parametrize("account_mode,trade_mode", [("REAL", 2), ("DEMO", 0)])
+def test_same_guarded_fake_runner_arms_starts_and_sends_for_both_mt5_types(real, account_mode, trade_mode):
+    # Evidence is a synthetic fixture only; this test is not production admission.
+    fake = real["fake"]
+    fake.trade_mode = trade_mode
+    adapter = real["harness"].adapter
+    adapter.refresh_account()
+    real["harness"].arm()
+    real["leg"].require_real_account = False
+    real["leg"].required_account_mode = account_mode
+    run, venue, _ = build_run(real, account_mode=account_mode)
+    assert run.arm()["ok"]
+    assert fake.send_requests == []
+    assert run.start()["ok"]
+    results = warm(run, real, count=60)
+    assert any(row.get("execution") for row in results)
+    assert len(fake.send_requests) == 1
+    assert run.snapshot()["account_identity"]["account_mode"] == account_mode
+    assert venue.leg.router.live is adapter
+    before = len(fake.send_requests)
+    run.stop(reason="operator_stop")
+    assert len(fake.send_requests) == before
+
+
+@pytest.mark.parametrize("mode", ["CONTEST", "UNKNOWN", "UNCONFIRMED"])
+def test_generic_mt5_account_refuses_unsupported_types(mode):
+    from axiom_forex.scalper.live_account import verify_mt5_account
+    expected = ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=derived_fingerprint())
+    assert not verify_mt5_account(status(account_mode=mode), expected).ok
+
+
+def test_generic_account_type_binding_refuses_mode_change():
+    from axiom_forex.scalper.live_account import verify_mt5_account
+    expected = ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=derived_fingerprint())
+    assert verify_mt5_account(status(account_mode="DEMO"), expected, expected_mode="DEMO").ok
+    assert not verify_mt5_account(status(account_mode="REAL"), expected, expected_mode="DEMO").ok
+
+
+@pytest.mark.parametrize("account_mode,trade_mode", [("REAL", 2), ("DEMO", 0)])
+def test_host_arm_and_start_build_real_guarded_stack_on_both_fake_accounts(real, account_mode, trade_mode):
+    import json
+    from tests.test_scalper_live_workstation import _host
+    from axiom_forex.paper_runner.scalper_live_host import ARM_PHRASE, START_PHRASE
+    from axiom_forex.scalper.signals import default_strategies
+
+    host, _, _ = _host(real["tmp"])
+    host.adapter = real["harness"].adapter
+    host.adapter.disarm(reason="test_setup")
+    real["fake"].trade_mode = trade_mode
+    host.adapter.refresh_account()
+    settings = json.loads(host.settings_path.read_text())
+    settings["account"] = {"server": SERVER, "login": LOGIN, "currency": "USD", "fingerprint": derived_fingerprint()}
+    host.settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    host.platform_factory = lambda _pair: real["platform"]
+    host._close_platform = lambda _platform: None  # shared fake fixture owns its repository
+    host.live_workflow.armed_strategy = SimpleNamespace(register_delegate=lambda *_a: None,
+                                                         unregister_delegate=lambda *_a: None)
+    candidate = default_strategies()[0].fingerprint
+    confirmation = f"{account_mode} {derived_fingerprint()}"
+    armed = host._do_arm(candidate_id=candidate, confirmation=ARM_PHRASE, account_confirmation=confirmation)
+    assert armed["ok"], armed
+    assert real["fake"].send_requests == []
+    started = host._do_start(candidate_id=candidate, confirmation=START_PHRASE, account_confirmation=confirmation)
+    assert started["ok"], started
+    runtime = host._runtime
+    assert runtime.expected_account_mode == account_mode
+    assert runtime.venue.leg is host._leg
+    assert runtime.venue.leg.router.live is host.adapter
+    assert runtime.snapshot()["account_identity"]["account_mode"] == account_mode
+    stopped = host._do_stop()
+    assert stopped["ok"] and real["fake"].send_requests == []
+
+
+def test_legacy_real_only_leg_cannot_be_weakened_by_a_demo_binding(real):
+    real["fake"].trade_mode = 0
+    real["harness"].adapter.refresh_account()
+    real["leg"].require_real_account = True
+    real["leg"].required_account_mode = "DEMO"
+    assert REAL_ACCOUNT_REQUIRED in {blocker.reason for blocker in real["leg"].blockers()}
+    assert real["fake"].send_requests == []

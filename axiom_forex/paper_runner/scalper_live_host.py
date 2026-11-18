@@ -1,4 +1,4 @@
-"""Owner-thread host for the autonomous, real-account AX-SCALPER lane.
+"""Owner-thread host for the autonomous MT5 AX-SCALPER lane.
 
 The only submission surface built here is the existing ``LiveLeg``. The host
 polls the already-connected terminal, persists the full manager state, and keeps
@@ -20,7 +20,7 @@ from ..scalper.admission import AdmissionError, evidence_digest, load_policy, sh
 from ..scalper.config import LIVE, ScalperConfig
 from ..scalper.execution import Trader
 from ..scalper.guardian import Guardian, GuardianLimits
-from ..scalper.live_account import ExpectedAccount, verify_real_account
+from ..scalper.live_account import ExpectedAccount, verify_mt5_account
 from ..scalper.live_autonomous import (
     ARMED,
     BLOCKED,
@@ -78,7 +78,7 @@ class _AdmissionLifecycle:
 
 
 class ScalperLiveAutonomousHost:
-    """Explicitly armed REAL-only one-symbol autonomous runner.
+    """Explicitly armed DEMO or REAL one-symbol autonomous runner.
 
     Public methods are thread-safe RPCs. All provider platform, portfolio,
     ``LiveLeg``, broker reads and runner state are created/read on one owner
@@ -111,6 +111,7 @@ class ScalperLiveAutonomousHost:
         self._strategy_id = ""
         self._admitted: AdmittedStrategy | None = None
         self._expected: ExpectedAccount | None = None
+        self._bound_mode: str | None = None
         self._lifecycle: _AdmissionLifecycle | None = None
         self._armed_by_host = False
         self._last_tick: dict[str, Any] = {}
@@ -125,12 +126,12 @@ class ScalperLiveAutonomousHost:
         # objects stay on the same owner thread as order/position management.
         result = self._call("view", {}, timeout=10.0)
         if not result.get("ok"):
-            return {"available": True, "lane": "LIVE_REAL_ONLY",
+            return {"available": True, "lane": "LIVE_MT5",
                     "state": "UNAVAILABLE", "reason": str(result.get("reason") or "live_view_unavailable"),
                     "settings_path": str(self.settings_path), "state_path": str(self.state_store.path),
                     "connected": False, "account_mode": "UNKNOWN", "blockers": [
                         self._blocker("live_view_unavailable",
-                                      "The REAL-only runner status could not be read.",
+                                      "The MT5 runner status could not be read.",
                                       "Do not arm or start until this status is readable.")],
                     "candidates": [], "eligible_candidates": [], "config": {}, "run": {}}
         preview = dict(result.get("preview") or {})
@@ -153,7 +154,7 @@ class ScalperLiveAutonomousHost:
         account = dict(adapter_status.get("redacted_account") or {})
         return {
             "available": True,
-            "lane": "LIVE_REAL_ONLY",
+            "lane": "LIVE_MT5",
             "state": state,
             "reason": reason,
             "armed": armed or bool(adapter_status.get("armed")),
@@ -335,7 +336,7 @@ class ScalperLiveAutonomousHost:
             expected = ExpectedAccount(**account)
             self.adapter.refresh_account()
             status = dict(self.adapter.status() or {})
-            if not verify_real_account(status, expected).ok:
+            if not verify_mt5_account(status, expected).ok:
                 return view
         except Exception:
             return view
@@ -375,7 +376,8 @@ class ScalperLiveAutonomousHost:
             view["orders_reason"] = "durable_order_history_unavailable"
         try:
             self.adapter.refresh_account()
-            if not verify_real_account(dict(self.adapter.status() or {}), expected).ok:
+            if not verify_mt5_account(dict(self.adapter.status() or {}), expected,
+                                      expected_mode=str(status.get("account_mode") or "")).ok:
                 raise ValueError("account_changed")
         except Exception:
             return {"available": False, "positions": [], "orders": [],
@@ -400,7 +402,9 @@ class ScalperLiveAutonomousHost:
         if not prepared[0]:
             return prepared[1]
         config_view, currency, expected, strategy, evidence, policy_version, fingerprints, binding = prepared[1]
-        account_blocker = self._check_live_account(expected, account_confirmation=account_confirmation)
+        account_mode = account_confirmation.split(" ", 1)[0]
+        account_blocker = self._check_live_account(expected, account_confirmation=account_confirmation,
+                                                   expected_mode=account_mode)
         if account_blocker:
             return account_blocker
         platform = None
@@ -436,6 +440,8 @@ class ScalperLiveAutonomousHost:
                 account_login=expected.login,
                 server=expected.server,
                 account_fingerprint=expected.fingerprint,
+                account_mode=account_mode,
+                account_currency=expected.currency,
             )
             if (not isinstance(result, Mapping) or result.get("armed") is not True
                     or not bool(getattr(self.adapter, "armed", False))):
@@ -458,12 +464,13 @@ class ScalperLiveAutonomousHost:
             approved_at=datetime.now(UTC).isoformat(),
         )
         self._expected = expected
+        self._bound_mode = account_mode
         self._lifecycle = lifecycle
         self._armed_by_host = True
         self._state, self._reason = ARMED, "explicit_ax_scalper_live_arm"
         self._audit("AX_SCALPER_LIVE_ARMED", candidate_id=candidate_id,
                     evidence_digest=evidence, account_fingerprint=expected.fingerprint)
-        self._last_result = {"ok": True, "reason": "armed", "message": "AX-SCALPER is armed for this exact REAL account and admitted candidate. No order was sent; press Start to begin."}
+        self._last_result = {"ok": True, "reason": "armed", "message": f"AX-SCALPER is armed for the exact {account_mode} account and admitted candidate. No order was sent; press Start to begin."}
         return dict(self._last_result)
 
     def _do_start(self, *, candidate_id: str, confirmation: str,
@@ -471,14 +478,16 @@ class ScalperLiveAutonomousHost:
         if confirmation != START_PHRASE:
             return self._refuse("start_confirmation_mismatch", f"Type {START_PHRASE!r} exactly. Nothing started.")
         if not self._armed_by_host or self._lifecycle is None or not bool(getattr(self.adapter, "armed", False)):
-            return self._refuse("ax_scalper_not_armed", "Arm AX-SCALPER for the verified REAL account first.")
+            return self._refuse("ax_scalper_not_armed", "Arm AX-SCALPER for the verified account first.")
         if candidate_id != self._candidate_id:
             return self._refuse("candidate_changed_after_arm", "The selected strategy differs from the one explicitly armed. Arm the exact candidate again.")
-        if account_confirmation != str(self._expected.fingerprint if self._expected else ""):
-            return self._refuse("account_confirmation_mismatch", "Repeat the exact REAL-account fingerprint shown on this page.")
+        if (self._expected is None or self._bound_mode not in {"DEMO", "REAL"}
+                or account_confirmation != f"{self._bound_mode} {self._expected.fingerprint}"):
+            return self._refuse("account_confirmation_mismatch", "Repeat the displayed account type and fingerprint exactly.")
         if self._state not in {ARMED, PAUSED}:
             return self._refuse("ax_scalper_not_armed", "Start requires the exact AX-SCALPER arm state; arm or recover that lane first.")
-        account_blocker = self._check_live_account(self._expected, account_confirmation=account_confirmation)
+        account_blocker = self._check_live_account(self._expected, account_confirmation=account_confirmation,
+                                                   expected_mode=self._bound_mode)
         if account_blocker:
             return account_blocker
         prepared = self._prepare_candidate(candidate_id)
@@ -520,7 +529,7 @@ class ScalperLiveAutonomousHost:
         self._audit("AX_SCALPER_LIVE_STARTED", candidate_id=candidate_id,
                     starting_equity=str(runtime.starting_equity), currency=currency)
         return self._remember({"ok": True, "state": RUNNING,
-                               "message": "AX-SCALPER LIVE is running on the verified REAL account. It manages open positions; Stop prevents new entries and does not close them."})
+                               "message": f"AX-SCALPER LIVE is running on the verified {self._bound_mode} account. It manages open positions; Stop prevents new entries and does not close them."})
 
     def _do_stop(self) -> dict[str, Any]:
         if self._runtime is None:
@@ -576,7 +585,8 @@ class ScalperLiveAutonomousHost:
         if self._expected is None:
             return self._refuse("live_account_identity_unavailable", "The account bound to this run is unavailable; nothing was reconciled.")
         account_blocker = self._check_live_account(
-            self._expected, account_confirmation=self._expected.fingerprint
+            self._expected, account_confirmation=f"{self._bound_mode} {self._expected.fingerprint}",
+            expected_mode=self._bound_mode
         )
         if account_blocker:
             return account_blocker
@@ -591,7 +601,8 @@ class ScalperLiveAutonomousHost:
         if self._expected is None:
             return self._refuse("live_account_identity_unavailable", "The account bound to this run is unavailable; nothing was reconciled.")
         account_blocker = self._check_live_account(
-            self._expected, account_confirmation=self._expected.fingerprint
+            self._expected, account_confirmation=f"{self._bound_mode} {self._expected.fingerprint}",
+            expected_mode=self._bound_mode
         )
         if account_blocker:
             return account_blocker
@@ -619,11 +630,11 @@ class ScalperLiveAutonomousHost:
             adapter_status = self._adapter_status()
             if not self.session.connected:
                 blockers.append(self._blocker("terminal_not_connected", "Connect to MT5 explicitly on Setup.", "No background connection is attempted."))
-            verdict = verify_real_account(adapter_status, expected)
+            verdict = verify_mt5_account(adapter_status, expected, expected_mode=self._bound_mode if self._armed_by_host else None)
             if not verdict.ok:
-                blockers.append(self._blocker("real_account_required" if verdict.mode != "REAL" else "account_identity_mismatch",
-                                              verdict.detail or "The current terminal account does not match the declared REAL account.",
-                                              "Sign in to the declared REAL account in MT5, then use Connect."))
+                blockers.append(self._blocker("account_identity_mismatch",
+                                              verdict.detail or "The current terminal account does not match the declared account.",
+                                              "Sign in to the declared DEMO or REAL account in MT5, then use Connect."))
             if str(getattr(self.mode, "mode", "") or "").upper() != LIVE or not bool(getattr(self.mode, "live_effective", False)):
                 blockers.append(self._blocker("live_mode_not_confirmed", "LIVE mode is not selected and confirmed.", "Confirm LIVE mode on the Trading mode page."))
             if not eligible:
@@ -731,8 +742,11 @@ class ScalperLiveAutonomousHost:
                                  strategy_id: str) -> bool:
         """Attribute an exact durable outcome to this run, or keep it unknown."""
         try:
+            if self._bound_mode not in {"DEMO", "REAL"}:
+                return False
             self.adapter.refresh_account()
-            verdict = verify_real_account(dict(self.adapter.status() or {}), expected)
+            verdict = verify_mt5_account(dict(self.adapter.status() or {}), expected,
+                                         expected_mode=self._bound_mode)
             return (verdict.ok and str(record.get("broker_id") or "").lower() == "mt5_terminal"
                     and str(record.get("account_fingerprint") or "") == expected.fingerprint
                     and str(record.get("account_server") or "") == expected.server
@@ -747,6 +761,8 @@ class ScalperLiveAutonomousHost:
         from ..execution.mode_router import ExecutionRouter
         from .live import LiveLeg
 
+        if self._bound_mode not in {"DEMO", "REAL"}:
+            raise ValueError("bound_account_mode_missing")
         config, currency, parsed_expected = load_live_scalper_config(
             session=self.session, settings_path=self.settings_path
         )
@@ -803,7 +819,7 @@ class ScalperLiveAutonomousHost:
             lifecycle=self._lifecycle, portfolio=getattr(platform, "portfolio", None),
             rollover_cutoffs=tuple(getattr(getattr(getattr(platform, "setup", None),
                                                "rollover", None), "cutoffs", ()) or ()),
-            expected_account=expected, require_real_account=True,
+            expected_account=expected, required_account_mode=self._bound_mode,
         )
         venue.leg = leg
         guardian = Guardian(
@@ -858,6 +874,7 @@ class ScalperLiveAutonomousHost:
             audit_log=self.audit_log, state_store=self.state_store,
             session_running=self._other_live_session_running,
             approval_active=self._lifecycle.approve_active,
+            expected_account_mode=self._bound_mode,
         )
         if store_state is not None:
             recovered = run.recover(state=store_state)
@@ -929,9 +946,11 @@ class ScalperLiveAutonomousHost:
 
     # -- validation, account, lifecycle --------------------------------
 
-    def _check_live_account(self, expected: ExpectedAccount, *, account_confirmation: str) -> dict[str, Any] | None:
-        if account_confirmation != expected.fingerprint:
-            return self._refuse("account_confirmation_mismatch", "Type the exact declared REAL-account fingerprint shown on this page.")
+    def _check_live_account(self, expected: ExpectedAccount, *, account_confirmation: str,
+                            expected_mode: str | None) -> dict[str, Any] | None:
+        if (expected_mode not in {"REAL", "DEMO"}
+                or account_confirmation != f"{expected_mode} {expected.fingerprint}"):
+            return self._refuse("account_confirmation_mismatch", "Type the exact displayed account type and fingerprint.")
         if str(getattr(self.mode, "mode", "") or "").upper() != LIVE or not bool(getattr(self.mode, "live_effective", False)):
             return self._refuse("live_mode_not_confirmed", "Confirm LIVE mode on the Trading mode page before arming.")
         try:
@@ -939,12 +958,9 @@ class ScalperLiveAutonomousHost:
             status = dict(self.adapter.status() or {})
         except Exception as exc:
             return self._refuse("mt5_account_refresh_failed", f"The already-connected terminal could not refresh its account ({type(exc).__name__}); no reconnect was attempted.")
-        verdict = verify_real_account(status, expected)
+        verdict = verify_mt5_account(status, expected, expected_mode=expected_mode)
         if not verdict.ok:
-            return self._refuse("real_account_required" if verdict.mode != "REAL" else "account_identity_mismatch",
-                                verdict.detail or "The terminal did not verify the declared REAL account.")
-        if not status.get("connected"):
-            return self._refuse("mt5_not_connected", "Press Connect explicitly on Setup; no background connection is attempted.")
+            return self._refuse("account_identity_mismatch", verdict.detail or "The terminal did not verify the declared account.")
         if not status.get("trading_enabled_setting"):
             return self._refuse("trading_disabled", "Enable the existing MT5 trading setting and re-review the LIVE lane.")
         return None

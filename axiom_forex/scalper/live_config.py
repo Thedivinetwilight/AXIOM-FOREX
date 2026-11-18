@@ -184,7 +184,7 @@ def load_scalper_config_terms(*, session: Any, settings_path: str | Path,
     account_document = payload.get("account")
     if expected_schema == LIVE_SCHEMA:
         if not isinstance(account_document, Mapping):
-            raise LiveScalperConfigError("live_account_declaration_missing", "Declare the exact REAL account server, login, currency, and fingerprint in the local LIVE settings.")
+            raise LiveScalperConfigError("live_account_declaration_missing", "Declare the exact MT5 account server, login, currency, and fingerprint in the local LIVE settings.")
         if set(account_document) != {"server", "login", "currency", "fingerprint"}:
             raise LiveScalperConfigError("live_account_declaration_invalid", "The LIVE account object must contain exactly server, login, currency, and fingerprint.")
         server = str(account_document.get("server") or "").strip()
@@ -224,7 +224,7 @@ def load_live_scalper_config(*, session: Any, settings_path: str | Path):
         session=session, settings_path=settings_path, expected_schema=LIVE_SCHEMA
     )
     if not isinstance(account, Mapping):
-        raise LiveScalperConfigError("live_account_declaration_missing", "Declare the exact REAL account in the local LIVE settings.")
+        raise LiveScalperConfigError("live_account_declaration_missing", "Declare the exact MT5 account in the local LIVE settings.")
     expected = ExpectedAccount(
         server=str(account["server"]),
         login=int(account["login"]),
@@ -232,5 +232,5 @@ def load_live_scalper_config(*, session: Any, settings_path: str | Path):
         fingerprint=str(account["fingerprint"]),
     )
     if not expected.declared:
-        raise LiveScalperConfigError("live_account_declaration_invalid", "Correct the declared REAL account identity in the local LIVE settings.")
+        raise LiveScalperConfigError("live_account_declaration_invalid", "Correct the declared MT5 account identity in the local LIVE settings.")
     return config, currency, expected
