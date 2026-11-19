@@ -244,6 +244,10 @@ class LiveLeg:
         self.booking_failures: list[dict[str, Any]] = []
         self.last_outcome: dict[str, Any] = {}
         self.last_reconciliation: dict[str, Any] = {}
+        # Set only by the autonomous host after it has fixed the run identity.
+        # A scalper booking and its provider-ledger snapshot are one transaction.
+        self.scalper_ledger_identity: Callable[[], Mapping[str, Any]] | None = None
+        self.scalper_ledger_head = ""
 
     # -- read model ------------------------------------------------------
 
@@ -730,17 +734,38 @@ class LiveLeg:
             at=self.clock(),
         )
         if not unknown and outcome.volume_filled > 0:
-            booking = self._book(plan, broker)
-            outcome.booking = booking
-            outcome.booked = bool(booking.get("booked"))
-            if not outcome.booked:
-                outcome.reasons = (BOOKING_FAILED,)
-            elif not self._persist_booking_result(outcome):
-                failure = "durable_booking_write_failed"
+            original = self.portfolio
+            trial = None
+            booked_before = len(self.booked)
+            scalper = self.strategy_id.startswith("ax-scalper-live:")
+            try:
+                if scalper:
+                    if original is None:
+                        raise ValueError("no_ledger")
+                    trial = original.empty_clone()
+                    trial.restore_snapshot(original.snapshot(self.clock(), allow_unmarked=True))
+                    self.portfolio = trial
+                booking = self._book(plan, broker)
+                outcome.booking = booking
+                outcome.booked = bool(booking.get("booked"))
+                if not outcome.booked:
+                    outcome.reasons = (BOOKING_FAILED,)
+                elif not self._persist_booking_result(outcome):
+                    raise ValueError("durable_booking_write_failed")
+                elif trial is not None:
+                    # Preserve the portfolio object shared by the rest of the
+                    # host, but only publish after the durable transaction.
+                    original.restore_snapshot(trial.snapshot(self.clock(), allow_unmarked=True))
+            except Exception as exc:
+                failure = str(exc) or type(exc).__name__
                 outcome.booked = False
                 outcome.reasons = (BOOKING_FAILED, failure)
-                outcome.booking = {**dict(outcome.booking), "booked": False, "error": failure}
+                outcome.booking = {**dict(outcome.booking or {}), "booked": False, "error": failure}
                 self.booking_failures.append({"error": failure, "request_id": request_id})
+            finally:
+                self.portfolio = original
+                if scalper and not outcome.booked:
+                    del self.booked[booked_before:]
         result = outcome.as_result()
         self.last_outcome = result
         self.history.append(result)
@@ -968,7 +993,37 @@ class LiveLeg:
                     "updated_at": self.clock(),
                 }
             )
-            saver([merged])
+            if self.strategy_id.startswith("ax-scalper-live:"):
+                identity_fn = self.scalper_ledger_identity
+                if (not callable(identity_fn) or self.portfolio is None
+                        or not callable(getattr(repository, "transaction", None))
+                        or not callable(getattr(repository, "save_snapshot", None))):
+                    return False
+                identity = dict(identity_fn())
+                run_id = str(identity.get("run_id") or "")
+                if not run_id or not identity.get("account_fingerprint"):
+                    return False
+                ledger = self.portfolio.snapshot(outcome.at or self.clock(), allow_unmarked=True)
+                ledger_record = {"identity": identity, "request_id": outcome.request_id,
+                                 "ledger": ledger}
+                snapshot_id = "ax-scalper-live-ledger:" + run_id
+                with repository.transaction():
+                    previous = repository.get_snapshot(snapshot_id)
+                    if previous is not None and (previous.get("identity") != identity
+                            or str(previous.get("request_id") or "") != self.scalper_ledger_head):
+                        raise ValueError("scalper_ledger_head_changed")
+                    if previous is None and self.scalper_ledger_head:
+                        raise ValueError("scalper_ledger_missing")
+                    # A prior writer must not have settled the same request.
+                    current = getter(outcome.request_id)
+                    if (not isinstance(current, Mapping) or current.get("booked") is True
+                            or str(current.get("state") or "").upper() not in {"FILLED", "PARTIAL"}):
+                        raise ValueError("scalper_ledger_already_booked_or_unresolved")
+                    saver([merged])
+                    repository.save_snapshot(snapshot_id, "ax-scalper-live-ledger", ledger_record)
+                self.scalper_ledger_head = outcome.request_id
+            else:
+                saver([merged])
             stored = getter(outcome.request_id)
             return bool(
                 isinstance(stored, Mapping)
@@ -979,6 +1034,90 @@ class LiveLeg:
             )
         except Exception:
             return False
+
+    def commit_scalper_history(self, *, record: Mapping[str, Any], proof: Mapping[str, Any],
+                                account_matches: Callable[[], bool]) -> bool:
+        """Atomically book one independently proven history result, without sending."""
+        if (not self.strategy_id.startswith("ax-scalper-live:") or not proof.get("resolved")
+                or proof.get("request_id") != record.get("request_id") or not callable(account_matches)):
+            return False
+        repository, request_id = self.repository, str(record["request_id"])
+        state = str(proof.get("state") or "")
+        if state not in {"FILLED", "REJECTED"} or record.get("booked") is True:
+            return False
+        old_portfolio, old_head = self.portfolio, self.scalper_ledger_head
+        try:
+            if not account_matches():
+                return False
+            updated = dict(record)
+            updated.update({"state": state, "submitted": True, "unknown": False,
+                            "volume_filled": "0" if state == "REJECTED" else str(proof["lots"]),
+                            "history_recovery": dict(proof["recovery"]),
+                            "history_recovery_previous": dict(record),
+                            "updated_at": self.clock()})
+            if state == "REJECTED":
+                # A terminal refusal has no fill or ledger movement. Preserve any
+                # earlier nested result under the immutable previous record.
+                updated.pop("leg_outcome", None)
+                updated.update({"booked": False, "booking": {}, "classification": "REJECTED"})
+                with repository.transaction():
+                    if repository.get_order(request_id) != dict(record) or not account_matches():
+                        raise ValueError("recovery_order_or_account_changed")
+                    repository.save_orders([updated])
+                return repository.get_order(request_id) == updated or (
+                    repository.get_order(request_id) or {}).get("state") == "REJECTED"
+            if old_portfolio is None:
+                return False
+            when = datetime.fromisoformat(str(proof["at"]))
+            if when.tzinfo is None:
+                return False
+            volume, price = Decimal(str(proof["lots"])), Decimal(str(proof["price"]))
+            if not volume.is_finite() or volume <= 0 or not price.is_finite() or price <= 0:
+                return False
+            trial = old_portfolio.empty_clone()
+            trial.restore_snapshot(old_portfolio.snapshot(when, allow_unmarked=True))
+            quantity, unit = self._catalog_quantity_from_broker_volume(volume)
+            ticket = str(proof["ticket"])
+            position_id = f"mt5:{ticket}"
+            if record.get("close_position_id"):
+                if str(record.get("close_position_id")) != position_id:
+                    return False
+                trade = trial.close(position_id, price=price, at=when,
+                                    cutoffs=self.rollover_cutoffs, quantity=quantity)
+                action = "CLOSE"
+            else:
+                trial.open(position_id=position_id, side=str(record.get("side") or ""),
+                           quantity=quantity, price=price, at=when)
+                # The provider ledger has its own operator-declared account id,
+                # which need not be the MT5 fingerprint. The snapshot itself is
+                # bound to the verified terminal identity and immutable run id.
+                if str(trial.positions[position_id].account_id) != str(old_portfolio.account.account_id):
+                    return False
+                action = "OPEN"
+            booking = {"booked": True, "action": action, "position_id": position_id,
+                       "quantity": str(quantity), "quantity_unit": unit,
+                       "broker_volume_lots": str(volume), "price": str(price),
+                       "order_ticket": int(record.get("order_ticket") or 0)}
+            if action == "CLOSE":
+                booking["realized_pnl_account"] = str(getattr(trade, "realized_pnl_account", ""))
+            result = LiveOutcome(submitted=True, request_id=request_id, state="FILLED",
+                volume_requested=Decimal(str(record["volume"])), volume_filled=volume,
+                price=price, booked=True, booking=booking, at=when)
+            self.portfolio = trial
+            with repository.transaction():
+                if repository.get_order(request_id) != dict(record) or not account_matches():
+                    raise ValueError("recovery_order_or_account_changed")
+                repository.save_orders([updated])
+                if not self._persist_booking_result(result) or not account_matches():
+                    raise ValueError("recovery_ledger_commit_failed")
+            old_portfolio.restore_snapshot(trial.snapshot(when, allow_unmarked=True))
+            return True
+        except Exception as exc:
+            self.scalper_ledger_head = old_head
+            self.booking_failures.append({"error": "history_settlement_failed", "detail": str(exc)})
+            return False
+        finally:
+            self.portfolio = old_portfolio
 
     def _catalog_quantity_from_broker_volume(self, volume_lots: Decimal) -> tuple[Decimal, str]:
         """Translate MT5's lot fill into the instrument catalog's quantity unit.
@@ -1059,6 +1198,20 @@ class LiveLeg:
         ticket = int(
             getattr(outcome, "order_ticket", 0) or getattr(outcome, "deal_ticket", 0) or 0
         )
+        if action != "CLOSE" and self.strategy_id.startswith("ax-scalper-live:"):
+            request = getattr(outcome, "request", None)
+            request = request if isinstance(request, Mapping) else {}
+            raw_side = request.get("type")
+            side = "BUY" if raw_side == 0 and not isinstance(raw_side, bool) else (
+                "SELL" if raw_side == 1 and not isinstance(raw_side, bool) else "")
+            exact = getattr(self.adapter, "exact_entry_position_ticket", None)
+            try:
+                ticket = int(exact(outcome, symbol=str(request.get("symbol") or ""), side=side)) if callable(exact) else 0
+            except Exception:
+                ticket = 0
+            if ticket <= 0:
+                self.booking_failures.append({"error": "exact_entry_position_identity_unproven", "action": action})
+                return {"booked": False, "error": "exact_entry_position_identity_unproven"}
         try:
             if action == "CLOSE":
                 position_id = str(getattr(plan, "position_id", "") or "")

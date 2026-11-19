@@ -21,36 +21,36 @@ not been checked during this change. Sign in to the
 intended DEMO or REAL account in MetaTrader 5 yourself and confirm the server and
 account before using the runner. AXIOM does not switch accounts.
 
-**Integration remains incomplete.** In particular, when restart recovery of an
-unresolved autonomous request returns a refusal, the workstation host discards
-the recovery runtime, so the `/live` reconciliation control cannot always
-reach that request after restart. Preserve the state and broker records; do not
-resend, delete or rewrite them to get past the blocker. Empty broker history
-is not proof that an order was never placed: without affirmative evidence the
-request stays unresolved. A cancelled order with reported deals also stays
-blocked for exact execution reconciliation. The broker monitor
-shows account-bound broker positions and locally recorded orders when available;
-its open-position profit is not a complete accounting of closed P&L or costs.
-An unreadable position makes the position list and profit unavailable rather
-than silently omitting it. Broker read-back is not independent verification of
-the integration: verify protection in MT5. Do not use this build for autonomous
-real trading until the recovery gap and the machine-side checks below have been
-resolved and independently verified.
+**Do not use this build for autonomous real-money trading.** The recovery path
+has fake-terminal tests, not independent verification against your terminal or
+broker. No profitability or admission claim follows from those tests.
 
-Run-state snapshots now bind account type and currency in addition to server
-and fingerprint. Older v2 snapshots lack those fields and are deliberately
-refused; preserve the original file and broker records for exact reconciliation.
-Do not delete or rewrite a snapshot to bypass this check. While a run is in
-`RECOVERY_REQUIRED`, Stop and Shutdown keep its existing snapshot unchanged and
-send no flatten order; local management is paused, so verify broker protection
-independently. An inconclusive exact-request query also leaves the snapshot
-unchanged. Broker order recovery also requires the original account mode,
-server, fingerprint, login and currency and a matching broker order ticket;
-older records lacking those facts remain blocked and preserved. Connecting does
-not resolve an autonomous request without validating its run context. These
-guards do not make restart reconciliation complete. A matching SL/TP read-back
-alone does not clear a pending protection request on restart; its original
-identity and broker result still require exact reconciliation.
+A local, versioned mutation journal records each entry, close, and protection
+change before it can reach MT5. The `/live` recovery view shows unresolved
+request IDs even when the run cannot be restored. After explicitly connecting
+to the original account, use the per-request reconcile control: it reads the
+original journal, account, order/deal history, positions and protection; it
+never resends the mutation. Arm and Start remain blocked until the exact proof
+and saved management/ledger state match. A recovered position still requires a
+separate explicit Arm and Start before local management resumes.
+
+Keep the run-state JSON, mutation SQLite database and sidecars, provider ledger,
+settings, and evidence together; do not delete, edit or replace them to bypass a
+blocker. The OS owner lock prevents two runner processes owning the same run;
+it is released on process exit and is not evidence that a trade did or did not
+happen. Stop and Shutdown do not flatten: after process exit only the broker's
+own protection can act. Independently inspect positions and SL/TP in MT5.
+
+History can be delayed or unavailable. An empty history, a matching position or
+matching SL/TP alone is not proof of a particular request. Missing order tickets,
+ambiguous position identifiers, multiple/partial deals, netting effects,
+contradictory receipts, unsupported account changes and older snapshots without
+the full v4 run/account identity remain blocked. Preserve all records and
+contact the broker or an experienced operator; do not resend blindly. Exact
+SL/TP reconciliation needs the original durable broker receipt as well as the
+matching read-back. A v2 or v3 snapshot is deliberately not upgraded by guesswork.
+The broker monitor's open-position profit is not a complete accounting of
+closed P&L or costs; unreadable positions are not silently omitted.
 
 ## Local LIVE configuration
 

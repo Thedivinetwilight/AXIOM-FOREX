@@ -289,10 +289,9 @@ class BrokerVenue:
             )
         fill = self._fill_from(order, outcome, latency_ms=max(0, self._clock_ms() - started))
         if fill.status == ACCEPTED and not fill.ticket:
-            # The broker is the authority on which position the fill created.  If
-            # it cannot name exactly one new ticket, the fill carries none and the
-            # trader reports the protection as unverified rather than guessing.
-            fill = replace(fill, ticket=self._new_ticket())
+            # A position that merely appeared after an order is not proof that
+            # this request created it. Preserve the original identity and block.
+            fill = replace(fill, status=UNKNOWN_OUTCOME, reason="position_identity_unproven")
         self.record.submissions.append(
             {"request_id": order.request_id, **fill.audit_view()}
         )
@@ -315,14 +314,10 @@ class BrokerVenue:
         # from wherever the leg actually put it.
         booking = outcome.get("booking") if isinstance(outcome.get("booking"), Mapping) else {}
         booked_position = str((booking or {}).get("position_id") or "")
-        ticket = (
-            outcome.get("order_ticket")
-            or outcome.get("deal_ticket")
-            or outcome.get("position_ticket")
-            or (booking or {}).get("order_ticket")
-            # The leg books at ``mt5:<ticket>``; that suffix is the broker's own id.
-            or (booked_position.split(":", 1)[1] if ":" in booked_position else booked_position)
-        )
+        # Order and deal tickets are not interchangeable with a position ID.
+        # Only the guarded leg's durably attributed booking may name it.
+        ticket = (booked_position.split(":", 1)[1]
+                  if booked_position.startswith("mt5:") else "")
         reasons = [str(item) for item in (outcome.get("reasons") or ())]
         if not submitted:
             return Fill(
@@ -384,6 +379,15 @@ class BrokerVenue:
                 reason="no_fill_reported",
                 detail=state,
                 simulated=False,
+            )
+        if (outcome.get("booked") is not True or booking.get("booked") is not True
+                or str(booking.get("action") or "").upper() != "OPEN" or not ticket):
+            return Fill(
+                request_id=order.request_id, status=UNKNOWN_OUTCOME,
+                filled_lots=filled, requested_lots=requested,
+                price=None if price is None else _d(price), spread_points=Decimal(0),
+                slippage_points=Decimal(0), latency_ms=latency_ms, ticket=None,
+                reason="durable_position_booking_unconfirmed", detail=state, simulated=False,
             )
         reference = order.stop_price
         slippage = Decimal(0)

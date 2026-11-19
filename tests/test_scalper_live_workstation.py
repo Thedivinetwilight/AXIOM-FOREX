@@ -598,7 +598,7 @@ def test_account_type_notice_does_not_claim_demo_or_contest_are_supported():
     assert "same admission, risk and execution checks" in demo
     assert "refuses CONTEST" in contest
     assert "No real money is at risk" not in contest
-    assert "incomplete restart-recovery" in real
+    assert "Restart reconciliation" in real and "do not use real money" in real
 
 
 @pytest.mark.parametrize("mode", ["DEMO", "REAL"])
@@ -680,3 +680,58 @@ def test_duplicate_stored_request_ids_are_reported_damaged_without_writes(tmp_pa
         assert adapter.send_calls == adapter.arm_calls == 0
     finally:
         host.close()
+
+
+def test_exact_reconcile_action_is_nonce_protected_and_never_sends(tmp_path):
+    from axiom_forex.workstation.app import WorkstationApp
+    from tests.test_workstation_ui import live_wizard
+    host, adapter, _ = _host(tmp_path)
+    app = WorkstationApp(wizard=live_wizard(), live=SimpleNamespace(
+        view=lambda: {"configured": True, "positions": [], "account": {}},
+        scalper_autonomous=host,
+    ))
+    try:
+        bad, _, _ = app.act("ax-scalper-live-reconcile-request", {
+            "nonce": ["not-the-nonce"], "request_id": ["original-request"],
+        })
+        assert int(bad) == 403
+        good, redirect, message = app.act("ax-scalper-live-reconcile-request", {
+            "nonce": [app.nonce], "request_id": ["original-request"],
+        })
+        assert int(good) == 409 and redirect == "/live"
+        assert "stored_run_state_missing" in message
+        assert adapter.send_calls == 0 and adapter.arm_calls == 0
+    finally:
+        host.close()
+
+
+def test_stop_flat_releases_owner_for_explicit_restart_but_keeps_unresolved_owner(tmp_path):
+    host, adapter, _ = _host(tmp_path)
+    class Lock:
+        closed = False
+        def close(self):
+            self.closed = True
+    class Journal:
+        closed = False
+        rows = []
+        def unresolved(self):
+            return self.rows
+        def close(self):
+            self.closed = True
+    class Runtime:
+        state = "RUNNING"
+        book = SimpleNamespace(open_positions=[])
+        venue = SimpleNamespace(position_details=lambda: [])
+        def stop(self, **kwargs):
+            assert kwargs["close_positions"] is False
+            self.state = "STOPPED"
+            return {"ok": True, "state": "STOPPED", "open_positions": [], "state_persisted": True}
+    lock, journal, runtime = Lock(), Journal(), Runtime()
+    host._runtime, host._journal, host._run_lock = runtime, journal, lock
+    journal.rows = [{"request_id": "unresolved"}]
+    host._do_stop()
+    assert host._runtime is runtime and not lock.closed and not journal.closed
+    journal.rows = []
+    host._do_stop()
+    assert host._runtime is None and lock.closed and journal.closed
+    assert adapter.send_calls == 0

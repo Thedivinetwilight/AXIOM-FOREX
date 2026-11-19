@@ -45,6 +45,7 @@ broker positions, confirm none belong to this run, then start again).
 from __future__ import annotations
 
 import json
+import hashlib
 import ctypes
 import tempfile
 from dataclasses import dataclass, field
@@ -55,10 +56,12 @@ from os import open as open_file
 from os import replace as replace_file
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from uuid import UUID, uuid4
 
 from .config import LIVE, InstrumentSpec
 from .execution import (
     ACCEPTED,
+    Fill,
     BLOCKED as FILL_BLOCKED,
     PROTECTION_UNVERIFIED,
     REJECTED,
@@ -103,7 +106,7 @@ DURABLE_STATE_REQUIRED = "durable_run_state_required"
 STATE_PERSISTENCE_FAILED = "run_state_persistence_failed"
 ADMISSION_REVOKED = "admission_revoked"
 LIVE_SESSION_CONFLICT = "another_live_session_running"
-RUN_STATE_SCHEMA = "axiom-scalper-live-run-v3"
+RUN_STATE_SCHEMA = "axiom-scalper-live-run-v4"
 
 
 def _fsync_directory(path: Path) -> None:
@@ -298,6 +301,7 @@ class AutonomousScalper:
         approval_active: Callable[[], bool] | None = None,
         state_store: JsonRunStateStore | Any = None,
         expected_account_mode: str = "REAL",
+        mutation_journal: Any = None,
     ) -> None:
         self.adapter = adapter
         self.mode = mode
@@ -322,6 +326,9 @@ class AutonomousScalper:
         self.session_running = session_running
         self.approval_active = approval_active
 
+        self.run_id = uuid4().hex
+        self._reconciliation_only = False
+        self._recovery_prepared = False
         self.state = IDLE
         self.stop_reason = ""
         self.pause_reason = ""
@@ -333,11 +340,18 @@ class AutonomousScalper:
         self._equity = Decimal(starting_equity)
         self._entries_blocked: dict[str, int] = {}
         self.state_store = state_store
+        self.mutation_journal = mutation_journal
         self._state_persistence_error = ""
         self._pending_submission: dict[str, Any] | None = None
         close_hook = getattr(self.book, "set_close_intent_hook", None)
         if callable(close_hook):
             close_hook(self._persist_close_intent)
+        close_result_hook = getattr(self.book, "set_close_result_hook", None)
+        if callable(close_result_hook):
+            close_result_hook(self._persist_close_observation)
+        protection_observation_hook = getattr(self.book, "set_protection_observation_hook", None)
+        if callable(protection_observation_hook):
+            protection_observation_hook(self._persist_protection_observation)
         protection_hook = getattr(self.book, "set_protection_intent_hook", None)
         if callable(protection_hook):
             protection_hook(self._persist_protection_intent)
@@ -365,6 +379,10 @@ class AutonomousScalper:
         """Everything that would stop an entry right now, with its fix."""
 
         blockers: list[dict[str, str]] = []
+        if self._reconciliation_only:
+            blockers.append({"reason": "reconciliation_only",
+                             "message": "This runtime is read-only for restart reconciliation.",
+                             "hint": "After all exact checks succeed, explicitly arm and start a fresh guarded runtime."})
         if (
             self.state_store is None
             or getattr(self.state_store, "durable", False) is not True
@@ -378,6 +396,17 @@ class AutonomousScalper:
                     "hint": "Configure a durable run-state path and verify it can be read and fsynced before arming.",
                 }
             )
+        if self.mutation_journal is not None:
+            try:
+                pending_journal = self.mutation_journal.unresolved()
+                if pending_journal:
+                    blockers.append({"reason": "mutation_journal_unresolved",
+                                     "message": "A durable broker mutation remains unresolved.",
+                                     "hint": "Reconcile its original request id; do not resend."})
+            except Exception:
+                blockers.append({"reason": "mutation_journal_unreadable",
+                                 "message": "The mutation journal cannot be read.",
+                                 "hint": "Preserve it and reconcile before trading."})
         if self._state_persistence_error:
             blockers.append(
                 {
@@ -590,7 +619,175 @@ class AutonomousScalper:
             self._emit("state_persistence_failed", error=type(exc).__name__)
             return False
         self._state_persistence_error = ""
+        if self.mutation_journal is not None:
+            try:
+                self._settle_durable_mutations()
+            except Exception as exc:
+                self.state = RECOVERY_REQUIRED
+                self._recovery = {"detail": f"mutation journal could not be settled: {type(exc).__name__}",
+                                  "hint": "Preserve the stores; reconcile each exact request without resending."}
+                return False
         return True
+
+    def _settle_durable_mutations(self) -> None:
+        """Settle only a durably saved manager state joined to exact broker proof.
+
+        Missing, contradictory or partial evidence deliberately leaves the row
+        unresolved. This method never sends, closes or modifies a position.
+        """
+        if not self._account().ok:
+            return
+        for record in self.mutation_journal.unresolved():
+            request_id = record["request_id"]
+            action = record["action"]
+            intent = record["intent"]
+            prior = intent.get("prior_position") or {}
+            symbol = str(intent.get("symbol") or prior.get("symbol") or "")
+            if not symbol or record["identity"] != self._journal_identity(symbol):
+                continue
+            pending_entry = self._pending_submission or {}
+            if str(pending_entry.get("request_id") or "") == request_id:
+                continue
+            if any(str(item.get("request_id") or "") == request_id for item in self.book.pending_closes):
+                continue
+            if any(str(item.get("request_id") or "") == request_id
+                   for item in self.book.snapshot()["pending_protection_modifications"]):
+                continue
+            # Recheck the entire managed book, not merely the requested ticket.
+            if self._broker_position_problems([position.audit_view() for position in self.book.open_positions]):
+                continue
+            result = record.get("result") or {}
+            if action == "entry":
+                fill = self.venue.query(request_id)
+                positions = [position for position in self.book.open_positions
+                             if position.entry_request_id == request_id]
+                if (fill is not None and not fill.simulated and fill.request_id == request_id
+                        and fill.status == ACCEPTED and len(positions) == 1
+                        and fill.ticket == positions[0].position_id
+                        and fill.filled_lots == positions[0].lots
+                        and fill.requested_lots == _d(intent.get("lots"))
+                        and positions[0].symbol == symbol and positions[0].side == intent.get("side")):
+                    reason = "durable_fill_and_managed_broker_position_match"
+                elif (fill is not None and not fill.simulated and fill.request_id == request_id
+                      and fill.status == REJECTED and not positions):
+                    reason = "durable_broker_refusal"
+                elif (not positions and isinstance(result.get("report"), Mapping)
+                      and result["report"].get("status") == FILL_BLOCKED
+                      and (result["report"].get("fill") is None or (
+                          isinstance(result["report"].get("fill"), Mapping)
+                          and result["report"]["fill"].get("status") == FILL_BLOCKED
+                          and result["report"]["fill"].get("request_id") == request_id
+                          and result.get("broker_receipt") is None
+                          and isinstance(result.get("venue_refusals"), list)
+                          and len(result["venue_refusals"]) == 1
+                          and result["venue_refusals"][0].get("request_id") == request_id))):
+                    reason = "local_pre_submission_refusal"
+                else:
+                    continue
+            elif action == "close":
+                fill = self.venue.query(request_id)
+                ticket = str(intent.get("position_id") or "")
+                trades = [item for item in self.book.closed if item.close_request_id == request_id]
+                if (fill is not None and not fill.simulated and fill.request_id == request_id
+                        and fill.status == ACCEPTED and len(trades) == 1
+                        and fill.ticket == ticket == trades[0].position_id
+                        and fill.filled_lots == trades[0].lots
+                        and fill.requested_lots == _d(intent.get("requested_lots"))
+                        and fill.price == trades[0].exit_price):
+                    reason = "durable_close_fill_and_managed_broker_position_match"
+                elif (fill is not None and not fill.simulated and fill.request_id == request_id
+                      and fill.status == REJECTED and not trades and self.book.get(ticket) is not None):
+                    reason = "durable_broker_refusal"
+                else:
+                    continue
+            elif action == "protection":
+                ticket = str(intent.get("position_id") or "")
+                position = self.book.get(ticket)
+                receipts = result.get("receipts") if isinstance(result, Mapping) else None
+                if not isinstance(receipts, list) or len(receipts) != 1 or position is None:
+                    continue
+                receipt = receipts[0]
+                if (not isinstance(receipt, Mapping) or receipt.get("request_id") != request_id
+                        or str(receipt.get("ticket") or "") != ticket or receipt.get("sent") is not True
+                        or receipt.get("account_fingerprint") != record["identity"]["account_fingerprint"]
+                        or not position.protection_verified):
+                    continue
+                if (receipt.get("retcode") in {10009, 10025}
+                        and receipt.get("classification") in {"OK", "NO_CHANGES"}
+                        and position.stop_price == _d(intent.get("stop_price"))
+                        and position.target_price == (None if intent.get("target_price") is None
+                                                      else _d(intent.get("target_price")))):
+                    reason = "durable_sltp_receipt_and_broker_protection_match"
+                else:
+                    from ..brokers.mt5.retcodes import is_definitive_rejection, RETRYABLE_CODES
+                    retcode = receipt.get("retcode")
+                    if (receipt.get("unknown") is not False
+                            or receipt.get("classification") not in {"REJECTED", "RETRYABLE"}
+                            or not (is_definitive_rejection(retcode) or retcode in RETRYABLE_CODES)
+                            or position.stop_price != _d(intent.get("previous_stop_price"))
+                            or position.target_price != (None if intent.get("previous_target_price") is None
+                                                        else _d(intent.get("previous_target_price")))):
+                        continue
+                    reason = "durable_sltp_refusal_and_prior_protection_match"
+            else:
+                continue
+            # Broker reads can span an account switch. Never clear the durable
+            # latch unless the same positively identified account is still bound.
+            try:
+                self.adapter.refresh_account()
+                if not self._account().ok:
+                    continue
+            except Exception:
+                continue
+            self.mutation_journal.resolve(request_id, {"reason": reason})
+
+    def _journal_identity(self, symbol: str) -> dict[str, str]:
+        """Bind a mutation to the immutable account, run, evidence and policy."""
+        snapshot = self.snapshot()
+        admission = snapshot.get("admission") or {}
+        account = snapshot.get("account_identity") or {}
+        config = {key: snapshot[key] for key in ("symbols", "instrument_specs", "risk_policy")}
+        digest = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":"),
+                                          allow_nan=False).encode("utf-8")).hexdigest()
+        return {
+            "run_id": self.run_id,
+            "account_fingerprint": str(account.get("fingerprint") or ""),
+            "account_server": str(account.get("server") or ""),
+            "account_currency": str(account.get("currency") or ""),
+            "account_mode": str(account.get("account_mode") or ""),
+            "strategy_fingerprint": str(snapshot.get("strategy_fingerprint") or ""),
+            "evidence_digest": str(admission.get("evidence_digest") or ""),
+            "candidate_id": str(admission.get("candidate_id") or ""),
+            "policy_version": str(admission.get("policy_version") or ""),
+            "config_digest": digest,
+            "symbol": str(self.symbols.get(symbol) or ""),
+        }
+
+    def _journal_prepare(self, action: str, intent: Mapping[str, Any], symbol: str) -> bool:
+        if self.mutation_journal is None:
+            return True
+        try:
+            self.mutation_journal.prepare(request_id=str(intent.get("request_id") or ""),
+                action=action, identity=self._journal_identity(symbol), intent=dict(intent))
+            return True
+        except Exception as exc:
+            self.state = RECOVERY_REQUIRED
+            self._recovery = {"detail": f"mutation journal prepare failed: {type(exc).__name__}: {exc}",
+                              "hint": "No mutation was sent. Preserve the journal and run state; do not retry blindly."}
+            return False
+
+    def _journal_record(self, request_id: str, *, result: Mapping[str, Any],
+                        readback: Mapping[str, Any] | None = None) -> bool:
+        if self.mutation_journal is None:
+            return True
+        try:
+            self.mutation_journal.record_result(request_id, result=result, readback=readback)
+            return True
+        except Exception as exc:
+            self.state = RECOVERY_REQUIRED
+            self._recovery = {"detail": f"mutation result could not be durably recorded: {type(exc).__name__}: {exc}",
+                              "hint": "The broker may have acted. Preserve both stores and reconcile the original request; never resend."}
+            return False
 
     def _persist_close_intent(self, intent: Mapping[str, Any]) -> bool:
         """Fsync an exact prepared close before the venue can be called."""
@@ -601,7 +798,13 @@ class AutonomousScalper:
             request_id=str(intent.get("request_id") or ""),
             requested_lots=str(intent.get("requested_lots") or ""),
         )
-        return self._persist_state()
+        if not self._persist_state():
+            return False
+        position = self.book.get(str(intent.get("position_id") or ""))
+        if position is None:
+            return False
+        full_intent = {**dict(intent), "prior_position": position.audit_view()}
+        return self._journal_prepare("close", full_intent, position.symbol)
 
     def _persist_protection_intent(self, intent: Mapping[str, Any]) -> bool:
         """Fsync the exact requested stop and target before the broker can change."""
@@ -615,7 +818,42 @@ class AutonomousScalper:
             stop_price=str(intent.get("stop_price") or ""),
             target_price=intent.get("target_price"),
         )
-        return self._persist_state()
+        if not self._persist_state():
+            return False
+        position = self.book.get(position_id)
+        if position is None:
+            return False
+        full_intent = {**dict(intent), "prior_position": position.audit_view()}
+        return self._journal_prepare("protection", full_intent, position.symbol)
+
+    def _leg_receipt(self, request_id: str) -> dict[str, Any] | None:
+        receipt = getattr(getattr(self.venue, "leg", None), "last_outcome", None)
+        if isinstance(receipt, Mapping) and str(receipt.get("request_id") or "") == request_id:
+            return dict(receipt)
+        return None
+
+    def _broker_readback(self, position_id: str) -> dict[str, Any]:
+        try:
+            rows = [dict(row) for row in self.venue.position_details()
+                    if str(row.get("position_id") or row.get("ticket") or "") == position_id]
+            return {"readable": True, "matches": rows}
+        except Exception as exc:
+            return {"readable": False, "error": type(exc).__name__}
+
+    def _persist_close_observation(self, observation: Mapping[str, Any]) -> bool:
+        request_id = str(observation.get("request_id") or "")
+        return self._journal_record(request_id,
+            result={"observation": dict(observation), "broker_receipt": self._leg_receipt(request_id)},
+            readback=self._broker_readback(str(observation.get("position_id") or "")))
+
+    def _persist_protection_observation(self, observation: Mapping[str, Any]) -> bool:
+        request_id = str(observation.get("request_id") or "")
+        history = getattr(getattr(self.venue, "record", None), "protection_modifications", ())
+        receipts = [dict(item) for item in history if isinstance(item, Mapping)
+                    and str(item.get("request_id") or "") == request_id]
+        result = {"observation": dict(observation), "receipts": receipts}
+        return self._journal_record(request_id, result=result,
+            readback=self._broker_readback(str(observation.get("position_id") or "")))
 
     def _persist_protection_result(self, result: Mapping[str, Any]) -> bool:
         """Commit a broker-read-back-confirmed SL/TP pair after the send."""
@@ -732,7 +970,7 @@ class AutonomousScalper:
         # A recovery-required snapshot must remain byte-for-byte intact. A
         # stop is still effective in memory (RECOVERY_REQUIRED cannot enter),
         # but cannot rewrite the last durable evidence or flatten the broker.
-        if self.state == RECOVERY_REQUIRED:
+        if self._reconciliation_only or self.state == RECOVERY_REQUIRED:
             self.stop_reason = reason
             return {
                 "ok": True, "state": RECOVERY_REQUIRED, "reason": reason,
@@ -789,7 +1027,7 @@ class AutonomousScalper:
     ) -> list[dict[str, Any]]:
         """Explicitly request exits at caller-supplied current quotes; never invent a price."""
 
-        if self.state == RECOVERY_REQUIRED:
+        if self._reconciliation_only or self.state == RECOVERY_REQUIRED:
             return []
         now = self.clock()
         now_ms = int(now.timestamp() * 1000)
@@ -801,6 +1039,9 @@ class AutonomousScalper:
 
     def reconcile_close(self, *, position_id: str) -> dict[str, Any]:
         """Resolve one latched close from its exact durable request, never by guessing."""
+
+        if self._reconciliation_only and (not self._recovery_prepared or not self._account().ok):
+            return {"ok": False, "resolved": False, "reason": "recovery_identity_unverified"}
 
         pending = next(
             (item for item in self.book.pending_closes if item.get("position_id") == position_id),
@@ -854,6 +1095,16 @@ class AutonomousScalper:
                     "reason": "close_outcome_unresolved", "position_id": position_id,
                     "request_id": request_id,
                     "action": None if action is None else action.audit_view()}
+        if (self._reconciliation_only and getattr(fill, "status", "") == REJECTED
+                and not getattr(fill, "simulated", True)
+                and not any(item.get("position_id") == position_id for item in self.book.pending_closes)):
+            # A refusal only consumes the old request. The broker must still
+            # exactly match the unchanged managed exposure and protection.
+            broker_problems = self._broker_position_problems(
+                [position.audit_view() for position in self.book.open_positions])
+            protection = self.book.verify_protection(update=False)
+            if not broker_problems and not protection.get("missing") and not protection.get("pending_modification"):
+                self.book._acknowledge_reconciled_close_refusal(position_id)
         for trade in self.book.closed[closed_before:]:
             if trade.gross_account is None:
                 self.guardian.suspend_entries("position_realized_pnl_unavailable")
@@ -942,8 +1193,81 @@ class AutonomousScalper:
             "close_blockers": list(self.book.close_blockers),
         }
 
+    def reconcile_protection(self, *, request_id: str) -> dict[str, Any]:
+        """Reconcile one durable SL/TP receipt and fresh read-back; never send."""
+        if not self._reconciliation_only or not self._recovery_prepared or not self._account().ok:
+            return {"ok": False, "resolved": False, "reason": "recovery_identity_unverified"}
+        try:
+            rows = [row for row in self.mutation_journal.unresolved() if row["request_id"] == request_id]
+            if len(rows) != 1 or rows[0]["action"] != "protection":
+                return {"ok": False, "resolved": False, "reason": "protection_request_not_unique"}
+            row = rows[0]
+            intent = row["intent"]
+            position_id = str(intent.get("position_id") or "")
+            position = self.book.get(position_id)
+            pending = [item for item in self.book.snapshot()["pending_protection_modifications"]
+                       if item.get("request_id") == request_id and item.get("position_id") == position_id]
+            receipt_rows = (row.get("result") or {}).get("receipts")
+            if position is None or len(pending) != 1 or not isinstance(receipt_rows, list) or len(receipt_rows) != 1:
+                return {"ok": False, "resolved": False, "reason": "protection_receipt_or_intent_incomplete"}
+            receipt = receipt_rows[0]
+            if (not isinstance(receipt, Mapping) or receipt.get("request_id") != request_id
+                    or str(receipt.get("ticket") or "") != position_id
+                    or receipt.get("account_fingerprint") != row["identity"]["account_fingerprint"]
+                    or receipt.get("sent") is not True
+                    or row["identity"] != self._journal_identity(position.symbol)):
+                return {"ok": False, "resolved": False, "reason": "protection_receipt_identity_mismatch"}
+            retcode = receipt.get("retcode")
+            accepted = retcode in {10009, 10025} and receipt.get("classification") in {"OK", "NO_CHANGES"}
+            from ..brokers.mt5.retcodes import is_definitive_rejection, RETRYABLE_CODES
+            refused = (receipt.get("unknown") is False
+                       and receipt.get("classification") in {"REJECTED", "RETRYABLE"}
+                       and (is_definitive_rejection(retcode) or retcode in RETRYABLE_CODES))
+            if not accepted and not refused:
+                return {"ok": False, "resolved": False, "reason": "protection_receipt_ambiguous"}
+            broker_problems = self._broker_position_problems(
+                [p.audit_view() for p in self.book.open_positions],
+                pending_protection=self.book.snapshot()["pending_protection_modifications"],
+                allow_previous_protection=True)
+            observed_stop, observed_target = self.venue.protection(position_id)
+            target = intent.get("target_price") if accepted else intent.get("previous_target_price")
+            stop = _d(intent.get("stop_price") if accepted else intent.get("previous_stop_price"))
+            if (broker_problems or stop is None or not self.book._protection_matches(
+                    observed_stop, observed_target, expected_stop=stop,
+                    expected_target=None if target is None else _d(target),
+                    point=position.point, side=position.side)):
+                return {"ok": False, "resolved": False, "reason": "protection_readback_mismatch",
+                        "detail": "; ".join(broker_problems)}
+            book_before, guardian_before = self.book.snapshot(), self.guardian.snapshot()
+            if not self.book._apply_reconciled_protection(position_id=position_id,
+                    request_id=request_id, accepted=accepted, reason=str(intent.get("reason") or ""),
+                    now_ms=int(self.clock().timestamp() * 1000)):
+                return {"ok": False, "resolved": False, "reason": "protection_identity_mismatch"}
+            updated = self.book.get(position_id)
+            if updated is None or not self._record_position_risk(updated):
+                self.book.restore_state(book_before)
+                self.guardian.restore_state(guardian_before)
+                return {"ok": False, "resolved": False, "reason": "protection_risk_rebuild_failed"}
+            self.guardian.record_protection(position_id, protected=True)
+            self.state = RECOVERY_REQUIRED
+            if not self._persist_state():
+                self.book.restore_state(book_before)
+                self.guardian.restore_state(guardian_before)
+                return {"ok": False, "resolved": False, "reason": "protection_state_not_durable"}
+            remaining = [item for item in self.mutation_journal.unresolved() if item["request_id"] == request_id]
+            if remaining:
+                return {"ok": False, "resolved": False, "reason": "protection_evidence_not_settled"}
+            return {"ok": True, "resolved": True, "request_id": request_id,
+                    "reason": "protection_confirmed" if accepted else "protection_refused"}
+        except Exception as exc:
+            return {"ok": False, "resolved": False, "reason": "protection_reconciliation_failed",
+                    "detail": type(exc).__name__}
+
     def reconcile_submission(self) -> dict[str, Any]:
         """Resolve a persisted entry intent using only its exact durable request id."""
+
+        if self._reconciliation_only and (not self._recovery_prepared or not self._account().ok):
+            return {"ok": False, "resolved": False, "reason": "recovery_identity_unverified"}
 
         pending = self._pending_submission
         if not isinstance(pending, Mapping):
@@ -1171,6 +1495,9 @@ class AutonomousScalper:
         *,
         pending_close_ids: Iterable[str] = (),
         pending_protection: Sequence[Mapping[str, Any]] = (),
+        allow_previous_protection: bool = False,
+        allowed_extra_position_ids: Iterable[str] = (),
+        closed_rows: Sequence[Mapping[str, Any]] | None = None,
     ) -> list[str]:
         """Compare broker positions with a saved or restored managed book."""
 
@@ -1233,6 +1560,30 @@ class AutonomousScalper:
             fill_lots = _d(getattr(fill, "filled_lots", None))
             requested_lots = _d(getattr(fill, "requested_lots", None))
             fill_price = _d(getattr(fill, "price", None))
+            closes = (closed_rows if closed_rows is not None
+                      else [trade.audit_view() for trade in self.book.closed])
+            closed_lots = Decimal(0)
+            close_proofs_ok = True
+            close_ids: set[str] = set()
+            for trade in closes:
+                if str(trade.get("position_id") or "") != position_id:
+                    continue
+                close_id = str(trade.get("close_request_id") or "")
+                try:
+                    close_fill = query(close_id) if close_id else None
+                    trade_lots = _d(trade.get("lots"))
+                    trade_price = _d(trade.get("exit_price"))
+                    if (not close_id or close_id in close_ids or close_fill is None
+                            or close_fill.status != ACCEPTED or close_fill.simulated
+                            or close_fill.request_id != close_id or close_fill.ticket != position_id
+                            or close_fill.filled_lots != trade_lots or close_fill.price != trade_price
+                            or trade.get("entry_request_id") != request_id or trade_lots is None or trade_lots <= 0):
+                        raise ValueError("close_fill_unproven")
+                    close_ids.add(close_id)
+                    closed_lots += trade_lots
+                except Exception:
+                    close_proofs_ok = False
+                    break
             if (
                 fill is None
                 or str(getattr(fill, "request_id", "")) != request_id
@@ -1240,7 +1591,8 @@ class AutonomousScalper:
                 or bool(getattr(fill, "simulated", True))
                 or str(getattr(fill, "ticket", "")) != position_id
                 or lots is None
-                or fill_lots != lots
+                or not close_proofs_ok
+                or fill_lots != lots + closed_lots
                 or requested_lots is None
                 or requested_lots < fill_lots
                 or fill_price is None
@@ -1251,7 +1603,7 @@ class AutonomousScalper:
                     f"position {position_id} lacks a matching durable entry fill"
                 )
         broker_ids, local_ids = set(broker_by_id), set(local_by_id)
-        for position_id in sorted(broker_ids - local_ids):
+        for position_id in sorted(broker_ids - local_ids - set(allowed_extra_position_ids)):
             problems.append(f"unmanaged broker position {position_id} is present")
         for position_id in sorted(local_ids - broker_ids - pending):
             problems.append(f"managed broker position {position_id} is missing")
@@ -1279,6 +1631,14 @@ class AutonomousScalper:
             broker_target = _d(broker.get("target_price"))
             if broker_target is not None and broker_target <= 0:
                 broker_target = None
+            if (allow_previous_protection and position_id in pending_stops and spec is not None):
+                previous_stop = _d(row.get("stop_price"))
+                previous_target = None if row.get("target_price") is None else _d(row.get("target_price"))
+                if (previous_stop is not None
+                        and self.book._protection_matches(broker_stop, broker_target,
+                            expected_stop=previous_stop, expected_target=previous_target,
+                            point=spec.point, side=side)):
+                    expected_stop, expected_target = previous_stop, previous_target
             if (
                 spec is None
                 or not expected_symbol
@@ -1332,9 +1692,12 @@ class AutonomousScalper:
 
     # -- recovery --------------------------------------------------------
 
-    def recover(self, *, state: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """Restore a full run only after state, risk, account, and broker facts match."""
+    def recover(self, *, state: Mapping[str, Any] | None = None,
+                reconciliation_only: bool = False) -> dict[str, Any]:
+        """Validate an exact run; a reconciliation-only instance cannot trade."""
 
+        self._reconciliation_only = bool(reconciliation_only)
+        self._recovery_prepared = False
         self._recovery = {}
         if state is None and self.state_store is not None:
             try:
@@ -1364,11 +1727,18 @@ class AutonomousScalper:
         problems: list[str] = []
         if str(state.get("schema") or "") != RUN_STATE_SCHEMA:
             problems.append("stored run-state schema is missing or unsupported")
+        try:
+            stored_run_id = str(state.get("run_id") or "")
+            if UUID(hex=stored_run_id).hex != stored_run_id:
+                raise ValueError("noncanonical_run_id")
+        except (ValueError, TypeError, AttributeError):
+            stored_run_id = ""
+            problems.append("stored run identity is missing or invalid")
         if str(state.get("mode") or "") != LIVE:
             problems.append("stored mode is not LIVE")
         if state.get("state") not in {IDLE, BLOCKED, ARMED, RUNNING, PAUSED, STOPPED, RECOVERY_REQUIRED}:
             problems.append("stored run lifecycle state is missing or invalid")
-        if self._mode_name() != LIVE or not self._live_effective():
+        if not reconciliation_only and (self._mode_name() != LIVE or not self._live_effective()):
             problems.append("current execution mode is not confirmed LIVE")
 
         current_account = self._account()
@@ -1530,7 +1900,9 @@ class AutonomousScalper:
                             or bid > ask or lots < spec.volume_min or lots > spec.volume_max
                             or lots % spec.volume_step != 0
                             or raw_target is not None and (target is None or target <= 0)
-                            or request_id != f"{fingerprint[:12]}:{tick_id[:12]}:{side}"):
+                            or not (request_id == f"{fingerprint[:12]}:{tick_id[:12]}:{side}"
+                                    or (request_id.startswith("entry-") and len(request_id) == 38
+                                        and UUID(hex=request_id[6:]).hex == request_id[6:]))):
                         raise ValueError("submission_intent_invalid")
                 except Exception:
                     problems.append("persisted submission intent is incomplete or inconsistent")
@@ -1619,21 +1991,168 @@ class AutonomousScalper:
                 pending_protection_rows = [dict(item) for item in raw_protection_rows]
             else:
                 problems.append("stored pending-protection rows are invalid")
-        if pending_protection_rows:
+        if pending_protection_rows and not reconciliation_only:
             # A broker SL/TP echo proves current position state, not which
             # request caused it. Never erase a pending identity during ordinary
             # restoration; exact durable-request reconciliation must own it.
             problems.append("pending protection requires exact durable-request reconciliation")
         if pending_submission_state is not None and pending_close_ids:
             problems.append("a submission intent and unresolved close cannot be adopted together")
-        if pending_submission_state is None:
+        allowed_extra: set[str] = set()
+        unbooked_extra: set[str] = set()
+        if pending_submission_state is not None and reconciliation_only:
+            # An extra broker position is allowed for inspection only when an
+            # exact durable booked fill names it and all position terms agree.
+            request_id = str(pending_submission_state.get("request_id") or "")
+            try:
+                fill = self.venue.query(request_id)
+                preview_only = False
+                if (fill is None or fill.status != ACCEPTED) and callable(getattr(self.venue, "history_preview", None)):
+                    proof = self.venue.history_preview(request_id)
+                    if proof.get("resolved") and proof.get("state") == "FILLED":
+                        preview_only = True
+                        fill = Fill(request_id=request_id, status=ACCEPTED,
+                            filled_lots=Decimal(proof["lots"]), requested_lots=Decimal(proof["lots"]),
+                            price=Decimal(proof["price"]), spread_points=Decimal(0),
+                            slippage_points=Decimal(0), latency_ms=0,
+                            ticket=str(proof["ticket"]), simulated=False)
+                if fill is not None and fill.status == ACCEPTED and not fill.simulated:
+                    ticket = str(fill.ticket or "")
+                    symbol = str(pending_submission_state.get("symbol") or "")
+                    spec = self.specs.get(symbol)
+                    rows = [item for item in self.venue.position_details()
+                            if str(item.get("ticket") or "") == ticket]
+                    row = rows[0] if len(rows) == 1 else {}
+                    target = pending_submission_state.get("target_price")
+                    if (fill.request_id == request_id and ticket and spec is not None
+                            and fill.requested_lots == _d(pending_submission_state.get("lots"))
+                            and fill.filled_lots > 0 and fill.filled_lots <= fill.requested_lots
+                            and _d(row.get("lots")) == fill.filled_lots
+                            and str(row.get("symbol") or "") == str(self.symbols.get(symbol) or "")
+                            and str(row.get("side") or "") == pending_submission_state.get("side")
+                            and fill.price is not None and _d(row.get("entry_price")) is not None
+                            and abs(_d(row.get("entry_price")) - fill.price) <= spec.point
+                            and self.book._protection_matches(row.get("stop_price"), row.get("target_price"),
+                                expected_stop=_d(pending_submission_state.get("stop_price")),
+                                expected_target=None if target is None else _d(target),
+                                point=spec.point, side=str(pending_submission_state.get("side")))):
+                        allowed_extra.add(ticket)
+                        if preview_only:
+                            unbooked_extra.add(ticket)
+                    else:
+                        problems.append("pending entry fill or broker position is not an exact match")
+            except Exception as exc:
+                problems.append(f"pending entry durable query failed:{type(exc).__name__}")
+        if pending_submission_state is None or reconciliation_only:
             problems.extend(
                 self._broker_position_problems(
-                    positions,
-                    pending_close_ids=pending_close_ids,
+                    positions, pending_close_ids=pending_close_ids,
                     pending_protection=pending_protection_rows,
+                    allow_previous_protection=reconciliation_only,
+                    allowed_extra_position_ids=allowed_extra,
+                    closed_rows=book_state.get("closed_trades") if isinstance(book_state, Mapping) else None,
                 )
             )
+
+        # The position manager is not the execution ledger. A fresh provider
+        # platform starts with an empty portfolio, and accepting a matching
+        # broker/manager pair alone would arm management against a ledger that
+        # cannot safely close or account for the position. Never silently
+        # invent/rebook the missing ledger: the atomic settlement must exist.
+        leg = getattr(self.venue, "leg", None)
+        if hasattr(leg, "portfolio"):
+            portfolio = getattr(leg, "portfolio", None)
+            ledger = getattr(portfolio, "positions", None)
+            if not isinstance(ledger, Mapping):
+                problems.append("provider execution ledger is unavailable")
+            else:
+                managed_ids = {str(item.get("position_id") or "") for item in positions}
+                ledger_ids = {str(key).removeprefix("mt5:") for key in ledger}
+                # A crash may occur after the ledger+order transaction commits
+                # but before the manager snapshot consumes a close. Permit that
+                # exact committed close to be inspected, never an arbitrary
+                # missing or smaller ledger position.
+                settled_closes: dict[str, Decimal] = {}
+                if reconciliation_only and isinstance(book_state, Mapping):
+                    for pending in book_state.get("pending_closes") or ():
+                        try:
+                            pid = str(pending.get("position_id") or "")
+                            request_id = str(pending.get("request_id") or "")
+                            fill = self.venue.query(request_id)
+                            managed = next(item for item in positions if item.get("position_id") == pid)
+                            before = Decimal(str(managed["lots"]))
+                            requested = Decimal(str(pending["requested_lots"]))
+                            if (fill is not None and fill.status == ACCEPTED and not fill.simulated
+                                    and fill.request_id == request_id and fill.ticket == pid
+                                    and fill.requested_lots == requested and fill.filled_lots > 0
+                                    and fill.filled_lots <= requested and fill.filled_lots <= before):
+                                settled_closes[pid] = before - fill.filled_lots
+                        except Exception:
+                            pass
+                closed_ids = {pid for pid, remaining in settled_closes.items() if remaining == 0}
+                if ledger_ids != (managed_ids - closed_ids) | (allowed_extra - unbooked_extra):
+                    problems.append("provider execution ledger position tickets differ from managed broker exposure")
+                for item in positions:
+                    pid = str(item.get("position_id") or "")
+                    p = ledger.get(f"mt5:{pid}")
+                    spec = self.specs.get(str(item.get("symbol") or ""))
+                    try:
+                        remaining = settled_closes.get(pid, Decimal(str(item.get("lots"))))
+                        if remaining == 0 and pid in settled_closes and p is None:
+                            continue
+                        quantity, _ = leg._catalog_quantity_from_broker_volume(remaining)
+                        side = getattr(getattr(p, "side", ""), "value", getattr(p, "side", ""))
+                        if (p is None or spec is None or str(p.pair) != spec.pair
+                                or str(side).upper() != str(item.get("side") or "").upper()
+                                or p.quantity != quantity
+                                or p.entry_price != Decimal(str(item.get("entry_price")))
+                                or str(p.account_id) != str(portfolio.account.account_id)):
+                            raise ValueError("ledger_position_mismatch")
+                    except Exception:
+                        problems.append(f"provider execution ledger position {pid} differs from saved manager state")
+
+        if reconciliation_only:
+            if self.mutation_journal is None:
+                problems.append("durable mutation journal is missing")
+            elif stored_run_id:
+                self.run_id = stored_run_id
+                try:
+                    journal_rows = self.mutation_journal.unresolved()
+                    pending_by_id: dict[str, tuple[str, Mapping[str, Any]]] = {}
+                    if pending_submission_state:
+                        pending_by_id[str(pending_submission_state["request_id"])] = ("entry", pending_submission_state)
+                    for item in (book_state.get("pending_closes") or []):
+                        pending_by_id[str(item.get("request_id") or "")] = ("close", item)
+                    for item in pending_protection_rows:
+                        pending_by_id[str(item.get("request_id") or "")] = ("protection", item)
+                    ids = [str(item["request_id"]) for item in journal_rows]
+                    if len(ids) != len(set(ids)) or not set(pending_by_id).issubset(ids):
+                        problems.append("snapshot and journal request identities differ")
+                    for item in journal_rows:
+                        intent = item["intent"]
+                        prior = intent.get("prior_position") or {}
+                        sym = str(intent.get("symbol") or prior.get("symbol") or "")
+                        if not sym or item["identity"] != self._journal_identity(sym):
+                            problems.append(f"journal identity differs for request {item['request_id']}")
+                        pending = pending_by_id.get(item["request_id"])
+                        if pending:
+                            kind, state_intent = pending
+                            keys = ("request_id", "symbol", "side", "lots", "stop_price", "target_price") if kind == "entry" else (
+                                ("request_id", "position_id", "requested_lots") if kind == "close" else
+                                ("request_id", "position_id", "stop_price", "target_price", "previous_stop_price", "previous_target_price"))
+                            if item["action"] != kind or any(intent.get(key) != state_intent.get(key) for key in keys):
+                                problems.append(f"journal intent differs for request {item['request_id']}")
+                            if kind in {"close", "protection"}:
+                                matching_positions = [position for position in positions
+                                    if position.get("position_id") == state_intent.get("position_id")]
+                                prior_position = intent.get("prior_position")
+                                prior_keys = ("position_id", "symbol", "side", "lots", "entry_price", "stop_price",
+                                              "target_price", "opened_at_ms", "entry_request_id", "point", "point_value_per_lot")
+                                if (len(matching_positions) != 1 or not isinstance(prior_position, Mapping)
+                                        or any(prior_position.get(key) != matching_positions[0].get(key) for key in prior_keys)):
+                                    problems.append(f"journal prior position differs for request {item['request_id']}")
+                except Exception as exc:
+                    problems.append(f"mutation journal could not be validated:{type(exc).__name__}")
 
         if problems:
             self._recovery = {
@@ -1653,6 +2172,7 @@ class AutonomousScalper:
             # ensure this section cannot leave a partially adopted risk state.
             self.book.restore_state(book_state)
             self.guardian.restore_state(guardian_state)
+            self.run_id = stored_run_id
             self._equity = restored_run["equity"]
             self._last_entry_ms = restored_run["last_entry_ms"]
             self._last_decision_ms = restored_run["last_decision_ms"]
@@ -1668,6 +2188,13 @@ class AutonomousScalper:
             self.state = RECOVERY_REQUIRED
             self._emit("recovery_required", reason="restore_failed")
             return {"ok": False, "state": self.state, "recovery": dict(self._recovery)}
+
+        if reconciliation_only:
+            self._recovery_prepared = True
+            self.state = RECOVERY_REQUIRED
+            self._recovery = {"detail": "validated run loaded for non-arming reconciliation only",
+                              "hint": "Query each original request explicitly; this runtime cannot send or manage positions."}
+            return {"ok": False, "prepared": True, "state": self.state, "recovery": dict(self._recovery)}
 
         protection = self.book.verify_protection()
         risk_state_restored = True
@@ -1740,6 +2267,7 @@ class AutonomousScalper:
         book_state = self.book.snapshot()
         return {
             "schema": RUN_STATE_SCHEMA,
+            "run_id": self.run_id,
             "mode": LIVE,
             "state": self.state,
             "account_identity": {
@@ -1796,9 +2324,20 @@ class AutonomousScalper:
     ) -> dict[str, Any]:
         """Feed one quote.  Manages positions always; decides only when RUNNING."""
 
-        if self.state == RECOVERY_REQUIRED:
+        if self._reconciliation_only or self.state == RECOVERY_REQUIRED:
             return {"state": self.state, "blocked": RECOVERY, "execution": None,
                     "managed": [], "detail": dict(self._recovery)}
+        if self.mutation_journal is not None:
+            try:
+                unresolved = self.mutation_journal.unresolved()
+            except Exception:
+                unresolved = [{"request_id": "unreadable"}]
+            if unresolved:
+                self.state = RECOVERY_REQUIRED
+                self._recovery = {"detail": "a mutation journal record is unresolved or unreadable",
+                                  "hint": "Query the original request without sending another mutation."}
+                return {"state": self.state, "blocked": RECOVERY, "execution": None,
+                        "managed": [], "detail": dict(self._recovery)}
         spec = self.specs.get(symbol)
         if spec is None:
             return self._refuse(SPEC_UNKNOWN, symbol=symbol)
@@ -1933,7 +2472,8 @@ class AutonomousScalper:
 
         risk_account = self._risk_account(lots, signal, spec)
         notional_account = self._notional(lots, tick, spec)
-        request_id = str(self.trader.request_id_for(signal))
+        request_id = (f"entry-{uuid4().hex}" if self.mutation_journal is not None
+                      else str(self.trader.request_id_for(signal)))
         self._pending_submission = {
             "request_id": request_id,
             "symbol": symbol,
@@ -1959,16 +2499,33 @@ class AutonomousScalper:
                 "blocked": STATE_PERSISTENCE_FAILED,
             }
 
-        report = self.trader.execute(
-            signal=signal,
-            lots=lots,
-            risk_account=risk_account,
-            notional_account=notional_account,
-            quote=tick,
-            now_ms=now_ms,
-            decision_latency_ms=0,
-            currencies=(spec.quote_currency,),
-        )
+        if not self._journal_prepare("entry", self._pending_submission, symbol):
+            return {"tick": tick.tick_id, "state": self.state, "managed": [],
+                    "execution": None, "blocked": "mutation_journal_failed"}
+        try:
+            report = self.trader.execute(
+                signal=signal, lots=lots, risk_account=risk_account,
+                notional_account=notional_account, quote=tick, now_ms=now_ms,
+                decision_latency_ms=0, currencies=(spec.quote_currency,),
+                **({"request_id": request_id} if self.mutation_journal is not None else {}),
+            )
+        except Exception as exc:
+            self._journal_record(request_id, result={"status": UNKNOWN_OUTCOME,
+                "reason": "execution_raised", "error": type(exc).__name__})
+            self.state = RECOVERY_REQUIRED
+            self._recovery = {"detail": "entry execution raised after durable preparation",
+                              "hint": "The broker may have acted. Query the original request; do not resend."}
+            return {"tick": tick.tick_id, "state": self.state, "managed": [],
+                    "execution": None, "blocked": "entry_execution_uncertain"}
+        ticket = str(getattr(report.fill, "ticket", "") or "")
+        venue_refusals = [dict(item) for item in getattr(getattr(self.venue, "record", None), "refusals", ())
+                          if str(item.get("request_id") or "") == request_id]
+        if not self._journal_record(request_id,
+                result={"report": report.audit_view(), "broker_receipt": self._leg_receipt(request_id),
+                        "venue_refusals": venue_refusals},
+                readback=self._broker_readback(ticket) if ticket else None):
+            return {"tick": tick.tick_id, "state": self.state, "managed": [],
+                    "execution": report.audit_view(), "blocked": "mutation_result_not_durable"}
         self._record_execution(report, tick, now_ms)
         if report.status == ACCEPTED and report.fill is not None and report.fill.ticket:
             fill = report.fill

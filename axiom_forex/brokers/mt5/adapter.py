@@ -77,6 +77,9 @@ from .reconcile import (
     RecoveryResult,
     reconcile_positions,
     reconcile_record,
+    history_deals,
+    _time_window,
+    DEAL_ENTRY_IN,
 )
 from .symbols import (
     SymbolCrossCheck,
@@ -1005,7 +1008,7 @@ class MT5TradingAdapter:
         )
 
     def reconcile_protection_modifications(self) -> dict[str, list[str]]:
-        """Resolve ambiguous SL/TP results only when the same position echoes both fields."""
+        """Join a positive SL/TP receipt with the same position's later read-back."""
 
         resolved: list[str] = []
         unresolved = self.unresolved_protection_modification_ids()
@@ -1056,6 +1059,12 @@ class MT5TradingAdapter:
                 or position.magic != expected_magic
                 or expected_magic != int(self.settings.magic)
             ):
+                continue
+            # A matching position is not a receipt for an unknown SLTP
+            # request. Only a saved synchronous terminal success can be joined
+            # to a later read-back; otherwise preserve the unresolved identity.
+            if (prior.get("retcode") not in {10009, 10025}
+                    or prior.get("classification") not in {"OK", "NO_CHANGES"}):
                 continue
             if not self._protection_matches(
                 position,
@@ -1638,7 +1647,8 @@ class MT5TradingAdapter:
             except Exception as exc:
                 readback_detail = f"positions_unavailable:{type(exc).__name__}"
             verified = bool(
-                observed is not None
+                transport.accepted and not transport.unknown
+                and observed is not None
                 and self._protection_matches(
                     observed,
                     stop_price=requested_stop,
@@ -1914,6 +1924,8 @@ class MT5TradingAdapter:
             "account_mode": self.account_mode,
             "account_currency": self._status.account_currency if self._status else "",
             "close_position_id": intent.close_position_id,
+            "close_position_ticket": preflight.get("close_position_ticket", 0),
+            "close_position_identifier": preflight.get("close_position_identifier", 0),
             "spec_version": intent.spec_version,
             "sent_at": self.clock(),
             "updated_at": self.clock(),
@@ -1996,6 +2008,7 @@ class MT5TradingAdapter:
                 declared=stop_declared,
                 point=info.point,
                 outcome=outcome,
+                exact_identity_required=str(intent.strategy_id or "").startswith("ax-scalper-live:"),
             )
             try:
                 self.repository.save_orders([record])
@@ -2150,18 +2163,28 @@ class MT5TradingAdapter:
             raise MT5SubmitRefused(conflict)
 
         close_ticket = 0
+        close_identifier = 0
         if intent.close_position_id:
-            match = [
-                position
-                for position in positions
-                if str(intent.close_position_id) in {
-                    str(position.ticket),
-                    str(position.identifier),
-                }
-            ]
+            close_id = str(intent.close_position_id)
+            scalper_close = str(intent.strategy_id or "").startswith("ax-scalper-live:")
+            if scalper_close:
+                # The provider ledger keys positions as mt5:<ticket>.  This is
+                # a ticket, never an identifier; do not match another position
+                # whose identifier happens to equal that ticket.
+                if not close_id.startswith("mt5:") or not close_id[4:].isdigit():
+                    raise MT5SubmitRefused("mt5_close_position_identity_invalid", close_id)
+                match = [position for position in positions if str(position.ticket) == close_id[4:]]
+            else:
+                match = [position for position in positions
+                         if close_id in {str(position.ticket), str(position.identifier)}]
             if not match:
                 raise MT5SubmitRefused("mt5_close_position_not_found", intent.close_position_id)
+            if len(match) != 1:
+                raise MT5SubmitRefused("mt5_close_position_ambiguous", intent.close_position_id)
             position = match[0]
+            close_identifier = int(position.identifier)
+            if str(intent.strategy_id or "").startswith("ax-scalper-live:") and close_identifier <= 0:
+                raise MT5SubmitRefused("mt5_close_position_identifier_missing", intent.close_position_id)
             requested = Decimal(str(intent.quantity))
             problem = close_volume_check(position, requested)
             if problem:
@@ -2241,6 +2264,7 @@ class MT5TradingAdapter:
             "margin_required": margin,
             "margin_free": self._terms.margin_free,
             "close_position_ticket": close_ticket,
+            "close_position_identifier": close_identifier,
             "protective_stop": dict(stop),
             "protective_stop_points": stop.get("distance_points") or 0,
             "checks": [
@@ -2266,6 +2290,49 @@ class MT5TradingAdapter:
             ],
         }
 
+    def exact_entry_position_ticket(self, outcome: MT5OrderOutcome, *, symbol: str, side: str) -> int:
+        """Join a synchronous order/deal receipt to exactly one broker position.
+
+        Order and deal ticket numbers are not necessarily position tickets.
+        Matching symbol, magic or the newest position alone is not attribution.
+        No matching history or a delayed/ambiguous history is deliberately zero.
+        """
+        try:
+            self._ensure_account_current()
+            order_ticket = int(outcome.order_ticket or 0)
+            deal_ticket = int(outcome.deal_ticket or 0)
+            if not outcome.accepted or order_ticket <= 0 or deal_ticket <= 0:
+                return 0
+            start, end = _time_window({"sent_at": outcome.sent_at})
+            rows = [item for item in history_deals(self.terminal, start=start, end=end)
+                    if item.ticket == deal_ticket]
+            if len(rows) != 1:
+                return 0
+            deal = rows[0]
+            if (deal.order != order_ticket or deal.position_id <= 0
+                    or deal.symbol.upper() != str(symbol).upper()
+                    or deal.side.upper() != str(side).upper()
+                    or deal.entry != DEAL_ENTRY_IN or deal.magic != int(self.settings.magic)
+                    or not deal.volume.is_finite() or deal.volume != outcome.volume_filled
+                    or not deal.price.is_finite() or deal.price <= 0
+                    or outcome.price is None or deal.price != outcome.price):
+                return 0
+            # DEAL_POSITION_ID is POSITION_IDENTIFIER, not necessarily the
+            # mutable POSITION_TICKET (e.g. broker service operations). Join
+            # on the identifier across the whole account and return its ticket.
+            # Netting into pre-existing exposure is not a unique entry booking.
+            matches = [item for item in self.positions()
+                       if item.identifier > 0 and item.identifier == deal.position_id]
+            if (len(matches) != 1 or matches[0].symbol.upper() != str(symbol).upper()
+                    or matches[0].side.upper() != str(side).upper()
+                    or matches[0].magic != int(self.settings.magic)
+                    or matches[0].volume != deal.volume or matches[0].price_open != deal.price):
+                return 0
+            self._ensure_account_current()
+            return int(matches[0].ticket)
+        except Exception:
+            return 0
+
     def _verify_stop(
         self,
         *,
@@ -2276,6 +2343,7 @@ class MT5TradingAdapter:
         declared: str,
         point: Decimal | None,
         outcome: MT5OrderOutcome,
+        exact_identity_required: bool = False,
     ) -> dict[str, Any]:
         """Ask the broker what stop the position actually carries.
 
@@ -2307,7 +2375,15 @@ class MT5TradingAdapter:
             and position.side == str(side).upper()
             and int(position.magic) == int(self.settings.magic)
         ]
-        position = max(candidates, key=lambda item: item.ticket) if candidates else None
+        if exact_identity_required:
+            ticket = self.exact_entry_position_ticket(outcome, symbol=symbol, side=side)
+            exact = [item for item in candidates if item.ticket == ticket] if ticket else []
+            position = exact[0] if len(exact) == 1 else None
+            if position is None:
+                record["detail"] = "exact_entry_position_identity_unproven"
+                return record
+        else:
+            position = max(candidates, key=lambda item: item.ticket) if candidates else None
         tolerance = Decimal(point) if point is not None else Decimal(0)
         confirmed, detail = stop_loss_confirmed(position, expected, tolerance=tolerance)
         record["verified"] = bool(confirmed)

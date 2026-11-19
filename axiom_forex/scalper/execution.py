@@ -628,8 +628,9 @@ class Trader:
         now_ms: int,
         decision_latency_ms: int,
         currencies: tuple[str, ...] = (),
+        request_id: str | None = None,
     ) -> ExecutionReport:
-        request_id = self.request_id_for(signal)
+        request_id = str(request_id or self.request_id_for(signal))
         events: list[dict[str, Any]] = []
 
         def finish(status: str, reasons: tuple[str, ...], **kwargs: Any) -> ExecutionReport:
@@ -758,6 +759,13 @@ class Trader:
         if fill.status == REJECTED:
             events.append({"event": "rejected", "reason": fill.reason})
             return finish(REJECTED, (fill.reason or "rejected",), fill=fill, risk=decision, precheck=check, latency_ms=fill.latency_ms)
+        if fill.status == BLOCKED:
+            events.append({"event": "blocked", "reason": fill.reason})
+            return finish(BLOCKED, (fill.reason or "venue_blocked",), fill=fill, risk=decision, precheck=check, latency_ms=fill.latency_ms)
+        if fill.status != ACCEPTED:
+            # An unfamiliar response is not a fill or a safe refusal.
+            self._unresolved[request_id] = fill
+            return finish(UNKNOWN_OUTCOME, ("outcome_unknown",), fill=fill, risk=decision, precheck=check, latency_ms=fill.latency_ms)
 
         self._slippage.append(fill.slippage_points)
         if fill.ticket is not None:

@@ -293,6 +293,7 @@ _STATE_GATED: dict[str, str] = {
     "ax-scalper-live-stop": "the AX-SCALPER runner is armed, active, or managing a position",
     "ax-scalper-live-reconcile": "an AX-SCALPER entry outcome is unresolved",
     "ax-scalper-live-reconcile-close": "an AX-SCALPER close outcome is unresolved",
+    "ax-scalper-live-reconcile-request": "a stored AX-SCALPER mutation request is unresolved",
     "scalper-live-register": "the one-shot LIVE proposal route is disabled",
     "scalper-live-review": "the one-shot LIVE proposal route is disabled",
     "scalper-live-approve": "the one-shot LIVE proposal route is disabled",

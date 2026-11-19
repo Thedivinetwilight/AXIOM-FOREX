@@ -242,6 +242,7 @@ POST_ACTIONS: frozenset[str] = frozenset(
         "ax-scalper-live-stop",
         "ax-scalper-live-reconcile",
         "ax-scalper-live-reconcile-close",
+        "ax-scalper-live-reconcile-request",
         # The one-shot DEMO execution test: one real order to an account MT5
         # itself reports as DEMO, built from the broker's current terms, through
         # the same guarded live leg every strategy order uses.  It is not a
@@ -1966,6 +1967,8 @@ class WorkstationApp:
                 outcome = controller.reconcile()
             elif action == "ax-scalper-live-reconcile-close":
                 outcome = controller.reconcile_close(position_id=field("position_id"))
+            elif action == "ax-scalper-live-reconcile-request":
+                outcome = controller.reconcile_request(request_id=field("request_id"))
             else:
                 return HTTPStatus.NOT_FOUND, "/live", "Unknown AX-SCALPER LIVE action."
         except Exception as exc:

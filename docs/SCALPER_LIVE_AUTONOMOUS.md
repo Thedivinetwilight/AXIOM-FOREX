@@ -5,13 +5,11 @@ existing guarded MT5 adapter and order route. The controls do not connect,
 switch accounts, or send on page load. Nothing here claims profitability or
 that a strategy has been admitted.
 
-**Not yet ready for autonomous real trading:** some unresolved requests cannot
-be reconciled through the workstation after restart because a refused recovery
-runtime is discarded. The autonomous page also lacks a complete durable
-outcome history and broker-sourced P&L view. Its position table is not independent
-proof of current broker protection. Preserve all state, verify positions in MT5,
-and do not resend or bypass the blocker. See `SCALPER_LIVE_WORKSTATION.md` for
-the current limitations and safe update steps.
+**Do not use for autonomous real-money trading.** Restart reconciliation is
+fail-closed and tested with fake MT5; neither the integration nor a profitable
+strategy has been independently verified on your broker. Preserve state and
+broker records, verify protection in MT5, and do not resend an unresolved
+request. See `SCALPER_LIVE_WORKSTATION.md` for limitations and safe setup.
 
 ## Guarded path
 
@@ -66,7 +64,9 @@ positions using fresh quotes and verified broker protections. If an entry or
 close result is unknown, the request stays latched and can only be reconciled by
 its original durable request id; it is never re-sent.
 
-Run state is written atomically and flushed to disk before a broker mutation.
+A versioned SQLite mutation journal and the run-state snapshot are flushed to disk
+before a broker mutation. The journal keeps local request identity, intent, response
+and broker read-back; the local ID is not assumed to be a broker idempotency key.
 Recovery must match the exact account, strategy evidence, instrument, settings,
 guardian history, request ids and broker positions/protection. Missing or
 mismatched fields leave the book blocked. Shutdown stops entries, disarms and

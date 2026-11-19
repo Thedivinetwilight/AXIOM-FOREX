@@ -452,8 +452,9 @@ def _account_kind_notice(view: Mapping[str, Any]) -> str:
     if kind == "REAL":
         return notice(
             "The connected account is a REAL-money account",
-            "Orders authorised on this account can put real money at risk. The AX-SCALPER "
-            "lane still has an incomplete restart-recovery path; do not use it for autonomous trading.",
+            "Orders authorised on this account can put real money at risk. Restart reconciliation "
+            "can remain blocked when broker evidence is incomplete. This build and its strategy "
+            "have not been independently verified on your broker; do not use real money.",
             tone="danger",
             role="alert",
         )
@@ -1319,7 +1320,8 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
     ]
 
     controls = ""
-    if (candidates and not blockers_list and not adapter_armed and not positions
+    if (candidates and not blockers_list and not adapter_armed
+            and (not positions or saved_recovery.get("present"))
             and not saved_recovery.get("error") and not saved_recovery.get("requests")):
         controls += (
             "<h3>Arm this exact admitted strategy</h3><p class='small muted'>Arming changes no broker position and sends no order. It requires the exact displayed account type, fingerprint and phrase.</p>"
@@ -1359,14 +1361,18 @@ def autonomous_scalper_section(view: Mapping[str, Any], nonce: str) -> str:
              cell(fmt.text(" / ".join(str(item.get(key) or "not recorded") for key in
                                       ("candidate_id", "strategy_fingerprint", "evidence_digest", "policy_version"))), label="Stored strategy and evidence"),
              cell(fmt.text(item.get("symbol") or "not recorded"), label="Instrument"),
-             cell(fmt.text(item.get("requested_values") or "not recorded"), label="Requested values")]
+             cell(fmt.text(item.get("requested_values") or "not recorded"), label="Requested values"),
+             cell(fmt.text(item.get("reason") or "stored request requires exact reconciliation"), label="Reason"),
+             cell(action_form("ax-scalper-live-reconcile-request", nonce, "Reconcile exact request",
+                    fields=f"<input type='hidden' name='request_id' value='{fmt.attr(item.get('request_id') or '')}'>")
+                  if item.get("request_id") else fmt.text("ID unavailable"), label="Action")]
             for item in saved_recovery.get("requests", ()) if isinstance(item, Mapping)
         ]
         controls += notice("Stored recovery state", fmt.text(saved_recovery.get("note") or "Preserve this state."), tone="warn")
         controls += table((("Kind", False), ("Original request ID", False), ("Position", False),
                            ("Stored account", False), ("Stored run", False),
                            ("Stored strategy and evidence", False), ("Instrument", False),
-                           ("Requested values", False)), stored_rows,
+                           ("Requested values", False), ("Reason", False), ("Action", False)), stored_rows,
                           caption="Unverified stored requests; never resend. Restart recovery may require offline reconciliation.",
                           empty=empty_state("Stored requests unavailable", "Preserve the state and reconcile with broker records."))
 

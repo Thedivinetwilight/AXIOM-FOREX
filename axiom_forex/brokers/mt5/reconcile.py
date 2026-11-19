@@ -158,6 +158,13 @@ def _time_window(record: Mapping[str, Any]) -> tuple[datetime, datetime]:
     return start - RECOVERY_WINDOW_PAD, end
 
 
+def _trade_side(value: Any) -> str:
+    # Do not coerce missing, boolean, non-trade, or malformed values to a side.
+    if isinstance(value, bool) or not isinstance(value, int):
+        return ""
+    return {0: "BUY", 1: "SELL"}.get(value, "")
+
+
 def history_deals(
     terminal: MT5Terminal, *, start: datetime, end: datetime
 ) -> list[MT5Deal]:
@@ -182,8 +189,10 @@ def history_deals(
                 order=int(_field(entry, "order", 0) or 0),
                 position_id=int(_field(entry, "position_id", 0) or 0),
                 symbol=str(_field(entry, "symbol", "") or ""),
-                side="BUY" if int(_field(entry, "type", POSITION_TYPE_BUY)) == POSITION_TYPE_BUY else "SELL",
-                entry=int(_field(entry, "entry", DEAL_ENTRY_IN) or 0),
+                # Non-trade or missing deal types must never masquerade as
+                # BUY/SELL proof; only explicit MT5 DEAL_TYPE_BUY/SELL qualify.
+                side=_trade_side(_field(entry, "type")),
+                entry=int(_field(entry, "entry", -1)),
                 volume=volume,
                 price=price,
                 profit=_decimal(_field(entry, "profit")),
@@ -221,9 +230,7 @@ def history_orders(
             MT5HistoryOrder(
                 ticket=int(_field(entry, "ticket", 0) or 0),
                 symbol=str(_field(entry, "symbol", "") or ""),
-                side="BUY"
-                if int(_field(entry, "type", POSITION_TYPE_BUY)) == POSITION_TYPE_BUY
-                else "SELL",
+                side=_trade_side(_field(entry, "type")),
                 volume_initial=initial,
                 volume_current=current,
                 price_open=_decimal(_field(entry, "price_open")),
@@ -504,10 +511,15 @@ def reconcile_record(
     except Exception:
         requested = Decimal(0)
     close_position_id = str(record.get("close_position_id") or "")
+    scalper_close = bool(close_position_id and str(record.get("strategy_id") or "").startswith("ax-scalper-live:"))
+    expected_position_identifier = (str(record.get("close_position_identifier") or "")
+                                    if scalper_close else close_position_id)
     expected_entry = DEAL_ENTRY_OUT if close_position_id else DEAL_ENTRY_IN
     valid_identity = (
         bool(request_id) and ticket > 0 and magic > 0 and bool(symbol)
         and side.upper() in {"BUY", "SELL"} and requested.is_finite() and requested > 0
+        and (not scalper_close or expected_position_identifier.isdigit()
+             and int(expected_position_identifier) > 0)
     )
     rows_valid = (
         len(ticket_orders) <= 1
@@ -520,7 +532,7 @@ def reconcile_record(
                 and item.entry == expected_entry and item.position_id > 0
                 and item.volume.is_finite() and item.volume > 0
                 and item.price.is_finite() and item.price > 0
-                and (not close_position_id or str(item.position_id) == close_position_id)
+                and (not close_position_id or str(item.position_id) == expected_position_identifier)
                 for item in ticket_deals)
     )
     if ticket_orders or ticket_deals:

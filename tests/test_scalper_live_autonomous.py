@@ -637,6 +637,7 @@ def _seed_guarded_scalper_position(real, run, venue):
     # The generic provider fixture uses a synthetic account id; bind its booked
     # fill to this fake terminal identity so the live leg can reconcile it.
     portfolio = real["platform"].portfolio
+    portfolio.account = replace(portfolio.account, account_id=real["harness"].adapter.status()["account_fingerprint"])
     provider_position = portfolio.positions[f"mt5:{fill.ticket}"]
     portfolio.positions[provider_position.position_id] = replace(
         provider_position,
@@ -1150,7 +1151,7 @@ def test_json_run_state_store_round_trips_and_recovers_from_disk(real):
     assert started["ok"] is True, started
     saved = store.load()
     assert saved == run.snapshot()
-    assert saved["schema"] == "axiom-scalper-live-run-v3"
+    assert saved["schema"] == "axiom-scalper-live-run-v4"
     assert saved["position_book"]["open_positions"] == []
     assert "guardian" in saved
 
@@ -1176,6 +1177,13 @@ def test_durable_run_recovery_restores_full_managed_and_guardian_exposure(real):
         strategy_fingerprint="managed-test-strategy",
     )
     assert run._record_position_risk(position) is True
+    ledger = real["leg"].portfolio
+    quantity, _ = real["leg"]._catalog_quantity_from_broker_volume(Decimal("0.10"))
+    booked = ledger.open(position_id="mt5:31415", side="BUY", quantity=quantity,
+                         price=Decimal("1.10000"), at=START)
+    ledger.account = replace(ledger.account, account_id=real["harness"].adapter.status()["account_fingerprint"])
+    ledger.positions[booked.position_id] = replace(
+        booked, account_id=ledger.account.account_id)
     real["fake"].positions.append(
         {
             "ticket": 31415,
@@ -1308,6 +1316,13 @@ def test_pending_close_survives_restart_and_reconciles_its_exact_durable_fill(re
         request_id="entry-request-31415",
     )
     assert run._record_position_risk(position) is True
+    ledger = real["leg"].portfolio
+    quantity, _ = real["leg"]._catalog_quantity_from_broker_volume(Decimal("0.10"))
+    booked = ledger.open(position_id="mt5:31415", side="BUY", quantity=quantity,
+                         price=Decimal("1.10000"), at=START)
+    ledger.account = replace(ledger.account, account_id=real["harness"].adapter.status()["account_fingerprint"])
+    ledger.positions[booked.position_id] = replace(
+        booked, account_id=ledger.account.account_id)
     real["fake"].positions.append(
         {
             "ticket": 31415,
@@ -1896,3 +1911,721 @@ def test_guarded_fake_broker_booking_is_queryable_without_resending(real):
     assert queried is not None and queried.status == ACCEPTED, queried
     assert queried.request_id == first.request_id and queried.ticket == first.ticket
     assert len(real["fake"].send_requests) == before
+
+
+def test_run_identity_persists_and_mismatched_schema_is_never_adopted(real):
+    run, _, _ = build_run(real)
+    saved = run.snapshot()
+    assert len(saved["run_id"]) == 32
+    fresh, _, _ = build_run(real)
+    assert fresh.run_id != saved["run_id"]
+    result = fresh.recover(state=saved)
+    assert result["ok"] is True
+    assert fresh.run_id == saved["run_id"]
+    invalid = dict(saved, run_id="bad-identity")
+    other, _, _ = build_run(real)
+    result = other.recover(state=invalid)
+    assert not result["ok"] and "run identity" in result["recovery"]["detail"]
+
+
+def test_journal_fsync_precedes_fake_mt5_entry_and_records_response(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    journal = MutationJournal(real["tmp"] / "mutation.db", create=True)
+    run, _, _ = build_run(real)
+    run.mutation_journal = journal
+    observed = []
+    def before_send(_request):
+        records = journal.unresolved()
+        observed.append(records)
+        assert len(records) == 1
+        assert records[0]["action"] == "entry"
+        assert records[0]["identity"]["run_id"] == run.run_id
+        assert records[0]["result"] is None
+        assert run.state_store.load()["pending_submission"]["request_id"] == records[0]["request_id"]
+    real["fake"].on_send = before_send
+    assert run.start()["ok"]
+    warm(run, real, count=60)
+    assert len(observed) == 1 and len(real["fake"].send_requests) == 1
+    pending = journal.unresolved()
+    assert len(pending) == 1 and pending[0]["result"] is not None
+    assert pending[0]["request_id"].startswith("entry-")
+    journal.close()
+
+
+def test_fake_sltp_journal_persists_intent_response_and_readback(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    run, venue, _ = build_run(real)
+    fill, position, _ = _seed_guarded_scalper_position(real, run, venue)
+    journal = MutationJournal(real["tmp"] / "protection-mutation.db", create=True)
+    run.mutation_journal = journal
+    before_send = []
+    real["fake"].on_send = lambda _request: before_send.append(journal.unresolved())
+    action = run.book.modify_protection(position_id=fill.ticket,
+        stop_price=position.stop_price, target_price=Decimal("1.11500"),
+        now_ms=int(START.timestamp() * 1000) + 100, reason="operator_target_update")
+    assert action.kind == MODIFY_PROTECTION
+    assert len(before_send) == 1 and len(before_send[0]) == 1
+    record = journal.list_all()[0]
+    assert record["resolution"]["reason"] == "durable_sltp_receipt_and_broker_protection_match"
+    assert record["action"] == "protection"
+    assert record["intent"]["position_id"] == fill.ticket
+    assert record["intent"]["previous_target_price"] is None
+    assert record["intent"]["target_price"] == "1.11500"
+    assert record["result"]["receipts"][0]["state"] == "CONFIRMED"
+    assert record["readback"]["readable"] is True
+    assert len(real["fake"].protection_requests) == 1
+    journal.close()
+
+
+def test_journal_failure_blocks_protection_before_broker_mutation(real):
+    class BrokenJournal:
+        def prepare(self, **_kwargs):
+            raise OSError("disk unavailable")
+    run, venue, _ = build_run(real)
+    fill, position, _ = _seed_guarded_scalper_position(real, run, venue)
+    run.mutation_journal = BrokenJournal()
+    action = run.book.modify_protection(position_id=fill.ticket,
+        stop_price=position.stop_price, target_price=Decimal("1.11500"),
+        now_ms=int(START.timestamp() * 1000) + 100)
+    assert action.kind == "hold" and run.state == RECOVERY_REQUIRED
+    assert real["fake"].protection_requests == []
+    assert run.state_store.load()["position_book"]["pending_protection_modifications"]
+
+
+def test_fake_close_journal_is_written_before_send_and_unknown_never_resends(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    run, venue, _ = build_run(real)
+    entry, position, _ = _seed_guarded_scalper_position(real, run, venue)
+    journal = MutationJournal(real["tmp"] / "close-mutation.db", create=True)
+    run.mutation_journal = journal
+    calls = []
+    venue.close_request_id = lambda _ticket: "close-exact-request"
+    def unknown_close(**kwargs):
+        calls.append(kwargs)
+        row = journal.unresolved()[0]
+        assert row["action"] == "close"
+        assert row["intent"]["position_id"] == entry.ticket
+        assert row["intent"]["prior_position"]["lots"] == str(position.lots)
+        assert row["result"] is None
+        return Fill(request_id="close-exact-request", status=UNKNOWN_OUTCOME,
+                    filled_lots=Decimal(0), requested_lots=position.lots, price=None,
+                    spread_points=Decimal(0), slippage_points=Decimal(0), latency_ms=0,
+                    ticket=entry.ticket, simulated=False)
+    venue.close = unknown_close
+    action = run.book._close(position, position.entry_price, int(START.timestamp() * 1000),
+                             "test_close", "test", quote=None)
+    assert action.kind == "hold"
+    row = journal.unresolved()[0]
+    assert row["result"]["observation"]["fill"]["status"] == UNKNOWN_OUTCOME
+    assert row["readback"]["readable"] is True
+    run.book._close(position, position.entry_price, int(START.timestamp() * 1000) + 1,
+                    "test_close", "test", quote=None)
+    assert len(calls) == 1
+    journal.close()
+
+
+def test_unknown_entry_restart_loads_recovery_only_without_arm_or_resend(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    path = real["tmp"] / "restart-entry-mutation.db"
+    journal = MutationJournal(path, create=True)
+    run, _, _ = build_run(real)
+    run.mutation_journal = journal
+    real["fake"].send_script.insert(0, None)
+    assert run.start()["ok"]
+    warm(run, real, count=60)
+    assert len(real["fake"].send_requests) == 1
+    pending = journal.unresolved()[0]
+    before = run.state_store.path.read_bytes()
+    # A new process has no in-memory arm. The recovery-only instance performs
+    # reads and cannot arm, start, manage, close or submit.
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, _, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    fresh.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    result = fresh.recover(reconciliation_only=True)
+    assert result.get("prepared") is True, result
+    assert fresh._pending_submission["request_id"] == pending["request_id"]
+    assert fresh.arm()["ok"] is False
+    assert fresh.start()["ok"] is False
+    assert fresh.on_tick(**tick_kwargs(real))["blocked"] == "recovery_required"
+    assert fresh.stop(close_positions=True)["closed"] == []
+    # Even an internal transition to ARMED cannot enable flatten on a
+    # reconciliation-only runtime.
+    fresh.state = "ARMED"
+    assert fresh.flatten() == []
+    fresh.state = RECOVERY_REQUIRED
+    assert not fresh.reconcile_submission()["resolved"]
+    assert len(real["fake"].send_requests) == 1
+    assert run.state_store.path.read_bytes() == before
+    journal.close()
+
+
+@pytest.mark.parametrize("answer", ["success", "refusal", "unknown"])
+def test_sltp_fake_restart_requires_receipt_and_exact_readback(real, answer):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    run, venue, _ = build_run(real)
+    fill, position, read_protection = _seed_guarded_scalper_position(real, run, venue)
+    journal = MutationJournal(real["tmp"] / "sltp-restart.db", create=True)
+    run.mutation_journal = journal
+    if answer == "success":
+        # The successful synchronous receipt is durable, while first read-back
+        # fails; it can only settle after the terminal exposes the exact pair.
+        real["fake"].on_send = lambda _request: setattr(real["fake"], "fail_positions_get", True)
+    elif answer == "refusal":
+        real["fake"].protection_script = [{"retcode": 10016, "comment": "invalid stops"}]
+    else:
+        real["fake"].protection_script = [None]
+    action = run.book.modify_protection(position_id=fill.ticket, stop_price=position.stop_price,
+        target_price=Decimal("1.11500"), now_ms=int(START.timestamp() * 1000) + 100,
+        reason="operator_target_update")
+    assert action.kind == "hold"
+    real["fake"].fail_positions_get = False
+    real["fake"].on_send = None
+    request_id = journal.unresolved()[0]["request_id"]
+    sends = len(real["fake"].send_requests)
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    fresh_venue._protection_reader = read_protection
+    fresh.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    loaded = fresh.recover(reconciliation_only=True)
+    assert loaded.get("prepared") is True, loaded
+    result = fresh.reconcile_protection(request_id=request_id)
+    if answer == "unknown":
+        assert not result["resolved"] and journal.unresolved()[0]["request_id"] == request_id
+    else:
+        assert result["resolved"] is True, result
+        assert not journal.unresolved()
+        expected = Decimal("1.11500") if answer == "success" else position.target_price
+        assert fresh.book.get(fill.ticket).target_price == expected
+    assert fresh.start()["ok"] is False
+    assert len(real["fake"].send_requests) == sends
+    journal.close()
+
+
+def test_unknown_close_restart_remains_latched_and_never_resends(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    run, venue, _ = build_run(real)
+    entry, position, read_protection = _seed_guarded_scalper_position(real, run, venue)
+    journal = MutationJournal(real["tmp"] / "close-restart.db", create=True)
+    run.mutation_journal = journal
+    venue.close_request_id = lambda _ticket: "close-exact-restart"
+    calls = []
+    def unknown_close(**kwargs):
+        calls.append(kwargs)
+        return Fill(request_id="close-exact-restart", status=UNKNOWN_OUTCOME,
+                    filled_lots=Decimal(0), requested_lots=position.lots, price=None,
+                    spread_points=Decimal(0), slippage_points=Decimal(0), latency_ms=0,
+                    ticket=entry.ticket, simulated=False)
+    venue.close = unknown_close
+    run.book._close(position, position.entry_price, int(START.timestamp() * 1000),
+                    "test_close", "test", quote=None)
+    before = run.state_store.path.read_bytes()
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    fresh_venue._protection_reader = read_protection
+    fresh.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    result = fresh.recover(reconciliation_only=True)
+    assert result.get("prepared") is True, result
+    result = fresh.reconcile_close(position_id=entry.ticket)
+    assert result["resolved"] is False
+    assert fresh.start()["ok"] is False
+    assert fresh.stop(close_positions=True)["closed"] == []
+    assert journal.unresolved()[0]["request_id"] == "close-exact-restart"
+    assert before == run.state_store.path.read_bytes()
+    assert len(calls) == 1
+    journal.close()
+
+
+def test_restart_refuses_empty_provider_ledger_even_with_matching_broker(real):
+    """Broker + managed book alone cannot prove the provider ledger survived."""
+    run, venue, _ = build_run(real)
+    _fill, _position, reader = _seed_guarded_scalper_position(real, run, venue)
+    before = run.state_store.path.read_bytes()
+    # A workstation rebuild makes a new, empty provider ledger.
+    real["leg"].portfolio = real["platform"].portfolio.empty_clone()
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh_venue._protection_reader = reader
+    result = fresh.recover()
+    assert not result["ok"], result
+    assert "ledger" in result["recovery"]["detail"].lower()
+    assert run.state_store.path.read_bytes() == before
+    assert len(real["fake"].send_requests) == 1
+
+
+def test_scalper_booking_and_provider_ledger_are_atomic_and_bound(real, monkeypatch):
+    from axiom_forex.paper_runner.live import LiveOutcome
+    leg = real["leg"]
+    leg.strategy_id = "ax-scalper-live:test"
+    identity = {"run_id": "run-atomic", "account_fingerprint": derived_fingerprint(),
+                "account_mode": "REAL", "symbol": "EURUSD.pro"}
+    leg.scalper_ledger_identity = lambda: dict(identity)
+    repo = real["repository"]
+    repo.save_orders([{"request_id": "atomic", "state": "FILLED", "volume_filled": "0.1"}])
+    booking = {"booked": True, "action": "OPEN", "position_id": "mt5:42", "price": "1.1"}
+    outcome = LiveOutcome(submitted=True, request_id="atomic", state="FILLED", booked=True,
+                          booking=booking, volume_requested=Decimal("0.1"),
+                          volume_filled=Decimal("0.1"), price=Decimal("1.1"))
+    save_snapshot = repo.save_snapshot
+    monkeypatch.setattr(repo, "save_snapshot", lambda *_args, **_kw: (_ for _ in ()).throw(OSError("disk")))
+    assert not leg._persist_booking_result(outcome)
+    assert repo.get_order("atomic").get("booked") is not True
+    assert not repo.list_snapshots(kind="ax-scalper-live-ledger")
+    monkeypatch.setattr(repo, "save_snapshot", save_snapshot)
+    assert leg._persist_booking_result(outcome)
+    rows = repo.list_snapshots(kind="ax-scalper-live-ledger")
+    assert len(rows) == 1 and rows[0]["identity"] == identity
+    assert rows[0]["request_id"] == "atomic" and repo.get_order("atomic")["booking"] == booking
+    assert not leg._persist_booking_result(outcome)  # idempotency, no duplicate booking
+    assert not real["fake"].send_requests
+
+
+@pytest.mark.parametrize("damage", ["account", "run_id", "strategy", "guardian"])
+def test_unresolved_entry_restart_identity_damage_preserves_all_records(real, damage):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    journal = MutationJournal(real["tmp"] / f"identity-{damage}.db", create=True)
+    run, _, _ = build_run(real)
+    run.mutation_journal = journal
+    real["fake"].send_script.insert(0, None)
+    assert run.start()["ok"]
+    warm(run, real, count=60)
+    saved = run.state_store.load()
+    if damage == "account":
+        saved["account_identity"]["server"] = "different-server"
+    elif damage == "run_id":
+        saved["run_id"] = "f" * 32
+    elif damage == "strategy":
+        saved["strategy_fingerprint"] = "different-strategy"
+    else:
+        saved["guardian"] = None
+    run.state_store.save(saved)
+    before = run.state_store.path.read_bytes()
+    pending = journal.unresolved()
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, _, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    result = fresh.recover(reconciliation_only=True)
+    assert not result.get("prepared"), result
+    assert fresh.arm()["ok"] is False and fresh.start()["ok"] is False
+    assert run.state_store.path.read_bytes() == before
+    assert journal.unresolved() == pending
+    assert len(real["fake"].send_requests) == 1
+    journal.close()
+
+
+def test_history_fill_books_ledger_atomically_once_without_broker_send(real, monkeypatch):
+    from axiom_forex.scalper.history_recovery import inspect_exact_history
+    from tests.fake_mt5 import make_history_deal, make_position
+    from tests.test_mt5_adapter import _unresolved_record, AT
+    leg, repo, fake = real["leg"], real["repository"], real["fake"]
+    leg.strategy_id = "ax-scalper-live:test"
+    fingerprint = derived_fingerprint()
+    leg.portfolio.account = replace(leg.portfolio.account, account_id=fingerprint)
+    identity = {"run_id": "run-history", "account_fingerprint": fingerprint,
+                "account_server": SERVER, "account_currency": "USD", "account_mode": "REAL",
+                "symbol": "EURUSD.pro"}
+    leg.scalper_ledger_identity = lambda: dict(identity)
+    order = _unresolved_record(request_id="history-entry", order_ticket=7001,
+        strategy_id=leg.strategy_id, account_mode="REAL", account_fingerprint=fingerprint, sent_at=START)
+    row = {"request_id": "history-entry", "action": "entry", "identity": identity,
+           "intent": {"request_id": "history-entry", "side": "BUY", "lots": "0.1",
+                      "stop_price": "1.09", "target_price": None}}
+    fake.history_deals = [make_history_deal(ticket=9001, order=7001, position_id=9201,
+        symbol="EURUSD.pro", side="BUY", entry=0, volume=0.1, price=1.1,
+        magic=26081001, comment="", time=START)]
+    fake.positions = [make_position(ticket=9101, identifier=9201, symbol="EURUSD.pro", side="BUY",
+        volume=0.1, price_open=1.1, magic=26081001, sl=1.09)]
+    repo.save_orders([order])
+    stored = repo.get_order("history-entry")
+    proof = inspect_exact_history(adapter=real["harness"].adapter, order=stored, journal=row,
+                                  account_matches=lambda: True)
+    assert proof.get("resolved"), proof
+    save_snapshot = repo.save_snapshot
+    monkeypatch.setattr(repo, "save_snapshot", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
+    assert not leg.commit_scalper_history(record=stored, proof=proof, account_matches=lambda: True)
+    assert repo.get_order("history-entry") == stored
+    assert not leg.portfolio.positions and leg.scalper_ledger_head == ""
+    monkeypatch.setattr(repo, "save_snapshot", save_snapshot)
+    checks = iter([True, True, False])
+    assert not leg.commit_scalper_history(record=stored, proof=proof, account_matches=lambda: next(checks))
+    assert repo.get_order("history-entry") == stored
+    assert not leg.portfolio.positions and leg.scalper_ledger_head == ""
+    assert leg.commit_scalper_history(record=stored, proof=proof, account_matches=lambda: True), leg.booking_failures
+    booked = repo.get_order("history-entry")
+    assert booked["booked"] and booked["booking"]["position_id"] == "mt5:9101"
+    assert "mt5:9101" in leg.portfolio.positions
+    assert repo.get_snapshot("ax-scalper-live-ledger:run-history")["request_id"] == "history-entry"
+    assert not leg.commit_scalper_history(record=stored, proof=proof, account_matches=lambda: True)
+    assert not fake.send_requests
+
+
+def test_fake_timeout_entry_restarts_and_reconciles_one_exact_history_without_resend(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    from axiom_forex.scalper.history_recovery import inspect_exact_history
+    from tests.fake_mt5 import make_history_deal, make_position
+    journal = MutationJournal(real["tmp"] / "entry-history-restart.db", create=True)
+    run, venue, _ = build_run(real)
+    run.mutation_journal = journal
+    leg, fake, repo = real["leg"], real["fake"], real["repository"]
+    leg.strategy_id = "ax-scalper-live:test"
+    leg.portfolio.account = replace(leg.portfolio.account, account_id=derived_fingerprint())
+    venue._plan_factory.strategy_id = leg.strategy_id
+    leg.scalper_ledger_identity = lambda: run._journal_identity(PAIR)
+    fake.send_script.insert(0, {"retcode": 10012, "order": 7001, "volume": 0})
+    assert run.start()["ok"]
+    warm(run, real, count=60)
+    assert len(fake.send_requests) == 1
+    row = journal.unresolved()[0]
+    request_id = row["request_id"]
+    stored = repo.get_order(request_id)
+    assert stored["order_ticket"] == 7001 and stored["state"] == "UNRESOLVED"
+    intent = row["intent"]
+    fill_price = Decimal(str(intent["ask"]))
+    fake.history_deals = [make_history_deal(ticket=9001, order=7001, position_id=9201,
+        symbol="EURUSD.pro", side=intent["side"], entry=0, volume=float(intent["lots"]),
+        price=float(fill_price), magic=stored["magic"], comment="", time=START)]
+    fake.positions = [make_position(ticket=9101, identifier=9201, symbol="EURUSD.pro", side=intent["side"],
+        volume=float(intent["lots"]), price_open=float(fill_price), magic=stored["magic"],
+        sl=float(intent["stop_price"]), tp=None if intent["target_price"] is None else float(intent["target_price"]))]
+    def protection(_ticket):
+        p = fake.positions[0]
+        return Decimal(str(p["sl"])), None if not p["tp"] else Decimal(str(p["tp"]))
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    fresh.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    fresh_venue._protection_reader = protection
+    fresh_venue._query_guard = lambda _record: True
+    fresh.run_id = run.run_id
+    # Exercise the workstation's per-request operation over fake MT5. The
+    # unresolved request is rendered before it can be queried, and arm/start
+    # remain blocked until exact reconciliation completes.
+    from tests.test_scalper_live_workstation import _host
+    from axiom_forex.paper_runner.scalper_live_host import ARM_PHRASE, START_PHRASE
+    from axiom_forex.workstation.ui.pages.live import autonomous_scalper_section
+    host_path = real["tmp"] / "host"
+    host_path.mkdir()
+    host, _, _ = _host(host_path)
+    host.adapter = real["harness"].adapter
+    host.state_store = run.state_store
+    host.journal_path = journal.path
+    host._journal, host._leg, host._runtime = journal, leg, fresh
+    host._expected, host._bound_mode = fresh.expected_account, "REAL"
+    host._strategy_id, host._state = leg.strategy_id, RECOVERY_REQUIRED
+    fresh_venue.history_preview = lambda rid: host._inspect_history_request(
+        fresh, journal, leg, expected=fresh.expected_account, symbol="EURUSD.pro",
+        strategy_id=leg.strategy_id, request_id=rid)
+    result = fresh.recover(reconciliation_only=True)
+    assert result.get("prepared"), result
+    saved = host._saved_recovery_view()
+    html = autonomous_scalper_section({"scalper_autonomous": {"saved_recovery": saved}}, "test-nonce")
+    assert request_id in html and "ax-scalper-live-reconcile-request" in html
+    assert not host._do_arm(candidate_id="unused", confirmation=ARM_PHRASE,
+                             account_confirmation=f"REAL {derived_fingerprint()}")["ok"]
+    assert not host._do_start(candidate_id="unused", confirmation=START_PHRASE,
+                               account_confirmation=f"REAL {derived_fingerprint()}")["ok"]
+    # An uncertain in-process submission can leave the owner PAUSED rather
+    # than already in recovery-only mode. Explicit reconciliation safely
+    # transitions that same owner to read-only without resending.
+    fresh._reconciliation_only = False
+    fresh.state = "PAUSED"
+    resumed = host._prepare_recovery_runtime()
+    assert resumed.get("prepared") and fresh._reconciliation_only
+    result = host._do_reconcile_request(request_id=request_id)
+    assert result["resolved"], (result, leg.booking_failures)
+    assert fresh.book.get("9101") is not None
+    assert len(fake.send_requests) == 1
+    assert host._runtime is None and host._state == "STOPPED"
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_fake_timeout_close_restarts_and_reconciles_exact_history_without_resend(real, partial):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    from axiom_forex.scalper.history_recovery import inspect_exact_history
+    from tests.fake_mt5 import make_history_deal
+    run, venue, _ = build_run(real)
+    entry, position, protection = _seed_guarded_scalper_position(real, run, venue)
+    journal = MutationJournal(real["tmp"] / "close-history-restart.db", create=True)
+    run.mutation_journal = journal
+    leg, fake, repo = real["leg"], real["fake"], real["repository"]
+    leg.strategy_id = "ax-scalper-live:test"
+    bound_account = replace(leg.portfolio.account, account_id=derived_fingerprint())
+    leg.portfolio.account = bound_account
+    real["platform"].context_factory = replace(real["platform"].context_factory, account=bound_account)
+    venue._plan_factory.strategy_id = leg.strategy_id
+    leg.scalper_ledger_identity = lambda: run._journal_identity(PAIR)
+    fake.send_script.insert(0, {"retcode": 10012, "order": 7002, "volume": 0})
+    from axiom_forex.scalper.ticks import Tick
+    quote = Tick(symbol=PAIR, bid=Decimal("1.10000"), ask=Decimal("1.10020"),
+                 source_time=START, received_at=START, sequence=1, source="fake", ingest_latency_ms=0)
+    requested = position.lots / 2 if partial else position.lots
+    action = run.book._close(position, position.entry_price, int(START.timestamp() * 1000),
+                             "operator_close", "test", quote=quote, quantity=requested)
+    assert action.kind == "hold"
+    assert len(fake.send_requests) == 2, (action, venue.record.closes, venue.record.refusals, leg.last_outcome)
+    row = journal.unresolved()[0]
+    request_id = row["request_id"]
+    stored = repo.get_order(request_id)
+    assert stored["order_ticket"] == 7002 and stored["state"] == "UNRESOLVED"
+    pid = stored["close_position_identifier"]
+    fake.history_deals = [make_history_deal(ticket=9002, order=7002, position_id=pid,
+        symbol="EURUSD.pro", side="SELL", entry=1, volume=float(requested),
+        price=float(position.entry_price), magic=stored["magic"], comment="", time=START)]
+    if partial:
+        fake.positions[0]["volume"] = float(position.lots - requested)
+    else:
+        fake.positions = []
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    fresh.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    fresh_venue._protection_reader = protection
+    fresh_venue._query_guard = lambda _record: True
+    fresh.run_id = run.run_id
+    loaded = fresh.recover(reconciliation_only=True)
+    assert loaded.get("prepared"), loaded
+    proof = inspect_exact_history(adapter=real["harness"].adapter, order=stored,
+                                  journal=row, account_matches=lambda: True)
+    assert proof["resolved"], proof
+    assert leg.commit_scalper_history(record=stored, proof=proof, account_matches=lambda: True), leg.booking_failures
+    # Crash immediately after ledger+order commit, before the manager snapshot
+    # consumes the close. A second restart recognizes that exact committed fill.
+    again, again_venue, _ = build_run(real, state_store=run.state_store)
+    again.mutation_journal = journal
+    again.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    again_venue._protection_reader = protection
+    again_venue._query_guard = lambda _record: True
+    again.run_id = run.run_id
+    loaded_again = again.recover(reconciliation_only=True)
+    assert loaded_again.get("prepared"), loaded_again
+    fresh = again
+    result = fresh.reconcile_close(position_id=entry.ticket)
+    assert result["resolved"], result
+    assert not journal.unresolved()
+    if partial:
+        assert fresh.book.get(entry.ticket).lots == position.lots - requested
+    else:
+        assert fresh.book.get(entry.ticket) is None
+    assert len(fake.send_requests) == 2
+    journal.close()
+
+
+def test_fake_timeout_entry_later_broker_refusal_reconciles_without_resend(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    from tests.fake_mt5 import make_history_order
+    from tests.test_scalper_live_workstation import _host
+    journal = MutationJournal(real["tmp"] / "entry-refusal-restart.db", create=True)
+    run, venue, _ = build_run(real)
+    run.mutation_journal = journal
+    leg, fake, repo = real["leg"], real["fake"], real["repository"]
+    leg.strategy_id = "ax-scalper-live:test"
+    venue._plan_factory.strategy_id = leg.strategy_id
+    leg.scalper_ledger_identity = lambda: run._journal_identity(PAIR)
+    fake.send_script.insert(0, {"retcode": 10012, "order": 7001, "volume": 0})
+    assert run.start()["ok"]
+    warm(run, real, count=60)
+    row = journal.unresolved()[0]
+    request_id = row["request_id"]
+    stored = repo.get_order(request_id)
+    fake.history_orders = [make_history_order(ticket=7001, symbol="EURUSD.pro", side=row["intent"]["side"],
+        volume=float(row["intent"]["lots"]), state=5, magic=stored["magic"], comment="", time=START)]
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    fresh.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    fresh_venue._query_guard = lambda _record: True
+    fresh.run_id = run.run_id
+    host_path = real["tmp"] / "refusal-host"
+    host_path.mkdir()
+    host, _, _ = _host(host_path)
+    host.adapter = real["harness"].adapter
+    host.state_store, host.journal_path = run.state_store, journal.path
+    host._journal, host._leg, host._runtime = journal, leg, fresh
+    host._expected, host._bound_mode = fresh.expected_account, "REAL"
+    host._strategy_id, host._state = leg.strategy_id, RECOVERY_REQUIRED
+    fresh_venue.history_preview = lambda rid: host._inspect_history_request(
+        fresh, journal, leg, expected=fresh.expected_account, symbol="EURUSD.pro",
+        strategy_id=leg.strategy_id, request_id=rid)
+    loaded = fresh.recover(reconciliation_only=True)
+    assert loaded.get("prepared"), loaded
+    result = host._do_reconcile_request(request_id=request_id)
+    assert result.get("resolved"), result
+    assert fresh._pending_submission is None and not fresh.book.open_positions
+    assert repo.get_order(request_id)["state"] == "REJECTED"
+    assert len(fake.send_requests) == 1 and host._runtime is None
+
+
+def test_fake_timeout_close_later_refused_preserves_open_position_without_resend(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    from axiom_forex.scalper.history_recovery import inspect_exact_history
+    from axiom_forex.scalper.ticks import Tick
+    from tests.fake_mt5 import make_history_order
+    run, venue, _ = build_run(real)
+    entry, position, protection = _seed_guarded_scalper_position(real, run, venue)
+    journal = MutationJournal(real["tmp"] / "close-refusal-restart.db", create=True)
+    run.mutation_journal = journal
+    leg, fake, repo = real["leg"], real["fake"], real["repository"]
+    leg.strategy_id = "ax-scalper-live:test"
+    account = replace(leg.portfolio.account, account_id=derived_fingerprint())
+    leg.portfolio.account = account
+    real["platform"].context_factory = replace(real["platform"].context_factory, account=account)
+    venue._plan_factory.strategy_id = leg.strategy_id
+    leg.scalper_ledger_identity = lambda: run._journal_identity(PAIR)
+    fake.send_script.insert(0, {"retcode": 10012, "order": 7002, "volume": 0})
+    quote = Tick(symbol=PAIR, bid=Decimal("1.10000"), ask=Decimal("1.10020"),
+                 source_time=START, received_at=START, sequence=1, source="fake", ingest_latency_ms=0)
+    run.book._close(position, position.entry_price, int(START.timestamp() * 1000),
+                    "operator_close", "test", quote=quote)
+    assert len(fake.send_requests) == 2
+    row = journal.unresolved()[0]
+    request_id = row["request_id"]
+    stored = repo.get_order(request_id)
+    fake.history_orders = [make_history_order(ticket=7002, symbol="EURUSD.pro", side="SELL",
+        volume=float(position.lots), state=5, magic=stored["magic"], comment="", time=START)]
+    real["harness"].adapter.disarm(reason="fake_restart")
+    fresh, fresh_venue, _ = build_run(real, state_store=run.state_store)
+    fresh.mutation_journal = journal
+    fresh.mode = SimpleNamespace(mode="PAPER", live_effective=False)
+    fresh_venue._protection_reader = protection
+    fresh_venue._query_guard = lambda _record: True
+    fresh.run_id = run.run_id
+    loaded = fresh.recover(reconciliation_only=True)
+    assert loaded.get("prepared"), loaded
+    proof = inspect_exact_history(adapter=real["harness"].adapter, order=stored,
+                                  journal=row, account_matches=lambda: True)
+    assert proof["resolved"] and proof["state"] == "REJECTED", proof
+    assert leg.commit_scalper_history(record=stored, proof=proof, account_matches=lambda: True)
+    result = fresh.reconcile_close(position_id=entry.ticket)
+    assert result["resolved"], result
+    assert not journal.unresolved() and not fresh.book.close_blockers
+    assert fresh.book.get(entry.ticket) is not None
+    assert len(fake.send_requests) == 2
+    journal.close()
+
+
+def test_assembled_host_restart_retry_and_nonce_reconciliation_no_resend(real):
+    """Whole host assembly with a fake terminal; never reaches a real broker."""
+    from tests.test_scalper_live_workstation import _host
+    from tests.fake_mt5 import make_history_deal
+    from axiom_forex.scalper.live_account import ExpectedAccount
+    from axiom_forex.scalper.signals import default_strategies
+    from axiom_forex.workstation.app import WorkstationApp
+    from tests.test_workstation_ui import live_wizard
+    from axiom_forex.paper_runner.scalper_live_host import ARM_PHRASE, START_PHRASE
+    import json
+
+    directory = real["tmp"] / "assembled"
+    directory.mkdir()
+    host, _, _ = _host(directory)
+    settings = json.loads(host.settings_path.read_text())
+    settings["risk"]["risk_fraction"] = "0.001"
+    settings["risk"]["max_leverage"] = "100"
+    settings["risk"]["max_currency_exposure_fraction"] = "1"
+    settings["account"] = {"server": SERVER, "login": LOGIN, "currency": "USD",
+                           "fingerprint": derived_fingerprint()}
+    host.settings_path.write_text(json.dumps(settings))
+    host.adapter, host.mode = real["harness"].adapter, real["mode"]
+    host.platform_factory = lambda pair: make_platform(real["platform"].setup, real["terminal"], real["repository"])
+    host._close_platform = lambda platform: None
+    candidate = default_strategies()[0]
+    expected = ExpectedAccount(server=SERVER, login=LOGIN, currency="USD", fingerprint=derived_fingerprint())
+    host._bound_mode, host._expected = "REAL", expected
+    host._candidate_id = candidate.fingerprint
+    host._strategy_id = "ax-scalper-live:" + candidate.fingerprint
+    host._lifecycle = SimpleNamespace(approve_active=lambda: True)
+    prepared = host._prepare_candidate(candidate.fingerprint)
+    assert prepared[0], prepared
+    evidence, policy = prepared[1][4], prepared[1][5]
+    run = host._build_runtime(expected=expected, strategy=candidate, evidence=evidence, policy_version=policy)
+    host._runtime = run
+    class TestSignal(AlwaysBuy):
+        name = candidate.name
+        family = candidate.family
+        @property
+        def fingerprint(self):
+            return candidate.fingerprint
+        def evaluate(self, context):
+            result = super().evaluate(context)
+            return replace(result, signal=replace(result.signal, stop_points=Decimal("200"), target_points=Decimal("400")))
+    run.admitted = replace(run.admitted, strategy=TestSignal())
+    run.clock = lambda: START
+    run.core._clock = lambda: START
+    host._leg.clock = lambda: START
+    fake = real["fake"]
+    fake.send_script.insert(0, {"retcode": 10012, "order": 7001, "volume": 0})
+    assert run.start()["ok"], run.readiness()
+    outcomes = []
+    for index in range(60):
+        bid = Decimal("1.10000") + Decimal(index) * Decimal("0.00001")
+        when = START - timedelta(milliseconds=10 * (60 - index))
+        outcomes.append(run.on_tick(symbol="EURUSD.pro", bid=bid, ask=bid + Decimal("0.00020"),
+                                    source_time=when, now_ms=int(when.timestamp() * 1000)))
+    assert len(fake.send_requests) == 1, repr((run.venue.record.audit_view(), host._leg.last_outcome))
+    row = host._journal.unresolved()[0]
+    request_id = row["request_id"]
+    stored = real["repository"].get_order(request_id)
+    real["harness"].adapter.disarm(reason="fake_restart")
+    host._journal.close()
+    host._run_lock.close()
+    host._journal = host._run_lock = host._runtime = None
+    # The fake fixture's in-memory database normally belongs to the test
+    # thread. Give the host worker the same isolated fake DB, with thread use
+    # enabled; production creates its repository inside the owner thread.
+    import sqlite3
+    repo = real["repository"]
+    connection = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    repo.connection.backup(connection)
+    repo.connection.close()
+    repo.connection = connection
+    # Restart assembles a new runtime and portfolio through the real host path.
+    from axiom_forex.paper_runner.scalper_live_host import ScalperLiveAutonomousHost
+    restarted = ScalperLiveAutonomousHost(session=host.session, adapter=real["harness"].adapter,
+        mode=real["mode"], platform_factory=host.platform_factory, admission_host=host.admission_host,
+        live_workflow=host.live_workflow, settings_path=host.settings_path,
+        state_path=host.state_store.path, poll_seconds=0.1)
+    restarted._close_platform = lambda platform: None
+    app = WorkstationApp(wizard=live_wizard(), live=SimpleNamespace(
+        view=lambda: {"configured": True, "positions": [], "account": {}}, scalper_autonomous=restarted))
+    try:
+        saved = restarted.view()["saved_recovery"]
+        assert any(item["request_id"] == request_id for item in saved["requests"])
+        status, _, _ = app.act("ax-scalper-live-reconcile-request", {"nonce": ["wrong"], "request_id": [request_id]})
+        assert int(status) == 403
+        for name, phrase in [("ax-scalper-live-arm", ARM_PHRASE), ("ax-scalper-live-start", START_PHRASE)]:
+            status, _, _ = app.act(name, {"nonce": [app.nonce], "candidate_id": [candidate.fingerprint],
+                "confirmation": [phrase], "account_confirmation": ["REAL " + derived_fingerprint()]})
+            assert int(status) == 409
+        status, _, _ = app.act("ax-scalper-live-reconcile-request", {"nonce": [app.nonce], "request_id": [request_id]})
+        assert int(status) == 409 and len(fake.send_requests) == 1
+        intent = row["intent"]
+        price = Decimal(intent["ask"])
+        fake.history_deals = [make_history_deal(ticket=9001, order=7001, position_id=8101,
+            symbol="EURUSD.pro", side="BUY", entry=0, volume=float(intent["lots"]),
+            price=float(price), magic=stored["magic"], comment="", time=START)]
+        fake.positions = [{"ticket": 9101, "identifier": 8101, "symbol": "EURUSD.pro", "type": 0,
+            "volume": float(intent["lots"]), "price_open": float(price),
+            "sl": float(intent["stop_price"]), "tp": float(intent["target_price"]),
+            "magic": stored["magic"], "time": int(START.timestamp())}]
+        status, _, message = app.act("ax-scalper-live-reconcile-request", {"nonce": [app.nonce], "request_id": [request_id]})
+        assert int(status) == 303, message
+        assert not restarted.view()["saved_recovery"]["requests"] and len(fake.send_requests) == 1
+    finally:
+        restarted.close()
+
+
+def test_local_pre_submission_venue_refusal_resolves_without_claiming_fill(real):
+    from axiom_forex.scalper.mutation_journal import MutationJournal
+    run, venue, _ = build_run(real)
+    journal = MutationJournal(real["tmp"] / "local-refusal.sqlite3", create=True)
+    run.mutation_journal = journal
+    venue._stop_requirement = lambda: {"valid": True, "distance_points": 200}
+    assert run.start()["ok"]
+    outcomes = warm(run, real, count=35)
+    reports = [item["execution"] for item in outcomes if item.get("execution")]
+    assert reports and all(item["status"] == "blocked" for item in reports)
+    assert not real["fake"].send_requests and not journal.unresolved()
+    assert all(row["resolution"]["reason"] == "local_pre_submission_refusal" for row in journal.list_all())
+    assert not run.book.open_positions and run._pending_submission is None
+    journal.close()

@@ -33,6 +33,8 @@ from ..scalper.live_autonomous import (
     AutonomousScalper,
     JsonRunStateStore,
 )
+from ..scalper.mutation_journal import MutationJournal
+from ..scalper.run_lock import RunLock
 from ..scalper.live_config import (
     RISK_KEYS,
     LiveScalperConfigError,
@@ -98,6 +100,9 @@ class ScalperLiveAutonomousHost:
         self.live_workflow = live_workflow
         self.settings_path = Path(settings_path)
         self.state_store = JsonRunStateStore(state_path)
+        self.journal_path = self.state_store.path.with_name(self.state_store.path.name + ".mutations.sqlite3")
+        self._journal: MutationJournal | None = None
+        self._run_lock: RunLock | None = None
         self.audit_log = audit_log
         self.poll_seconds = max(0.1, float(poll_seconds))
         self._lock = threading.RLock()
@@ -215,6 +220,9 @@ class ScalperLiveAutonomousHost:
     def reconcile_close(self, *, position_id: str) -> dict[str, Any]:
         return self._call("reconcile_close", {"position_id": str(position_id or "").strip()})
 
+    def reconcile_request(self, *, request_id: str) -> dict[str, Any]:
+        return self._call("reconcile_request", {"request_id": str(request_id or "").strip()})
+
     # -- worker lifecycle ---------------------------------------------
 
     def _call(self, operation: str, payload: dict[str, Any], *, timeout: float = 45.0) -> dict[str, Any]:
@@ -283,6 +291,64 @@ class ScalperLiveAutonomousHost:
                 "last_result": dict(self._last_result)}
 
     def _saved_recovery_view(self) -> dict[str, Any]:
+        """Merge journal and snapshot identities without adopting or changing either."""
+        view = self._saved_state_recovery_view()
+        rows = list(view.get("requests") or ())
+        if not self.journal_path.exists():
+            if view.get("present"):
+                view["error"] = view.get("error") or "stored_mutation_journal_missing"
+                view["note"] = "The run journal is missing. Preserve the state and broker records; do not resend or arm."
+            return view
+        try:
+            journal = MutationJournal(self.journal_path)
+            try:
+                records = journal.unresolved()
+            finally:
+                journal.close()
+        except Exception:
+            view["present"] = True
+            view["error"] = view.get("error") or "mutation_journal_unreadable"
+            view["note"] = "The mutation journal is unreadable. Preserve it and the run state; do not resend."
+            return view
+        if not view.get("present"):
+            view["present"] = True
+            view["error"] = "run_state_missing_with_journal"
+            view["note"] = "Run state is missing while a mutation journal exists. Preserve both; do not arm."
+        by_id = {str(item.get("request_id") or ""): item for item in rows}
+        for record in records:
+            identity, intent = record["identity"], record["intent"]
+            request_id = record["request_id"]
+            row = by_id.get(request_id)
+            if row is None:
+                row = {"request_id": request_id, "kind": record["action"],
+                       "position_id": str(intent.get("position_id") or "")}
+                rows.append(row)
+                by_id[request_id] = row
+            elif row.get("kind") != record["action"]:
+                view["error"] = "journal_snapshot_request_mismatch"
+            row.update({"run_id": identity.get("run_id", ""),
+                        "account_mode": identity.get("account_mode", ""),
+                        "account_server": identity.get("account_server", ""),
+                        "account_fingerprint": identity.get("account_fingerprint", ""),
+                        "account_currency": identity.get("account_currency", ""),
+                        "strategy_fingerprint": identity.get("strategy_fingerprint", ""),
+                        "candidate_id": identity.get("candidate_id", ""),
+                        "policy_version": identity.get("policy_version", ""),
+                        "evidence_digest": identity.get("evidence_digest", ""),
+                        "symbol": identity.get("symbol", ""),
+                        "requested_values": ", ".join(
+                            f"{key}={intent[key]}" for key in (
+                                "side", "lots", "requested_lots", "stop_price", "target_price",
+                                "previous_stop_price", "previous_target_price", "reason"
+                            ) if key in intent),
+                        "reason": (str(self._last_result.get("reason"))
+                                   if self._last_result.get("request_id") == request_id and self._last_result.get("reason")
+                                   else "broker response not durably recorded" if record["result"] is None
+                                   else "durable outcome or manager state requires exact reconciliation")})
+        view["requests"] = rows
+        return view
+
+    def _saved_state_recovery_view(self) -> dict[str, Any]:
         """Show untrusted stored request identities without adopting or modifying state."""
         try:
             state = self.state_store.load()
@@ -444,11 +510,10 @@ class ScalperLiveAutonomousHost:
             return self._refuse("arm_confirmation_mismatch", f"Type {ARM_PHRASE!r} exactly. No trading permission was changed.")
         if self._state in {RUNNING, PAUSED, RECOVERY_REQUIRED}:
             return self._refuse("live_run_already_active", "Stop and reconcile the current AX-SCALPER run before another arm request.")
-        if self._runtime is None:
-            saved = self._saved_recovery_view()
-            if saved.get("error") or saved.get("requests"):
-                return self._refuse("stored_reconciliation_required",
-                                    "Stored requests are unresolved or unreadable. Preserve the state and broker records; do not resend or arm.")
+        saved = self._saved_recovery_view()
+        if saved.get("error") or saved.get("requests"):
+            return self._refuse("stored_reconciliation_required",
+                                "Stored requests are unresolved or unreadable. Preserve the state and broker records; do not resend or arm.")
         prepared = self._prepare_candidate(candidate_id)
         if not prepared[0]:
             return prepared[1]
@@ -602,6 +667,7 @@ class ScalperLiveAutonomousHost:
         still_open = bool(result.get("open_positions") or broker_positions or not positions_read)
         if not still_open:
             self._release_arm()
+            self._release_flat_runtime()
         self._audit("AX_SCALPER_LIVE_STOPPED", open_positions=len(result.get("open_positions") or ()))
         result["message"] = str(result.get("message") or "No new entry will be submitted.")
         if still_open and result.get("state") == RECOVERY_REQUIRED:
@@ -624,6 +690,12 @@ class ScalperLiveAutonomousHost:
         """End the owner thread without closing positions or leaving it armed."""
         result = self._do_stop()
         self._release_arm()
+        if self._journal is not None:
+            self._journal.close()
+            self._journal = None
+        if self._run_lock is not None:
+            self._run_lock.close()
+            self._run_lock = None
         result["message"] = (
             "Shutdown requested: new entries stopped and this lane was disarmed; no "
             "position was closed. Verify broker-side protection and recover the exact "
@@ -665,6 +737,174 @@ class ScalperLiveAutonomousHost:
         self._state = str(result.get("state") or self._runtime.state)
         self._reason = str(result.get("reason") or "")
         return self._remember(result)
+
+    def _prepare_recovery_runtime(self) -> dict[str, Any]:
+        """Build a non-arming run from saved identities; never reconnect or send."""
+        if self._runtime is not None:
+            run = self._runtime
+            if run.state in {RUNNING, ARMED} and not run._reconciliation_only:
+                return self._refuse("active_run_not_recovery_only", "Pause or stop and preserve the active run before exact reconciliation.")
+            if self._armed_by_host:
+                self._release_arm()
+            try:
+                state = self.state_store.load()
+                result = run.recover(state=state, reconciliation_only=True)
+            except Exception as exc:
+                return self._refuse("recovery_revalidation_failed", f"Saved evidence was preserved ({type(exc).__name__}).")
+            self._state = RECOVERY_REQUIRED
+            return {"ok": True, "prepared": bool(result.get("prepared")),
+                    "reason": "recovery_runtime_revalidated", "recovery": dict(run._recovery)}
+        if self._other_live_session_running() or bool(getattr(self.adapter, "armed", False)):
+            return self._refuse("other_live_session_active", "Stop and disarm the other LIVE session before reconciliation; no order was sent.")
+        try:
+            state = self.state_store.load()
+        except Exception:
+            return self._refuse("stored_run_state_unreadable", "Preserve the run state and broker records; no query was made.")
+        if not isinstance(state, Mapping):
+            return self._refuse("stored_run_state_missing", "No valid run state is available. Preserve the journal and broker records.")
+        admission = state.get("admission")
+        account = state.get("account_identity")
+        if not isinstance(admission, Mapping) or not isinstance(account, Mapping):
+            return self._refuse("stored_identity_missing", "The saved account or admission identity is incomplete.")
+        candidate = str(admission.get("candidate_id") or "")
+        prepared = self._prepare_candidate(candidate)
+        if not prepared[0]:
+            return prepared[1]
+        _, _, expected, strategy, evidence, policy_version, fingerprints, binding = prepared[1]
+        mode = str(account.get("account_mode") or "")
+        if (mode not in {"DEMO", "REAL"} or account.get("fingerprint") != expected.fingerprint
+                or account.get("server") != expected.server or account.get("currency") != expected.currency
+                or admission.get("evidence_digest") != evidence or admission.get("policy_version") != policy_version):
+            return self._refuse("stored_identity_mismatch", "The exact saved account, strategy, evidence or policy does not match. Nothing was adopted.")
+        try:
+            self.adapter.refresh_account()
+            verdict = verify_mt5_account(dict(self.adapter.status() or {}), expected, expected_mode=mode)
+        except Exception:
+            return self._refuse("mt5_account_refresh_failed", "Connect explicitly to the original account; no reconnect was attempted.")
+        if not verdict.ok:
+            return self._refuse("account_identity_mismatch", verdict.detail or "The connected account is not the saved account.")
+        self._candidate_id = candidate
+        self._strategy_id = f"ax-scalper-live:{strategy.fingerprint}"
+        self._expected, self._bound_mode = expected, mode
+        self._lifecycle = _AdmissionLifecycle(self, self._strategy_id, fingerprints, **binding)
+        try:
+            run = self._build_runtime(expected=expected, strategy=strategy, evidence=evidence,
+                                      policy_version=policy_version, reconciliation_only=True)
+        except Exception as exc:
+            return self._refuse("recovery_runtime_unavailable", f"Saved state was preserved; recovery preparation failed ({type(exc).__name__}: {exc}).")
+        self._runtime = run
+        self._state = RECOVERY_REQUIRED
+        return {"ok": True, "prepared": bool(run._recovery_prepared),
+                "reason": "recovery_runtime_loaded", "recovery": dict(run._recovery)}
+
+    def _inspect_history_request(self, run: AutonomousScalper, journal: MutationJournal,
+                                 leg: Any, *, expected: ExpectedAccount,
+                                 symbol: str, strategy_id: str, request_id: str) -> dict[str, Any]:
+        from ..scalper.history_recovery import inspect_exact_history
+        try:
+            rows = [row for row in journal.unresolved() if row["request_id"] == request_id]
+            record = leg.repository.get_order(request_id)
+            internal_symbols = [key for key, value in run.symbols.items() if value == symbol]
+            if (len(rows) != 1 or len(internal_symbols) != 1 or not isinstance(record, Mapping)
+                    or rows[0]["identity"] != run._journal_identity(internal_symbols[0])
+                    or str(record.get("account_login") or "") != str(expected.login)
+                    or int(record.get("magic") or 0) != int(self.adapter.settings.magic)):
+                return {"resolved": False, "reason": "durable_request_binding_mismatch"}
+            check = lambda: self._matches_durable_request(record, expected=expected,
+                                                          symbol=symbol, strategy_id=strategy_id)
+            return inspect_exact_history(adapter=self.adapter, order=record, journal=rows[0],
+                                         account_matches=check)
+        except Exception as exc:
+            return {"resolved": False, "reason": "history_inspection_failed:" + type(exc).__name__}
+
+    def _do_reconcile_request(self, *, request_id: str) -> dict[str, Any]:
+        if not request_id:
+            return self._refuse("request_id_required", "Select the original durable request id; no mutation was sent.")
+        prepared = self._prepare_recovery_runtime()
+        if not prepared.get("ok"):
+            return prepared
+        run = self._runtime
+        if run is None or not run._reconciliation_only or not run._recovery_prepared or self._expected is None:
+            return self._refuse("recovery_state_not_validated", "The saved state did not pass exact restoration checks; preserve it and broker records.")
+        try:
+            self.adapter.refresh_account()
+            if not verify_mt5_account(dict(self.adapter.status() or {}), self._expected,
+                                      expected_mode=self._bound_mode).ok:
+                return self._refuse("account_identity_mismatch", "The saved account is not currently verified.")
+            records = [row for row in self._journal.unresolved() if row["request_id"] == request_id]
+        except Exception:
+            return self._refuse("journal_or_account_unavailable", "The exact request and account could not be verified.")
+        if len(records) != 1:
+            return self._refuse("request_not_unique_or_not_pending", "The requested identity is absent, duplicated or already resolved.")
+        row = records[0]
+        snapshot_has_request = (
+            str((run._pending_submission or {}).get("request_id") or "") == request_id
+            or any(item.get("request_id") == request_id for item in run.book.pending_closes)
+            or any(item.get("request_id") == request_id
+                   for item in run.book.snapshot()["pending_protection_modifications"])
+        )
+        if snapshot_has_request and row["action"] in {"entry", "close"}:
+            existing = run.venue.query(request_id)
+            if existing is None or str(getattr(existing, "status", "")) == "unknown_outcome":
+                symbol = str(row["identity"].get("symbol") or "")
+                proof = self._inspect_history_request(run, self._journal, self._leg,
+                    expected=self._expected, symbol=symbol, strategy_id=self._strategy_id,
+                    request_id=request_id)
+                if not proof.get("resolved"):
+                    return self._remember({"ok": False, "resolved": False, "request_id": request_id,
+                        "reason": proof.get("reason") or "broker_history_inconclusive",
+                        "message": "The original request remains blocked; no broker mutation was sent."})
+                record = self._leg.repository.get_order(request_id)
+                check = lambda: self._matches_durable_request(record, expected=self._expected,
+                    symbol=symbol, strategy_id=self._strategy_id)
+                if not self._leg.commit_scalper_history(record=record, proof=proof, account_matches=check):
+                    return self._remember({"ok": False, "resolved": False, "request_id": request_id,
+                        "reason": "history_ledger_settlement_failed",
+                        "message": "The original request remains blocked; no broker mutation was sent."})
+        if not snapshot_has_request:
+            try:
+                run._settle_durable_mutations()
+                result = {"ok": True, "resolved": True, "reason": "exact_saved_state_rechecked"}
+            except Exception:
+                result = {"ok": False, "resolved": False, "reason": "durable_recheck_failed"}
+        elif row["action"] == "entry" and str((run._pending_submission or {}).get("request_id") or "") == request_id:
+            result = dict(run.reconcile_submission())
+        elif row["action"] == "close":
+            matches = [item for item in run.book.pending_closes if item.get("request_id") == request_id]
+            if len(matches) != 1:
+                result = {"ok": False, "resolved": False, "reason": "pending_close_identity_mismatch"}
+            else:
+                result = dict(run.reconcile_close(position_id=str(matches[0].get("position_id") or "")))
+        elif row["action"] == "protection":
+            result = dict(run.reconcile_protection(request_id=request_id))
+        else:
+            result = {"ok": False, "resolved": False, "reason": "snapshot_request_action_mismatch"}
+        try:
+            self.adapter.refresh_account()
+            same_account = verify_mt5_account(dict(self.adapter.status() or {}), self._expected,
+                                               expected_mode=self._bound_mode).ok
+            remaining = self._journal.unresolved()
+        except Exception:
+            same_account, remaining = False, [row]
+        resolved = same_account and not any(item["request_id"] == request_id for item in remaining)
+        if not resolved:
+            result.update(ok=False, resolved=False, request_id=request_id,
+                          reason=str(result.get("reason") or "request_still_unresolved"),
+                          message="The exact request remains blocked. No broker mutation was sent; preserve the records.")
+            self._state = RECOVERY_REQUIRED
+            return self._remember(result)
+        if not remaining and not run.book.pending_closes and run._pending_submission is None and not run.book.snapshot()["pending_protection_modifications"]:
+            self._close_platform(self._platform)
+            self._journal.close()
+            self._runtime = self._platform = self._leg = self._journal = None
+            if self._run_lock is not None:
+                self._run_lock.close()
+                self._run_lock = None
+            self._state = STOPPED
+            self._reason = "reconciled_explicit_rearm_required"
+        return self._remember({"ok": True, "resolved": True, "request_id": request_id,
+            "state": self._state, "reason": "exact_request_reconciled",
+            "message": "The same request was reconciled without sending again. Explicit Arm and Start are still required."})
 
     # -- build and admission ------------------------------------------
 
@@ -813,7 +1053,23 @@ class ScalperLiveAutonomousHost:
             return False
 
     def _build_runtime(self, *, expected: ExpectedAccount,
-                       strategy: Any, evidence: str, policy_version: str) -> AutonomousScalper:
+                       strategy: Any, evidence: str, policy_version: str,
+                       reconciliation_only: bool = False) -> AutonomousScalper:
+        if self._run_lock is not None:
+            raise ValueError("live_run_owner_already_exists")
+        lock = RunLock(str(self.state_store.path) + ".owner.lock")
+        self._run_lock = lock
+        try:
+            return self._build_runtime_owned(expected=expected, strategy=strategy,
+                evidence=evidence, policy_version=policy_version, reconciliation_only=reconciliation_only)
+        except BaseException:
+            self._run_lock = None
+            lock.close()
+            raise
+
+    def _build_runtime_owned(self, *, expected: ExpectedAccount,
+                             strategy: Any, evidence: str, policy_version: str,
+                             reconciliation_only: bool = False) -> AutonomousScalper:
         from ..execution.mode_router import ExecutionRouter
         from .live import LiveLeg
 
@@ -851,9 +1107,18 @@ class ScalperLiveAutonomousHost:
         requirement = lambda: self.adapter.stop_requirement(
             platform.spec, symbol=symbol
         )
+        run_holder: list[AutonomousScalper] = []
+        journal_holder: list[MutationJournal] = []
         def query_guard(record: Mapping[str, Any]) -> bool:
-            return self._matches_durable_request(record, expected=expected,
-                                                 symbol=symbol, strategy_id=strategy_id)
+            if not self._matches_durable_request(record, expected=expected,
+                                                 symbol=symbol, strategy_id=strategy_id):
+                return False
+            if not run_holder or not journal_holder:
+                return False
+            request_id = str(record.get("request_id") or "")
+            matching = [item for item in journal_holder[0].list_all() if item["request_id"] == request_id]
+            return (len(matching) == 1
+                    and matching[0]["identity"] == run_holder[0]._journal_identity(symbol))
 
         venue = BrokerVenue(
             leg=None,
@@ -907,6 +1172,18 @@ class ScalperLiveAutonomousHost:
                 self._close_platform(platform)
                 raise ValueError("stored_starting_equity_invalid")
             starting_equity = stored_equity
+        if store_state is not None and not self.journal_path.is_file():
+            self._close_platform(platform)
+            raise ValueError("stored_mutation_journal_missing")
+        if store_state is None and self.journal_path.exists():
+            self._close_platform(platform)
+            raise ValueError("run_state_missing_with_journal")
+        try:
+            journal = MutationJournal(self.journal_path, create=store_state is None)
+        except Exception:
+            self._close_platform(platform)
+            raise
+        journal_holder.append(journal)
         run = AutonomousScalper(
             adapter=self.adapter, mode=self.mode, expected_account=expected,
             admitted=AdmittedStrategy(strategy=strategy, candidate_id=strategy.fingerprint,
@@ -930,24 +1207,58 @@ class ScalperLiveAutonomousHost:
             audit_log=self.audit_log, state_store=self.state_store,
             session_running=self._other_live_session_running,
             approval_active=self._lifecycle.approve_active,
-            expected_account_mode=self._bound_mode,
+            expected_account_mode=self._bound_mode, mutation_journal=journal,
         )
         if store_state is not None:
-            recovered = run.recover(state=store_state)
-            if not recovered.get("ok"):
+            # The normal recovery validator still checks format and every other
+            # identity before adopting the book; the query guard needs the
+            # declared run identity to locate its journal records first.
+            run.run_id = str(store_state.get("run_id") or "")
+        run_holder.append(run)
+        leg.scalper_ledger_identity = lambda: run._journal_identity(symbol)
+        venue.history_preview = lambda request_id: self._inspect_history_request(
+            run, journal, leg, expected=expected, symbol=symbol,
+            strategy_id=strategy_id, request_id=request_id)
+        if store_state is not None:
+            # The provider platform is constructed empty on every restart.
+            # Restore only the account/run-bound ledger committed atomically
+            # with its exact booking; never synthesize it from a broker echo.
+            try:
+                ledger_rows = [row for row in platform.repository.list_snapshots(kind="ax-scalper-live-ledger")
+                               if row.get("snapshot_id") == "ax-scalper-live-ledger:" + run.run_id]
+                if len(ledger_rows) > 1:
+                    raise ValueError("duplicate_scalper_ledger")
+                if ledger_rows:
+                    ledger_row = ledger_rows[0]
+                    if (ledger_row.get("identity") != run._journal_identity(symbol)
+                            or not isinstance(ledger_row.get("ledger"), Mapping)):
+                        raise ValueError("scalper_ledger_identity_mismatch")
+                    platform.portfolio.restore_snapshot(ledger_row["ledger"])
+                    leg.scalper_ledger_head = str(ledger_row.get("request_id") or "")
+                    if not leg.scalper_ledger_head:
+                        raise ValueError("scalper_ledger_head_missing")
+            except Exception:
+                journal.close()
+                self._close_platform(platform)
+                raise
+            recovered = run.recover(state=store_state, reconciliation_only=reconciliation_only)
+            if not recovered.get("ok") and not reconciliation_only:
+                journal.close()
                 self._close_platform(platform)
                 raise ValueError("exact_live_recovery_refused:" + str(recovered.get("recovery") or {}))
         else:
             try:
                 existing = list(self.adapter.positions() or ())
             except Exception as exc:
+                journal.close()
                 self._close_platform(platform)
                 raise ValueError("broker_positions_unreadable") from exc
             status = dict(self.adapter.status() or {})
             if existing or status.get("unresolved_orders") or status.get("unresolved_protection_modifications") or status.get("unattributed_orders"):
+                journal.close()
                 self._close_platform(platform)
                 raise ValueError("unattributed_broker_exposure_or_order_present")
-        self._platform, self._leg = platform, leg
+        self._platform, self._leg, self._journal = platform, leg, journal
         return run
 
     def _cycle(self) -> None:
@@ -992,6 +1303,7 @@ class ScalperLiveAutonomousHost:
                 positions = run.venue.position_details()
                 if not positions:
                     self._release_arm()
+                    self._release_flat_runtime()
         except Exception as exc:
             self._reason = str(exc) or type(exc).__name__
             if run.state == RUNNING:
@@ -1049,6 +1361,24 @@ class ScalperLiveAutonomousHost:
                        for path, digest in lifecycle.fingerprints.items())
         except Exception:
             return False
+
+    def _release_flat_runtime(self) -> None:
+        """Drop a stopped, flat owner only after its journal is known clear."""
+        run = self._runtime
+        if run is None or run.state != STOPPED or run.book.open_positions:
+            return
+        try:
+            if self._journal is not None and self._journal.unresolved():
+                return
+        except Exception:
+            return
+        self._close_platform(self._platform)
+        if self._journal is not None:
+            self._journal.close()
+        self._runtime = self._platform = self._leg = self._journal = None
+        if self._run_lock is not None:
+            self._run_lock.close()
+            self._run_lock = None
 
     def _release_arm(self) -> None:
         lifecycle = self._lifecycle

@@ -766,6 +766,7 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
         "ax-scalper-live-stop",
         "ax-scalper-live-reconcile",
         "ax-scalper-live-reconcile-close",
+        "ax-scalper-live-reconcile-request",
         # The one-shot DEMO execution test. It sends exactly one order, only to
         # an account MT5 itself reports as DEMO, only through the same live leg
         # a strategy order uses; it cannot close, cannot arm, cannot change the

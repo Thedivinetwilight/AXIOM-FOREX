@@ -665,17 +665,19 @@ class ForexPortfolio:
             gross = self.gross_exposure_account(at, bar)
             margin = self.margin_account(at, bar)
             correlation = self.correlation_group_exposures_account(at, bar)
+            currency_exposures = self.currency_exposures_account(at)
         except ValueError:
             if not allow_unmarked:
                 raise
             equity = gross = margin = None
             correlation = {}
+            currency_exposures = None
         return {
             "at": at,
             "account_currency": self.account.account_currency_code,
             "equity_account": equity,
             "cash_by_currency": dict(self.cash_by_currency),
-            "currency_exposures_account": self.currency_exposures_account(at),
+            "currency_exposures_account": currency_exposures,
             "correlation_group_exposures_account": correlation,
             "gross_exposure_account": gross,
             "margin_account": margin,

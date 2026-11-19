@@ -1099,21 +1099,18 @@ def test_adapter_sltp_unknown_is_not_resent_and_disarms(harness):
     assert new_request["reason"] == "mt5_unresolved_protection_modification_present"
     assert len(harness.fake.send_requests) == 1
 
-    # A later exact position read-back is the only reconciliation evidence; it
-    # clears the latch without sending again, after which explicit re-arming is
-    # still required.
+    # An exact echo does not identify the unknown SLTP request. Never clear
+    # the latch from a coincidental position state or send the request again.
     harness.fake.positions[0]["sl"] = 1.10000
     harness.fake.positions[0]["tp"] = 1.10500
-    armed = harness.adapter.arm_trading(
-        account_login=55500123,
-        server="Broker-Demo",
-        confirm="ENABLE LIVE TRADING 55500123",
-    )
-    assert armed["armed"] is True
-    assert harness.adapter.status()["unresolved_protection_modifications"] == []
-    assert harness.adapter._protection_modification_results[
-        "protection-timeout"
-    ][1]["state"] == "CONFIRMED"
+    with pytest.raises(MT5SubmitRefused) as still_blocked:
+        harness.adapter.arm_trading(
+            account_login=55500123,
+            server="Broker-Demo",
+            confirm="ENABLE LIVE TRADING 55500123",
+        )
+    assert still_blocked.value.reason == "mt5_unresolved_protection_modification_present"
+    assert harness.adapter.status()["unresolved_protection_modifications"] == ["protection-timeout"]
     assert len(harness.fake.send_requests) == 1
 
 
@@ -1971,6 +1968,102 @@ def test_connect_does_not_resolve_scalper_without_validated_run_context():
         assert repository.get_order("req-1") == original
         assert adapter._last_recovery[0].evidence == "explicit_exact_reconciliation_required"
         assert adapter.unresolved_request_ids() == ["req-1"]
+        assert not fake.send_requests
+    finally:
+        adapter.disconnect(reason="test")
+        repository.close()
+
+
+def test_unknown_sltp_response_with_matching_position_is_not_proof(harness):
+    _prepare_test_protection_position(harness)
+    harness.arm()
+    harness.fake.protection_script = [None]
+    # Simulate a price echo (including the possibility of an unrelated change)
+    # even though the synchronous MT5 result is missing.
+    harness.fake.on_send = lambda _request: harness.fake.positions[0].update(sl=1.10000, tp=1.10500)
+    result = _modify_test_protection(harness, request_id="unknown-but-matching")
+    assert result["state"] == "UNRESOLVED"
+    assert result["verified"] is False
+    assert harness.adapter.reconcile_protection_modifications()["unresolved"] == ["unknown-but-matching"]
+    assert len(harness.fake.send_requests) == 1
+
+
+def test_exact_scalper_position_identity_requires_unique_deal_link(harness):
+    harness.arm()
+    outcome = send_order(harness.adapter.terminal,
+        {"action": 1, "symbol": "EURUSD.pro", "type": 0, "volume": 0.10,
+         "price": 1.1002, "magic": harness.settings.magic, "sl": 1.09},
+        request_id="exact-identity", sent_at=AT)
+    # Order, deal, and position tickets are intentionally different.
+    harness.fake.positions[0]["ticket"] = 9101
+    harness.fake.positions[0]["identifier"] = 9201
+    assert harness.adapter.exact_entry_position_ticket(outcome, symbol="EURUSD.pro", side="BUY") == 0
+    deal = make_history_deal(ticket=8001, order=7001, position_id=9201,
+                             symbol="EURUSD.pro", side="BUY", entry=0, volume=0.1,
+                             price=1.1002, magic=harness.settings.magic, comment="broker", time=AT)
+    harness.fake.history_deals.append(deal)
+    assert harness.adapter.exact_entry_position_ticket(outcome, symbol="EURUSD.pro", side="BUY") == 9101
+    harness.fake.history_deals.append(dict(deal))
+    assert harness.adapter.exact_entry_position_ticket(outcome, symbol="EURUSD.pro", side="BUY") == 0
+    assert len(harness.fake.send_requests) == 1
+
+
+@pytest.mark.parametrize("field,value", [("type", None), ("type", 2), ("type", 3), ("entry", None)])
+def test_exact_scalper_entry_cannot_infer_missing_or_non_trade_deal_fields(harness, field, value):
+    harness.arm()
+    outcome = send_order(harness.adapter.terminal,
+        {"action": 1, "symbol": "EURUSD.pro", "type": 0, "volume": 0.10,
+         "price": 1.1002, "magic": harness.settings.magic, "sl": 1.09},
+        request_id="exact-invalid-field", sent_at=AT)
+    harness.fake.positions[0]["ticket"] = 9101
+    deal = make_history_deal(ticket=8001, order=7001, position_id=9101,
+                             symbol="EURUSD.pro", side="BUY", entry=0, volume=0.1,
+                             price=1.1002, magic=harness.settings.magic, comment="broker", time=AT)
+    if value is None:
+        del deal[field]
+    else:
+        deal[field] = value
+    harness.fake.history_deals.append(deal)
+    assert harness.adapter.exact_entry_position_ticket(outcome, symbol="EURUSD.pro", side="BUY") == 0
+    assert len(harness.fake.send_requests) == 1
+
+
+def test_exact_entry_rejects_missing_or_duplicate_position_identifier(harness):
+    harness.arm()
+    outcome = send_order(harness.adapter.terminal,
+        {"action": 1, "symbol": "EURUSD.pro", "type": 0, "volume": 0.10,
+         "price": 1.1002, "magic": harness.settings.magic, "sl": 1.09},
+        request_id="identifier-check", sent_at=AT)
+    position = harness.fake.positions[0]
+    position["ticket"], position["identifier"] = 9101, 9201
+    deal = make_history_deal(ticket=8001, order=7001, position_id=9201,
+                             symbol="EURUSD.pro", side="BUY", entry=0, volume=0.1,
+                             price=1.1002, magic=harness.settings.magic, comment="broker", time=AT)
+    harness.fake.history_deals.append(deal)
+    assert harness.adapter.exact_entry_position_ticket(outcome, symbol="EURUSD.pro", side="BUY") == 9101
+    position["identifier"] = 0
+    assert harness.adapter.exact_entry_position_ticket(outcome, symbol="EURUSD.pro", side="BUY") == 0
+    position["identifier"] = 9201
+    harness.fake.positions.append({**position, "ticket": 9102})
+    assert harness.adapter.exact_entry_position_ticket(outcome, symbol="EURUSD.pro", side="BUY") == 0
+    assert len(harness.fake.send_requests) == 1
+
+
+def test_scalper_close_history_uses_saved_position_identifier_not_ticket():
+    from axiom_forex.brokers.mt5.reconcile import reconcile_record
+    deal = make_history_deal(ticket=9001, order=7001, position_id=9201, symbol="EURUSD.pro",
+        side="SELL", entry=1, volume=0.1, price=1.1, magic=26081001, comment="req-1", time=AT)
+    fake = FakeMT5(history_deals=[deal])
+    repository = ForexRepository(":memory:")
+    adapter, _ = _frozen_clock_adapter(fake, repository)
+    record = _unresolved_record(order_ticket=7001, side="SELL", close_position_id="9101",
+        close_position_ticket=9101, close_position_identifier=9201,
+        strategy_id="ax-scalper-live:strategy")
+    try:
+        adapter.connect()
+        assert reconcile_record(adapter.terminal, record).resolved is True
+        assert not reconcile_record(adapter.terminal, {**record, "close_position_identifier": 9101}).resolved
+        assert not reconcile_record(adapter.terminal, {**record, "close_position_identifier": 0}).resolved
         assert not fake.send_requests
     finally:
         adapter.disconnect(reason="test")

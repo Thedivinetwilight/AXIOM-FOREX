@@ -958,3 +958,47 @@ def test_the_book_summary_never_reports_a_win_rate_from_no_trades():
     summary = instance.summary()
     assert summary["closed_trades"] == 0
     assert summary["win_rate"] is None
+
+
+def test_live_ambiguous_protection_echo_never_commits_or_resends():
+    class AmbiguousLiveVenue(PaperVenue):
+        mode = "LIVE"
+
+        def __init__(self):
+            super().__init__(cost=CONFIG.cost)
+            self.calls = 0
+
+        def modify_protection(self, *, ticket, stop_price, target_price, request_id=None):
+            self.calls += 1
+            super().modify_protection(ticket=ticket, stop_price=stop_price,
+                                      target_price=target_price, request_id=request_id)
+            return False  # Broker state changed, but transport outcome was unknown.
+
+    venue = AmbiguousLiveVenue()
+    instance = book(venue=venue)
+    open_through_venue(instance)
+    instance.set_protection_intent_hook(lambda _intent: True)
+    instance.set_protection_result_hook(lambda _result: True)
+    old = instance.get("1000")
+    result = instance.modify_protection(position_id="1000", stop_price=old.stop_price + Decimal("0.0001"),
+                                        target_price=old.target_price, now_ms=100,
+                                        request_id="unknown-protection")
+    assert result.kind == HOLD
+    assert instance.get("1000").stop_price == old.stop_price
+    assert instance.verify_protection()["missing"] == ["1000"]
+    assert instance.snapshot()["pending_protection_modifications"][0]["request_id"] == "unknown-protection"
+    instance.modify_protection(position_id="1000", stop_price=old.stop_price + Decimal("0.0001"),
+                               target_price=old.target_price, now_ms=101)
+    assert venue.calls == 1
+
+
+def test_venue_blocked_fill_is_not_reported_as_an_accepted_position():
+    class BlockedVenue(PaperVenue):
+        def submit(self, order, quote):
+            return Fill(request_id=order.request_id, status=BLOCKED,
+                        filled_lots=Decimal(0), requested_lots=order.lots, price=None,
+                        spread_points=Decimal(0), slippage_points=Decimal(0), latency_ms=0,
+                        ticket=None, reason="local_refusal", simulated=False)
+    result = execute(trader(BlockedVenue(cost=CONFIG.cost)))
+    assert result.status == BLOCKED and result.reasons == ("local_refusal",)
+    assert result.fill is not None and result.fill.status == BLOCKED

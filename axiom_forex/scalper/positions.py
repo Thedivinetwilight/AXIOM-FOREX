@@ -144,6 +144,7 @@ class ClosedTrade:
     holding_ms: int
     entry_request_id: str
     strategy_fingerprint: str = ""
+    close_request_id: str = ""
 
     @property
     def won(self) -> bool:
@@ -166,6 +167,7 @@ class ClosedTrade:
             "mae_points": str(round(self.mae_points, 2)),
             "holding_ms": self.holding_ms,
             "entry_request_id": self.entry_request_id,
+            "close_request_id": self.close_request_id,
             "strategy_fingerprint": self.strategy_fingerprint,
             "won": self.won,
             "costs_applied_by_accounting": True,
@@ -242,6 +244,8 @@ class PositionBook:
         self._protection_target_pending: dict[str, Decimal | None] = {}
         self._protection_request_ids: dict[str, str] = {}
         self._close_intent_hook: Callable[[Mapping[str, Any]], bool] | None = None
+        self._close_result_hook: Callable[[Mapping[str, Any]], bool] | None = None
+        self._protection_observation_hook: Callable[[Mapping[str, Any]], bool] | None = None
         self._protection_intent_hook: Callable[[Mapping[str, Any]], bool] | None = None
         self._protection_result_hook: Callable[[Mapping[str, Any]], bool] | None = None
 
@@ -278,6 +282,12 @@ class PositionBook:
         """Install a durable pre-submit barrier for live close attempts."""
 
         self._close_intent_hook = callback
+
+    def set_close_result_hook(self, callback: Callable[[Mapping[str, Any]], bool] | None) -> None:
+        self._close_result_hook = callback
+
+    def set_protection_observation_hook(self, callback: Callable[[Mapping[str, Any]], bool] | None) -> None:
+        self._protection_observation_hook = callback
 
     def set_protection_intent_hook(
         self, callback: Callable[[Mapping[str, Any]], bool] | None
@@ -541,6 +551,7 @@ class PositionBook:
                     mae_points=mae_points,
                     holding_ms=holding,
                     entry_request_id=str(row.get("entry_request_id") or ""),
+                    close_request_id=str(row.get("close_request_id") or ""),
                     strategy_fingerprint=str(row.get("strategy_fingerprint") or ""),
                 )
             )
@@ -962,22 +973,34 @@ class PositionBook:
             # allowed to cross the venue boundary.
             persisted = False
 
+        venue_confirmed = False
+        venue_error = ""
         if persisted:
             try:
-                self._venue.modify_protection(
+                venue_confirmed = self._venue.modify_protection(
                     ticket=position_id,
                     stop_price=requested_stop,
                     target_price=requested_target,
                     request_id=request_id,
-                )
-            except Exception:
-                pass
+                ) is True
+            except Exception as exc:
+                venue_error = type(exc).__name__
 
         try:
             observed_stop, observed_target = self._venue.protection(position_id)
         except Exception:
             observed_stop, observed_target = None, None
-        verified = persisted and self._protection_matches(
+        observation_saved = True
+        if persisted and callable(self._protection_observation_hook):
+            try:
+                observation_saved = bool(self._protection_observation_hook({
+                    **intent, "venue_confirmed": venue_confirmed, "venue_error": venue_error,
+                    "observed_stop": None if observed_stop is None else str(observed_stop),
+                    "observed_target": None if observed_target is None else str(observed_target),
+                }))
+            except Exception:
+                observation_saved = False
+        verified = persisted and observation_saved and (venue_confirmed or not live_venue) and self._protection_matches(
             observed_stop,
             observed_target,
             expected_stop=requested_stop,
@@ -1419,7 +1442,7 @@ class PositionBook:
             self._pending_closes[position.position_id] = dict(attempt)
             if self._close_intent_hook is not None:
                 try:
-                    intent_saved = bool(self._close_intent_hook(dict(attempt)))
+                    intent_saved = bool(self._close_intent_hook({"position_id": position.position_id, **dict(attempt)}))
                 except Exception:
                     intent_saved = False
                 if not intent_saved:
@@ -1455,6 +1478,17 @@ class PositionBook:
                 "the venue returned an unreadable close result; the position remains open pending reconciliation",
                 pending_close=attempt,
             )
+        if callable(self._close_result_hook):
+            try:
+                observation_saved = bool(self._close_result_hook({
+                    "position_id": position.position_id, **attempt, "fill": fill.audit_view()
+                }))
+            except Exception:
+                observation_saved = False
+            if not observation_saved:
+                return self._close_refused(position, now_ms, "close_result_not_durable",
+                    "The broker may have acted; preserve the exact request and reconcile it without resending.",
+                    pending_close=attempt)
         observed_request_id = str(fill.request_id or "")
         if (
             request_id
@@ -1579,6 +1613,7 @@ class PositionBook:
             mae_points=position.mae_points,
             holding_ms=max(0, now_ms - position.opened_at_ms),
             entry_request_id=position.entry_request_id,
+            close_request_id=str(self._pending_closes.get(position.position_id, {}).get("request_id") or ""),
             strategy_fingerprint=fingerprint,
         )
         self._closed.append(trade)
@@ -1642,6 +1677,12 @@ class PositionBook:
             reason=CLOSE_UNCONFIRMED,
             detail=detail,
         )
+
+    def _acknowledge_reconciled_close_refusal(self, position_id: str) -> None:
+        """Clear only the local latch after the caller verifies unchanged broker state."""
+        if (position_id not in self._pending_closes
+                and self._close_blockers.get(position_id) == "close_resolved_without_fill"):
+            self._close_blockers.pop(position_id, None)
 
     def resolve_pending_close(
         self, *, position_id: str, fill: Fill, now_ms: int
@@ -1787,7 +1828,10 @@ class PositionBook:
                 if position_id in self._protection_target_pending
                 else position.target_price
             )
-            ok = self._protection_matches(
+            # Read-back alone does not identify an ambiguous live mutation.
+            # Keep its original request latched until an exact receipt is
+            # reconciled by the recovery path. PAPER retains its simulation.
+            ok = not (has_pending and str(getattr(self._venue, "mode", "")).upper() == "LIVE") and self._protection_matches(
                 stop,
                 target,
                 expected_stop=expected_stop,
@@ -1814,6 +1858,29 @@ class PositionBook:
             "ok": not missing,
             "note": "broker read-back must match the managed stop and target within one broker point",
         }
+
+    def _apply_reconciled_protection(self, *, position_id: str, request_id: str,
+                                     accepted: bool, reason: str, now_ms: int) -> bool:
+        """Apply a separately verified exact receipt to the pending local book.
+
+        This is intentionally not a venue operation and sends nothing. The live
+        runner must first verify the journal, account and current broker state.
+        """
+        position = self._open.get(position_id)
+        if (position is None or self._protection_request_ids.get(position_id) != request_id
+                or position_id not in self._protection_pending):
+            return False
+        stop = self._protection_pending[position_id] if accepted else position.stop_price
+        target = self._protection_target_pending.get(position_id) if accepted else position.target_price
+        self._open[position_id] = replace(position, stop_price=stop, target_price=target,
+            protection_verified=True,
+            break_even_moved=position.break_even_moved or (accepted and reason == BREAK_EVEN),
+            trailing_active=position.trailing_active or (accepted and reason == TRAIL),
+            last_update_ms=int(now_ms))
+        self._protection_pending.pop(position_id, None)
+        self._protection_target_pending.pop(position_id, None)
+        self._protection_request_ids.pop(position_id, None)
+        return True
 
     def reconcile(self, *, venue_tickets: Iterable[str]) -> dict[str, Any]:
         tickets = set(venue_tickets)
