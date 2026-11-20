@@ -475,7 +475,12 @@ class MT5Terminal:
             raise MT5Error("mt5_status_unavailable", type(exc).__name__) from exc
         if terminal is None:
             code, text = self._last_error()
-        trade_mode = int(_field(account, "trade_mode", -1) or 0)
+        # DEMO is the integer zero. Missing, null, boolean or malformed
+        # broker fields must never be silently interpreted as that value.
+        raw_mode = _field(account, "trade_mode", None)
+        trade_mode = (
+            raw_mode if isinstance(raw_mode, int) and not isinstance(raw_mode, bool) else -1
+        )
         margin_mode = int(_field(account, "margin_mode", -1) or 0)
         return MT5TerminalStatus(
             connected=terminal is not None and account is not None,
