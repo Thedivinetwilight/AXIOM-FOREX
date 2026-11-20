@@ -35,7 +35,7 @@ never opens the handoff.
    installed as described in the [workstation setup](SCALPER_AUTOPILOT_SETUP.md)
    and the main `README.md`.
 2. Open MetaTrader 5 from your broker, sign in **inside the terminal**, and leave
-   it running. AXIOM reuses that session and never asks for your MT5 password.
+   it running. Connect reuses that session without asking for a password; Setup's separate explicit account switch accepts an optional one-time password.
 3. Keep `mt5_settings.local.json` beside the settings file. Live execution needs
    `"mode": "TRADING_ENABLED"`; `OBSERVE_ONLY` leaves LIVE blocked. Broker-side
    stop distances are still configured from `/live`.

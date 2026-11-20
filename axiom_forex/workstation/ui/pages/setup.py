@@ -129,13 +129,37 @@ def _safety(view: Mapping[str, Any]) -> str:
             ("Trading controls", fmt.text(", ".join(safety.get("trading_controls") or ()) or "none")),
             ("Execution modes", fmt.text(", ".join(safety.get("execution_modes") or ()) or "none")),
             ("Credential storage", chip("no", "ok") if safety.get("stores_credentials") is False else chip("check", "warn")),
-            ("Asks for the MT5 password", chip("never", "ok") if safety.get("asks_for_mt5_password") is False else chip("check", "warn")),
+            ("Optional one-time password", chip("switch account only", "muted")),
             (
                 "Refuses unless set",
                 fmt.text(", ".join(key.replace("_", " ") for key in off) or "nothing"),
             ),
         ]
     ) + "<ul class='check-list'>" + "".join(f"<li>{escape(str(line))}</li>" for line in lines) + "</ul>"
+
+
+def _switch_account(ctx: Any) -> str:
+    account = dict(ctx.wizard.session.account() or {})
+    details = facts([
+        ("Broker-reported type", fmt.text(account.get("mode") or "unknown")),
+        ("Server", fmt.text(account.get("server") or "unknown")),
+        ("Login", fmt.text(account.get("masked_login") or "unknown")),
+        ("Currency", fmt.text(account.get("currency") or "unknown")),
+        ("Fingerprint", fmt.text(account.get("fingerprint") or "unknown")),
+    ])
+    fields = (
+        "<label>MT5 login <input name='switch_login' inputmode='numeric' autocomplete='off' required></label>"
+        "<label>Confirm login <input name='switch_login_confirm' inputmode='numeric' autocomplete='off' required></label>"
+        "<label>Broker server <input name='switch_server' autocomplete='off' required></label>"
+        "<label>Confirm server <input name='switch_server_confirm' autocomplete='off' required></label>"
+        "<label>Password (optional, one time) <input type='password' name='switch_password' autocomplete='off'></label>"
+    )
+    return section("Switch account", details +
+        "<p>Only this explicit action logs in on the already connected terminal. "
+        "Leave the password blank to use the terminal's saved credential. It is not stored by AXIOM. "
+        "Stop all runners and resolve broker positions, orders and recoveries first. "
+        "No order is sent or changed; review and explicit Arm and Start are required again.</p>" +
+        action_form("switch-account", ctx.action_nonce, "Switch account", fields=fields), id="switch-account")
 
 
 def render_setup(ctx: Any) -> str:
@@ -173,7 +197,7 @@ def render_setup(ctx: Any) -> str:
         + "".join(_step(step, ctx, index) for index, step in enumerate(steps))
         + "</ol>"
     )
-    main = body + section(
+    main = body + _switch_account(ctx) + section(
         "The steps",
         steps_html,
         note="The highlighted control is the one that moves the step you are on.",

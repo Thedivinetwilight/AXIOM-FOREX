@@ -1,11 +1,10 @@
 """Local workstation for AXIOM-FOREX: paper and live, chosen explicitly.
 
 The workstation reads what the paper platform and an already-signed-in
-MetaTrader 5 terminal report, and it owns exactly one trading-shaped control: the
-execution mode.  Paper simulates every fill locally; live routes an approved
-order through the MetaTrader 5 execution path.  There is still no order entry, no
-arming, no account switching, and no automatic reconnection anywhere in it, and
-the mode switch itself never places an order.
+MetaTrader 5 terminal report. Paper simulates fills locally; guarded live
+execution requires explicit review and arming. Setup offers an explicit account
+switch on the shared terminal. Nothing reconnects or switches automatically, and
+the account and execution-mode switches themselves never place an order.
 
 Modules
 -------

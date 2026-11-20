@@ -180,7 +180,7 @@ def _primary_controls(ctx: Any, model: Mapping[str, Any], account: Mapping[str, 
     if not ctx.terminal.connected:
         label = "Start the simulator preview (not MT5)" if ctx.terminal.simulated else "Connect to MetaTrader 5"
         parts.append(action_form("connect", ctx.action_nonce, label, tone="primary"))
-        notes.append((label, "reads the terminal you are already signed in to; it never logs in."))
+        notes.append((label, "reads the terminal you are already signed in to; Connect never logs in."))
     else:
         parts.append(
             "<button class='btn' type='button' disabled aria-disabled='true'>"

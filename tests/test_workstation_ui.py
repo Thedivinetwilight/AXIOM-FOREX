@@ -638,6 +638,7 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
     assert POST_ACTIONS == {
         "connect",
         "disconnect",
+        "switch-account",
         "acknowledge-sign-in",
         "confirm",
         "unconfirm",
@@ -786,7 +787,7 @@ def test_the_post_allowlist_is_exactly_the_setup_mode_and_live_actions():
     }
 
 
-def test_no_post_action_can_trade_arm_or_switch_accounts():
+def test_no_generic_post_action_can_trade_arm_or_select_accounts():
     forbidden = {
         "orders",
         "order",
@@ -800,7 +801,6 @@ def test_no_post_action_can_trade_arm_or_switch_accounts():
         "close",
         "modify",
         "cancel",
-        "switch-account",
         "select-account",
         "login",
         "logout",
@@ -964,7 +964,7 @@ def test_account_mode_comes_from_the_terminal_with_a_matching_tone(mode, expecte
 
     html = account_page.render_account(ctx)
     assert f"Detected account mode: {mode}" in html
-    assert "never switches account" in html
+    assert "explicit switch is available on Setup" in html
 
 
 def test_an_unconfirmed_mode_is_marked_unconfirmed():

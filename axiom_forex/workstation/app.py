@@ -30,17 +30,16 @@ The surface is deliberately tiny:
     Changing modes is not a trade, and nothing a preflight reports can take the
     switch away; those checks refuse orders, with their reasons, further down.
 
-Anything else is a 405/404. There is no JSON API, no generic order endpoint, no
-account switch, and no background timer.  The LIVE arming actions exist only on
+Anything else is a 405/404. There is no JSON API, no generic order endpoint,
+and no background timer.  The LIVE arming actions exist only on
 the /live route and are guarded by the live workflow and the exact typed-intent
 bridge; they are not reachable from any paper page.  A request renders the
 current state and then the process waits. Nothing polls, nothing reconnects, and
 nothing changes the mode or the account except an explicit click on the page
 that offers it.
 
-Credentials never enter this process: the server has no field for a password,
-refuses form posts that carry one, and the terminal session it observes was
-authenticated by the user inside MetaTrader 5.
+An optional password is accepted only by the explicit account-switch action,
+used once for the official MT5 login call, and never persisted or logged.
 """
 
 from __future__ import annotations
@@ -136,6 +135,7 @@ POST_ACTIONS: frozenset[str] = frozenset(
     {
         "connect",
         "disconnect",
+        "switch-account",
         "acknowledge-sign-in",
         "confirm",
         "unconfirm",
@@ -301,6 +301,7 @@ def _feedback_tone(status: int, message: str) -> str:
 CREDENTIAL_FIELDS: frozenset[str] = frozenset(
     {
         "password",
+        "switch_password",
         "passwd",
         "pwd",
         "pass",
@@ -1483,29 +1484,94 @@ class WorkstationApp:
     def act(self, action: str, form: Mapping[str, list[str]]) -> tuple[int, str, str]:
         """Run one action. Returns ``(status, redirect_path, message)``."""
 
-        if action not in POST_ACTIONS:
-            return HTTPStatus.NOT_FOUND, "/", "unknown action"
-        if str((form.get("nonce") or [""])[0]) != self.nonce:
-            return HTTPStatus.FORBIDDEN, "/", "this form is stale; reload the page and try again"
-        if any(name in form for name in CREDENTIAL_FIELDS):
-            return (
-                HTTPStatus.BAD_REQUEST,
-                "/setup",
-                "this form must not carry credentials; AXIOM never accepts an MT5 password",
-            )
+        # Extract and erase the one-shot one_time before validation, dispatch,
+        # feedback or any error handling. Never put it in logs or app state.
+        one_time = None
+        secret_values = None
+        if action == "switch-account":
+            secret_values = form.get("switch_password")
+            if isinstance(secret_values, (list, tuple)) and len(secret_values) == 1:
+                one_time = str(secret_values[0])
+            if isinstance(form, dict):
+                form.pop("switch_password", None)
+            if isinstance(secret_values, list):
+                secret_values.clear()
+        try:
+            if action not in POST_ACTIONS:
+                return HTTPStatus.NOT_FOUND, "/", "unknown action"
+            if str((form.get("nonce") or [""])[0]) != self.nonce:
+                return HTTPStatus.FORBIDDEN, "/", "this form is stale; reload the page and try again"
+            if any(name in form for name in CREDENTIAL_FIELDS):
+                return HTTPStatus.BAD_REQUEST, "/setup", "this form must not carry credentials"
+            if action == "switch-account" and (secret_values is not None and one_time is None):
+                return HTTPStatus.BAD_REQUEST, "/setup", "Supply at most one optional password."
 
-        with self.lock:
-            try:
-                result = self._dispatch(action, form)
-            except Exception as exc:  # never leak a stack trace into the page
-                self._log(f"action {action} failed: {type(exc).__name__}")
-                result = (
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    "/",
-                    f"{action} failed ({type(exc).__name__})",
-                )
-            self._record_feedback(action, result)
-            return result
+            with self.lock:
+                try:
+                    result = (self._switch_account(form, one_time) if action == "switch-account"
+                              else self._dispatch(action, form))
+                except Exception as exc:  # never leak a stack trace into the page
+                    self._log(f"action {action} failed: {type(exc).__name__}")
+                    result = (HTTPStatus.INTERNAL_SERVER_ERROR, "/setup" if action == "switch-account" else "/",
+                              "The action failed; no account identity was verified." if action == "switch-account"
+                              else f"{action} failed ({type(exc).__name__})")
+                if one_time:
+                    result = (result[0], result[1], result[2].replace(one_time, "<redacted>"))
+                self._record_feedback(action, result)
+                return result
+        finally:
+            one_time = None
+
+    def _switch_account(self, form: Mapping[str, list[str]], one_time: str | None) -> tuple[int, str, str]:
+        allowed = {"nonce", "switch_login", "switch_login_confirm", "switch_server", "switch_server_confirm"}
+        if any(k not in allowed for k in form) or any(not isinstance(v, (list, tuple)) or len(v) != 1 for v in form.values()):
+            return HTTPStatus.BAD_REQUEST, "/setup", "The switch form is invalid. No login was attempted."
+        login = str((form.get("switch_login") or [""])[0])
+        login_confirm = str((form.get("switch_login_confirm") or [""])[0])
+        server = str((form.get("switch_server") or [""])[0])
+        server_confirm = str((form.get("switch_server_confirm") or [""])[0])
+        if (not login.isascii() or not login.isdigit() or login.startswith("0") or len(login) > 20
+                or (login.isascii() and login.isdigit() and int(login) >= 2**64)
+                or login != login_confirm or not server or server != server.strip()
+                or server != server_confirm or len(server) > 200 or any(ord(c) < 32 or ord(c) == 127 for c in server)
+                or (one_time is not None and len(one_time) > 1024)):
+            return HTTPStatus.BAD_REQUEST, "/setup", "Enter and confirm the same valid MT5 login and server. No login was attempted."
+        controller = getattr(self.live, "scalper_autonomous", None) if self.live is not None else None
+        if controller is None or self.wizard.simulated:
+            return HTTPStatus.CONFLICT, "/setup", "The shared live MT5 adapter is unavailable. Connect it first; the simulator cannot switch accounts."
+        # The app lock serializes all UI start actions with these checks. Each
+        # worker must report an idle state; unreadable is never treated as idle.
+        try:
+            if self.runner is not None:
+                view = dict(self.runner.view())
+                if view.get("available") is False or view.get("running"):
+                    return HTTPStatus.CONFLICT, "/setup", "Stop the paper runner and wait until its status is readable before switching."
+            if self.autopilot is not None:
+                view = dict(self.autopilot.status())
+                if view.get("running") or str(view.get("state") or "") in {"RUNNING", "PREPARING", "STARTING", "PAUSED"}:
+                    return HTTPStatus.CONFLICT, "/setup", "Stop the paper autopilot before switching."
+            if self.catalog is not None and dict(self.catalog.paper_view()).get("running"):
+                return HTTPStatus.CONFLICT, "/setup", "Stop the catalog paper session before switching."
+            if self.scalper_paper is not None:
+                view = dict(self.scalper_paper.status())
+                if str(view.get("state") or "") in {"RUNNING", "STARTING", "PAUSED"} or view.get("recovery"):
+                    return HTTPStatus.CONFLICT, "/setup", "Stop AX-SCALPER PAPER and resolve its recovery before switching."
+        except Exception:
+            return HTTPStatus.CONFLICT, "/setup", "A runner's state is unreadable. Stop it and verify its status before switching."
+        # Even if the owner is slow or the login result is ambiguous, the old
+        # configuration must not remain confirmed while an attempt is in flight.
+        self.wizard.reset_confirmation()
+        outcome = controller.switch_account(login=int(login), server=server, password=one_time or None)
+        reason = str(outcome.get("reason") or "account_switch_refused")
+        if outcome.get("ok"):
+            # Preflight must see the verified in-process target, not the old
+            # immutable settings object; the user's settings file is untouched.
+            self.settings = self.wizard.session.source.settings
+        message = str(outcome.get("message") or "The switch could not be verified.")
+        if reason == "live_runner_action_in_progress":
+            message += " The actual account is unavailable while the request is in progress; verify the terminal and do not retry blindly."
+        self._log("account switch: " + ("verified" if outcome.get("ok") else reason))
+        return (HTTPStatus.SEE_OTHER if outcome.get("ok") else HTTPStatus.CONFLICT, "/setup", message)
 
     def _record_feedback(
         self, action: str, result: tuple[int, str, str]
@@ -2793,6 +2859,7 @@ class _Handler(BaseHTTPRequestHandler):
         # Declared as form fields only; parse_qs keeps every value as a list and
         # never coerces types.
         form = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True, strict_parsing=False)
+        raw = b""  # do not retain the request body while the action is running
         status, redirect_path, message = self.app.act(action, form)
         if status in (HTTPStatus.SEE_OTHER, HTTPStatus.FOUND):
             # Message travels in a header-free way: we redirect to a page that

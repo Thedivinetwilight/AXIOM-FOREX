@@ -91,7 +91,7 @@ class Step:
 STEP_WHY: dict[str, str] = {
     "connect": (
         "AXIOM reads the MetaTrader 5 terminal you already have open and signed in. "
-        "It never logs in, and it never switches the account."
+        "Connect never logs in or switches accounts. Setup offers a separate explicit switch."
     ),
     "symbols": (
         "Only symbols the terminal reports both currency legs for can be used. "

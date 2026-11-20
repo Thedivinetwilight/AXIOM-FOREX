@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import wraps
+from threading import RLock
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
@@ -182,6 +184,15 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _account_serialized(method):
+    """Keep account changes and broker mutation/authorization mutually exclusive."""
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self.account_switch_lock:
+            return method(self, *args, **kwargs)
+    return guarded
+
+
 class MT5TradingAdapter:
     """Metadata, market data, and live execution over one MT5 terminal."""
 
@@ -200,6 +211,8 @@ class MT5TradingAdapter:
         terminal_factory: Callable[[], Any] | None = None,
     ):
         self.settings = settings
+        self.account_switch_lock = RLock()
+        self._switch_identity_verified = True
         self.password_store = password_store
         self.repository = repository
         self.audit_log = audit_log
@@ -215,6 +228,7 @@ class MT5TradingAdapter:
         #: the account is whichever one the terminal has selected.
         self._armed = False
         self._armed_fingerprint: str | None = None
+        self._armed_identity: tuple[int, str, int] | None = None
         self._account_validated: dict[str, Any] | None = None
         self.account_profile_check = account_profile_check
         #: When supplied, :meth:`connect` adopts the terminal this callable
@@ -257,6 +271,7 @@ class MT5TradingAdapter:
     def armed(self) -> bool:
         return self._armed
 
+    @_account_serialized
     def connect(self) -> MT5TerminalStatus:
         """Open the terminal and run recovery.  Never sends an order."""
 
@@ -285,6 +300,7 @@ class MT5TradingAdapter:
             del login_attempt
         return self._finish_connect(terminal, status)
 
+    @_account_serialized
     def connect_adopted(self) -> MT5TerminalStatus:
         """Attach only to the workstation's already-connected terminal.
 
@@ -348,6 +364,7 @@ class MT5TradingAdapter:
         self.recover()
         return status
 
+    @_account_serialized
     def disconnect(self, *, reason: str = "operator") -> None:
         self.disarm(reason=reason)
         if self._terminal is not None:
@@ -368,7 +385,8 @@ class MT5TradingAdapter:
             return False
         if self._status is None:
             return False
-        return self.account_fingerprint() == self._armed_fingerprint
+        return (self.account_fingerprint() == self._armed_fingerprint
+                and self._armed_identity == self._account_identity)
 
     @property
     def account_mode(self) -> str:
@@ -499,6 +517,7 @@ class MT5TradingAdapter:
         )
         return report
 
+    @_account_serialized
     def _ensure_account_current(self) -> dict[str, Any]:
         """Re-read the terminal account; revalidate it if it changed.
 
@@ -570,6 +589,7 @@ class MT5TradingAdapter:
             )
         return self.validate_account_terms()
 
+    @_account_serialized
     def refresh_account(self) -> dict[str, Any]:
         """Public alias: detect an account switch, revalidate, and report.
 
@@ -610,6 +630,7 @@ class MT5TradingAdapter:
     def account_changes(self) -> tuple[dict[str, Any], ...]:
         return self._account_changes
 
+    @_account_serialized
     def status(self) -> dict[str, Any]:
         return {
             "broker_id": BROKER_ID,
@@ -630,7 +651,8 @@ class MT5TradingAdapter:
             "redacted_account": self.redacted_account(),
             "account_state": self.account_state(),
             "trading_enabled_setting": self.settings.trading_enabled,
-            "execution_authorised": self._armed and self.settings.trading_enabled,
+            "execution_authorised": self._armed and self.settings.trading_enabled and self._switch_identity_verified,
+            "switch_identity_verified": self._switch_identity_verified,
             "password": self.password_store.status(),
             "unresolved_orders": self.unresolved_request_ids(),
             "unresolved_protection_modifications": self.unresolved_protection_modification_ids(),
@@ -645,6 +667,7 @@ class MT5TradingAdapter:
 
     # -- arming ---------------------------------------------------------
 
+    @_account_serialized
     def arm_trading(
         self,
         *,
@@ -673,6 +696,8 @@ class MT5TradingAdapter:
 
         if not self.connected:
             raise MT5SubmitRefused("mt5_not_connected")
+        if not self._switch_identity_verified:
+            raise MT5SubmitRefused("mt5_switched_identity_unverified")
         if not self.settings.trading_enabled:
             raise MT5TradingNotAuthorised(
                 "mt5_trading_not_enabled", f"mode={self.settings.mode_label()}"
@@ -725,6 +750,7 @@ class MT5TradingAdapter:
             )
         self._armed = True
         self._armed_fingerprint = self.account_fingerprint()
+        self._armed_identity = self._account_identity
         self._audit(
             "MT5_TRADING_ARMED",
             allowed=True,
@@ -734,12 +760,14 @@ class MT5TradingAdapter:
         )
         return self.status()
 
+    @_account_serialized
     def disarm(self, *, reason: str = "operator") -> None:
         was_armed = self._armed
         # Clear authorization before logging: an audit sink failure must never
         # leave a session armed after a safety-triggered disarm request.
         self._armed = False
         self._armed_fingerprint = None
+        self._armed_identity = None
         if was_armed:
             self._audit("MT5_TRADING_DISARMED", allowed=False, reason=reason, live=False)
 
@@ -1007,6 +1035,7 @@ class MT5TradingAdapter:
             if str(result.get("state") or "").upper() == "UNRESOLVED"
         )
 
+    @_account_serialized
     def reconcile_protection_modifications(self) -> dict[str, list[str]]:
         """Join a positive SL/TP receipt with the same position's later read-back."""
 
@@ -1104,6 +1133,7 @@ class MT5TradingAdapter:
         remaining = self.unresolved_protection_modification_ids()
         return {"resolved": sorted(resolved), "unresolved": remaining}
 
+    @_account_serialized
     def recover(self) -> tuple[RecoveryResult, ...]:
         """Read in-doubt orders only under their complete durable account binding."""
 
@@ -1185,6 +1215,7 @@ class MT5TradingAdapter:
             live=True,
         )
 
+    @_account_serialized
     def reconcile(
         self, ledger_positions: Sequence[Mapping[str, Any]] = ()
     ) -> PositionReconciliation:
@@ -1271,6 +1302,7 @@ class MT5TradingAdapter:
             and abs(observed_target - target_price) <= point
         )
 
+    @_account_serialized
     def modify_position_protection(
         self,
         *,
@@ -1377,12 +1409,14 @@ class MT5TradingAdapter:
             self.settings.assert_trading_allowed()
             if not self.connected or self._status is None:
                 raise MT5SubmitRefused("mt5_not_connected")
+            if not self._switch_identity_verified:
+                raise MT5SubmitRefused("mt5_switched_identity_unverified")
             if not self._armed:
                 raise MT5SubmitRefused("mt5_trading_not_armed")
 
             account_validation = self._ensure_account_current()
             fingerprint = self.account_fingerprint()
-            if self._armed_fingerprint and fingerprint != self._armed_fingerprint:
+            if self._armed_identity != self._account_identity or (self._armed_fingerprint and fingerprint != self._armed_fingerprint):
                 raise MT5SubmitRefused(
                     "mt5_account_changed_since_confirmation", fingerprint or "unknown"
                 )
@@ -1811,6 +1845,7 @@ class MT5TradingAdapter:
 
     # -- submission -----------------------------------------------------
 
+    @_account_serialized
     def submit(
         self,
         decision: GateDecision,
@@ -2087,6 +2122,8 @@ class MT5TradingAdapter:
         self.settings.assert_trading_allowed()
         if not self.connected or self._status is None:
             raise MT5SubmitRefused("mt5_not_connected")
+        if not self._switch_identity_verified:
+            raise MT5SubmitRefused("mt5_switched_identity_unverified")
         if not self._armed:
             raise MT5SubmitRefused("mt5_trading_not_armed")
 
@@ -2096,7 +2133,7 @@ class MT5TradingAdapter:
         account_validation = self._ensure_account_current()
         # Arming was confirmed for one account.  A different one may not receive
         # the order, however valid it is on its own terms.
-        if self._armed_fingerprint and self.account_fingerprint() != self._armed_fingerprint:
+        if self._armed_identity != self._account_identity or (self._armed_fingerprint and self.account_fingerprint() != self._armed_fingerprint):
             raise MT5SubmitRefused(
                 "mt5_account_changed_since_confirmation",
                 self.account_fingerprint() or "unknown",

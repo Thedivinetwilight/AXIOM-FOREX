@@ -83,7 +83,7 @@ CONNECT_HINTS: dict[str, str] = {
         "MetaTrader 5 is signed in to a different account than the one "
         "mt5_settings.local.json names. Sign in to the configured account inside "
         "MetaTrader 5, then press Connect again. AXIOM will not accept a different "
-        "account, and it never switches accounts for you."
+        "account. Connect never switches accounts."
     ),
     "mt5_server_mismatch": (
         "The terminal is connected to a different broker server than the one "
@@ -274,6 +274,7 @@ class MT5ObservationSource:
             },
             "account": {
                 "login": "<redacted>",
+                "masked_login": ("***" + str(status.account_login)[-4:]) if status.account_login > 0 else "unknown",
                 "fingerprint": account_fingerprint(status.account_login),
                 "server": status.account_server,
                 "company": status.company,

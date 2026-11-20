@@ -281,8 +281,7 @@ class SetupWizard:
             "is_demo": detected == "DEMO" and bool(account.get("sample", False)) is False,
             "is_real": detected == "REAL" and bool(account.get("sample", False)) is False,
             "note": (
-                "Detected from the terminal. AXIOM never switches accounts; if this is "
-                "not the account you meant, change it inside MetaTrader 5 and connect again."
+                "Detected from the terminal. Use the explicit Switch account action on Setup to choose another account."
             ),
         }
 
@@ -354,8 +353,7 @@ class SetupWizard:
                 title="Sign in inside MetaTrader 5",
                 summary=(
                     "Open the terminal, log in to the account you want to observe, and "
-                    "leave it running. AXIOM reuses that session and never asks for, "
-                    "stores, or displays your MT5 password."
+                    "leave it running. AXIOM reuses that session. An optional one-time password is accepted only for an explicit account switch."
                 ),
                 status=COMPLETE if signed_in else (ACTION_REQUIRED if env.ready_to_connect else PENDING),
                 detail=(
@@ -627,10 +625,10 @@ def safety_statement() -> dict[str, Any]:
         "execution_modes": ["PAPER", "LIVE"],
         "order_entry": False,
         "arming": False,
-        "account_switching": False,
+        "account_switching": True,
         "auto_reconnect": False,
         "stores_credentials": False,
-        "asks_for_mt5_password": False,
+        "asks_for_mt5_password": True,
         "market_access_token": False,
         "lines": (
             "Paper mode simulates every fill locally and never sends an order.",
@@ -639,8 +637,8 @@ def safety_statement() -> dict[str, Any]:
             "In either mode an order must still pass the pre-trade gate, come from an "
             "approved active strategy, and match the account exactly.",
             "Connects only when you press Connect; disconnects only when you press Disconnect.",
-            "Never switches accounts and never logs in to MetaTrader 5 for you.",
-            "Never asks for, stores, or displays your MT5 password.",
+            "Changes the MT5 account only after the explicit Switch account action and its safety checks.",
+            "An optional password is used once for that action and is never saved or displayed by AXIOM.",
             "There is no order-entry form, arming control, or cancel/modify control here.",
         ),
     }

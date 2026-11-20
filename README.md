@@ -59,15 +59,14 @@ The `app/` package remains the strict M1 fail-closed safety/domain kernel. `axio
 
 ## MetaTrader 5
 
-[MetaTrader 5 integration](docs/MT5_INTEGRATION.md) replaces the generic external-broker placeholder with an adapter over the official `MetaTrader5` Python package and an installed terminal: terminal/account status, symbol discovery and broker-term cross-checks, bid/ask ticks and tick-built two-sided bars, account currency/leverage/margin reads, positions, order checks, market-deal submission, order/deal history, reconciliation, and restart recovery. The only secret is the terminal password, stored in the operating-system credential vault and entered/replaced/cleared locally with `python -m axiom_forex.cli mt5 --mt5-action set-password`; no token field exists because MT5 has no separate API token. Live submission is off by default, requires an explicit local `TRADING_ENABLED` mode plus an in-process `arm_trading()` call naming the account, an allowed pre-trade decision, and an approved active strategy; nothing is sent on connect or at start, the durable order record is written before `order_send`, and an unknown outcome disarms trading and blocks further orders until reconciliation resolves it. A bounded session cycle (`python -m axiom_forex.cli mt5-session`) connects to the already-running terminal, detects and audits the account mode, and runs at most one gate-approved order. You choose the account in MT5: the default `SELECTED_ACCOUNT` policy routes to whichever account the terminal has selected, demo or real, with the same adapter and workflow (`--mt5-account-mode-policy DEMO_ONLY` is an explicit opt-in for a demo-only run). Account mode is reported and audited but never substitutes for the separate trading-enabled setting; a terminal account switch keeps that setting, drops the previous account's cached state, and revalidates the new account's currency, leverage, margin mode, symbols, and execution terms before routing. Order records and reconciliation are account-scoped, so no account's positions, reservations, risk state, or unresolved orders are reused by another. Reports redact the account identifier and never show balances, equity, or credentials. All tests use a fake `MetaTrader5` module: no real terminal, account, or credential is touched.
+[MetaTrader 5 integration](docs/MT5_INTEGRATION.md) replaces the generic external-broker placeholder with an adapter over the official `MetaTrader5` Python package and an installed terminal: terminal/account status, symbol discovery and broker-term cross-checks, bid/ask ticks and tick-built two-sided bars, account currency/leverage/margin reads, positions, order checks, market-deal submission, order/deal history, reconciliation, and restart recovery. For the CLI, the terminal password may be stored in the operating-system credential vault and entered/replaced/cleared locally with `python -m axiom_forex.cli mt5 --mt5-action set-password`; no token field exists because MT5 has no separate API token. Live submission is off by default, requires an explicit local `TRADING_ENABLED` mode plus an in-process `arm_trading()` call naming the account, an allowed pre-trade decision, and an approved active strategy; nothing is sent on connect or at start, the durable order record is written before `order_send`, and an unknown outcome disarms trading and blocks further orders until reconciliation resolves it. A bounded session cycle (`python -m axiom_forex.cli mt5-session`) connects to the already-running terminal, detects and audits the account mode, and runs at most one gate-approved order. You choose the account in MT5: the default `SELECTED_ACCOUNT` policy routes to whichever account the terminal has selected, demo or real, with the same adapter and workflow (`--mt5-account-mode-policy DEMO_ONLY` is an explicit opt-in for a demo-only run). Account mode is reported and audited but never substitutes for the separate trading-enabled setting; a terminal account switch keeps that setting, drops the previous account's cached state, and revalidates the new account's currency, leverage, margin mode, symbols, and execution terms before routing. Order records and reconciliation are account-scoped, so no account's positions, reservations, risk state, or unresolved orders are reused by another. Reports redact the account identifier and never show balances, equity, or credentials. All tests use a fake `MetaTrader5` module: no real terminal, account, or credential is touched.
 
 ## Windows workstation (paper and live execution)
 
 `axiom_forex/workstation/` is a local interface over the paper platform and an
-already-signed-in MetaTrader 5 terminal. It owns exactly one trading-shaped control — the
-**execution mode** — and nothing else: no order entry form, no arming control, no
-cancel/modify, no account switching, no broker-settings changes, no automatic reconnection,
-and no background polling.
+already-signed-in MetaTrader 5 terminal. Execution mode, the guarded LIVE arming
+workflow and the Setup account switch are separate explicit controls. There is no
+generic order-entry form, automatic account switch, or automatic reconnection.
 
 | Mode | What it does |
 | --- | --- |
@@ -77,9 +76,9 @@ and no background polling.
 Execution mode and account type are different things, and the interface never conflates
 them. The **mode** (paper/live) is your decision and is remembered in
 `execution_mode.local.json` beside your settings file. The **account type** (demo/real) and the
-**server** are read from the terminal and shown prominently — AXIOM never switches MT5
-accounts, never logs in for you, and never picks a broker. If you want a different account,
-sign in to it inside MetaTrader 5 and press Disconnect, then Connect.
+**server** are read from the terminal and shown prominently. To choose a different account,
+use the explicit **Switch account** control in Setup after connecting; AXIOM never switches or
+logs in automatically. See [the workstation guide](docs/SCALPER_LIVE_WORKSTATION.md#switch-account-on-setup).
 
 ### Switching mode — the exact flow
 
@@ -213,8 +212,8 @@ mode switch. Two commonly need real work:
 
 2. Install MetaTrader 5 **from your broker**, open it once, and sign in to the account you
    want to use — demo or real, your choice. Leave the terminal running and signed in. AXIOM
-   reuses that session: it never asks for, stores, or displays your MT5 password, and it never
-   logs in for you.
+   reuses that session. Connect does not ask for a password or log in. The optional Setup
+   Switch account action can use a one-time password, which AXIOM does not save or display.
 
 3. Create `mt5_settings.local.json` in the repository root (already git-ignored). It holds no
    credential — only which terminal to attach to:
@@ -307,7 +306,7 @@ observation*, because only then has AXIOM actually read an account.
 1. **Check this machine** — Windows, Python ≥ 3.11, the `MetaTrader5` package, the terminal, and
    your settings file are detected; anything missing is listed with the exact command to fix it.
 2. **Sign in inside MetaTrader 5** — you do this in the terminal, then tick the confirmation.
-   AXIOM never asks for the password.
+   Connect does not ask for the password. Setup's separate Switch account action accepts an optional one-time password.
 3. **Connect to the terminal** — an explicit click. It attaches to the running terminal and
    reads status, account terms, Market Watch symbols, and the live ticks paper mode is priced
    from. Connecting never enables trading; the execution mode is a separate decision.
@@ -372,9 +371,9 @@ The guided page adds no new kind of action: it posts `connect`, `symbols`,
 `catalog-evaluate`, `catalog-paper-start` and `catalog-paper-stop`, all of which already
 existed and all of which refuse without the page's per-process nonce. The whole set of state
 changes is declared in `POST_ACTIONS` in `axiom_forex/workstation/app.py` and pinned by the
-test suite. There is no endpoint that can place an order, arm trading, switch accounts, or
-change broker settings; the mode actions never connect, submit, or arm anything, the paper
-actions only simulate fills, and there is no JSON API.
+test suite. The separate Setup account-switch action logs in only on explicit request; the
+LIVE workflow has its own guarded arming actions. The mode actions never connect,
+submit, or arm anything; paper actions only simulate fills. There is no JSON API.
 
 ## Paper strategy runner (real-time, paper fills only)
 

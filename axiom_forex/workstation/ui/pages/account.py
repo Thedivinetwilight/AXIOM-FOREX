@@ -71,7 +71,7 @@ def _account_section(ctx: Any) -> str:
                     "launch on the Windows machine without --simulate to read the real terminal."
                     if sample
                     else "Connect to the terminal first. AXIOM reads the account that MetaTrader 5 "
-                    "already has selected; it never switches or logs in."
+                    "already has selected. Switch account is available explicitly on Setup."
                 ),
                 actions=action_form(
                     "connect",
@@ -82,8 +82,7 @@ def _account_section(ctx: Any) -> str:
                 + button_link("/setup", "Setup steps", small=True),
             ),
             tools=chip("Not connected", "muted"),
-            note="What the terminal already has selected. AXIOM reads it; it never switches "
-            "account, logs in, or changes the mode.",
+            note="The account is read from the terminal. An explicit switch is available on Setup.",
             id="account",
         )
 
@@ -133,8 +132,7 @@ def _account_section(ctx: Any) -> str:
         tools=(
             chip(str(mode.get("detected") or "UNKNOWN"), "simulated" if sample else ("ok" if mode.get("is_demo") else "warn"), dot=True)
         ),
-        note="What the terminal already has selected. AXIOM reads it; it never switches account, "
-        "logs in, or changes the mode.",
+        note="The account is read from the terminal. An explicit switch is available on Setup.",
         id="account",
     )
 

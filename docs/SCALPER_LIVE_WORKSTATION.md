@@ -19,7 +19,33 @@ claim.
 A previous report described the terminal account as DEMO; its current state has
 not been checked during this change. Sign in to the
 intended DEMO or REAL account in MetaTrader 5 yourself and confirm the server and
-account before using the runner. AXIOM does not switch accounts.
+account before using the runner. Setup also offers an explicit account switch as described below.
+
+## Switch account on Setup
+
+Connect first. Stop all PAPER and LIVE runners and reconcile every unresolved
+order, close, protection change and saved run. The switch is refused if the
+current account has broker positions or pending orders, or if any check is
+unreadable. Nothing is closed, cancelled or modified by the switch.
+
+On **Setup → Switch account**, enter the login and server twice. Optionally enter
+an MT5 password for this one request; leave it blank to use credentials saved by
+the terminal. The workstation does not save, log, audit or redisplay it. The
+same shared terminal calls the official `MetaTrader5.login` once; neither launch
+nor Connect automatically logs into a different account. Only broker-confirmed
+DEMO or REAL identities are supported. If login or independent readback is
+ambiguous, the response shows the actual account when readable and Arm/Start
+remain blocked. Verify the terminal and retry explicitly; do not assume a failed
+response means MT5 remained on the old account.
+
+The action clears prior account confirmation, Arm and exact-plan approval.
+Review the displayed account, confirm LIVE mode again if needed, then separately
+review, Arm and Start. The original run and journal remain in place; new accounts
+have separate state paths. Existing `mt5_settings.local.json` is not rewritten:
+the selected login/server are remembered only for this process. On a restart,
+Connect still requires the account named by that file; sign in to that configured
+account in MT5 first, then use Switch account again. Any exact-account scalper
+configuration must also be reviewed for the chosen account.
 
 **Do not use this build for autonomous real-money trading.** The recovery path
 has fake-terminal tests, not independent verification against your terminal or

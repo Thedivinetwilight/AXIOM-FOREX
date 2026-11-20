@@ -50,6 +50,7 @@ results/*
 # Local lock files and signed PAPER admission artifacts (contain broker-derived data)
 *.paper.lock
 *.local.json.owner.lock
+*.local.json.account-scoping
 scalper_evidence/
 
 # Local MT5 configuration (never contains the password; the password lives in the OS vault)

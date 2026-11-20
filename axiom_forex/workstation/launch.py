@@ -1145,7 +1145,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.paper_runner_source}, candidate={args.paper_runner_candidate}"
         )
         print("             it never sends an order and never arms live execution")
-    print("  It never reconnects and never accepts an MT5 password.")
+    print("  It never reconnects. Setup accepts an optional one-time password only for explicit account switching.")
     print("  Connecting happens only when you press Connect in the browser;")
     print("  switching execution mode never places an order.")
     print("")

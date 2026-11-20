@@ -962,3 +962,21 @@ def test_view_never_prepares_or_releases_an_owner_thread_stack(world):
     assert live.session is session_before
     assert view["session_running"] is False
     assert any(item["reason"] == "planning_stack_only" for item in view["blockers"])
+
+
+def test_account_switch_epoch_revokes_older_signed_approval(world):
+    raw = bound_payload(world, intent_id='after-account-switch')
+    bridge = world['bridge']
+    registered = bridge.register(raw)
+    assert registered['ok']
+    write_exact_approval(world, raw, registered['plan_fingerprint'])
+    reviewed = bridge.review(raw['intent_id'], reviewed=True, phrase=REVIEW_PHRASE,
+                             account_confirmation=world['account'])
+    assert reviewed['ok']
+    world['harness'].repository.save_snapshot('axiom-account-switch-approval-epoch', 'MT5_ACCOUNT_SWITCH_EPOCH',
+                                              {'kind': 'MT5_ACCOUNT_SWITCH_EPOCH', 'at': START.isoformat()})
+    result = bridge.approve(raw['intent_id'], plan_fingerprint_value=registered['plan_fingerprint'],
+                            phrase=APPROVAL_PHRASE, account_confirmation=world['account'])
+    assert not result['ok']
+    assert result['reason'] == 'signed_approval_predates_account_switch'
+    assert not world['harness'].fake.send_requests

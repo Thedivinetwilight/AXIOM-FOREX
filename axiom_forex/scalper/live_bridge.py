@@ -906,6 +906,21 @@ class ScalperLiveIntentBridge:
             )
             if not approval.valid:
                 return {}, f"signed_approval_invalid:{approval.reason}"
+            # A verified account-switch attempt revokes even a still-valid signed
+            # approval. A new independently signed review must postdate it.
+            try:
+                epoch = self.repository.get_snapshot("axiom-account-switch-approval-epoch")
+                if epoch is not None:
+                    if not isinstance(epoch, Mapping) or epoch.get("kind") != "MT5_ACCOUNT_SWITCH_EPOCH":
+                        raise ValueError("invalid_switch_epoch")
+                    instant = datetime.fromisoformat(str(epoch.get("at") or "").replace("Z", "+00:00"))
+                    reviewed = datetime.fromisoformat(approval.reviewed_at.replace("Z", "+00:00"))
+                    if instant.tzinfo is None or reviewed.tzinfo is None:
+                        raise ValueError("invalid_switch_epoch_timezone")
+                    if reviewed <= instant:
+                        return {}, "signed_approval_predates_account_switch"
+            except Exception:
+                return {}, "account_switch_approval_epoch_unavailable"
         return {"intent": intent, "evidence": verdict, "identity": identity,
                 "plan": plan, "values": values}, ""
 

@@ -468,7 +468,7 @@ def prerequisite_help(report: EnvironmentReport) -> list[dict[str, str]]:
                 "detail": (
                     "mt5_settings.local.json must never contain a password or token. "
                     "Delete that key; AXIOM uses the terminal's own signed-in "
-                    "session and never asks you for the MT5 password."
+                    "session for Connect; Setup's separate switch action accepts an optional one-time password."
                 ),
             }
         )

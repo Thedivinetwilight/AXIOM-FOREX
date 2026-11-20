@@ -99,6 +99,8 @@ class ScalperLiveAutonomousHost:
         self.admission_host = admission_host
         self.live_workflow = live_workflow
         self.settings_path = Path(settings_path)
+        from ..scalper.account_run_state import AccountRunStates
+        self.account_states = AccountRunStates(state_path)
         self.state_store = JsonRunStateStore(state_path)
         self.journal_path = self.state_store.path.with_name(self.state_store.path.name + ".mutations.sqlite3")
         self._journal: MutationJournal | None = None
@@ -211,6 +213,231 @@ class ScalperLiveAutonomousHost:
             "account_confirmation": str(account_confirmation or "").strip(),
         })
 
+    def switch_account(self, *, login: int, server: str, password: str | None = None) -> dict[str, Any]:
+        """Enqueue an explicit switch on the same owner thread as the live run."""
+        return self._call("switch_account", {"login": login, "server": server, "password": password}, timeout=120.0)
+
+    def _bind_account_state(self) -> None:
+        if self._runtime is not None:
+            return
+        if not self.account_states.marker.exists():
+            return
+        terminal = self.session.source.terminal
+        if terminal is None or terminal is not self.adapter.terminal:
+            raise ValueError("shared_terminal_unavailable")
+        identity = self.account_states.identity(terminal.status())
+        path = self.account_states.path_for(identity)
+        self.state_store = JsonRunStateStore(path)
+        self.journal_path = path.with_name(path.name + ".mutations.sqlite3")
+
+    def _invalidate_proposal_approvals(self) -> None:
+        from ..scalper.live_bridge import KIND
+        repo = self.adapter.repository
+        snapshots = repo.list_snapshots(kind=KIND)
+        with repo.transaction():
+            repo.save_snapshot("axiom-account-switch-approval-epoch", "MT5_ACCOUNT_SWITCH_EPOCH",
+                               {"kind": "MT5_ACCOUNT_SWITCH_EPOCH", "at": datetime.now(UTC).isoformat()})
+            for state in snapshots:
+                if not isinstance(state, dict) or not state.get("snapshot_id"):
+                    raise ValueError("proposal_identity_unavailable")
+                state = dict(state)
+                for key in ("operator_review", "operator_approval", "signed_approval", "armed"):
+                    state[key] = {}
+                if str(state.get("status") or "") in {"RECEIVED", "REVIEWED", "APPROVED", "ARMED", "BLOCKED"}:
+                    state["status"] = "BLOCKED"
+                repo.save_snapshot(str(state["snapshot_id"]), KIND, state)
+
+    @staticmethod
+    def _account_description(status: Any) -> str:
+        if status is None or not status.connected or not status.terminal_connected:
+            return "Actual account is unavailable; verify the terminal before proceeding."
+        from ..brokers.mt5.identity import account_fingerprint
+        digits = str(status.account_login)
+        masked = "***" + digits[-4:] if status.account_login > 0 else "unknown"
+        return (f"Actual account: {status.account_mode}, server {status.account_server or 'unknown'}, "
+                f"login {masked}, currency {status.account_currency or 'unknown'}, "
+                f"fingerprint {account_fingerprint(status.account_login) if status.account_login > 0 else 'unknown'}.")
+
+    def _do_switch_account(self, *, login: int, server: str, password: str | None) -> dict[str, Any]:
+        """No login until all ownership, broker and recovery checks pass."""
+        from dataclasses import replace
+        from ..brokers.mt5.reconcile import MT5_FINAL_STATES
+        from ..brokers.mt5.identity import account_fingerprint
+        lock = None
+        attempted = False
+        actual = None
+        adapter = self.adapter
+        if (isinstance(login, bool) or not isinstance(login, int) or not 0 < login < 2**64
+                or not isinstance(server, str) or not server or server != server.strip()
+                or len(server) > 200 or any(ord(c) < 32 or ord(c) == 127 for c in server)
+                or (password is not None and (not isinstance(password, str) or len(password) > 1024))):
+            return self._refuse("switch_target_invalid", "Enter and confirm a valid MT5 login and server before switching.")
+        # A stopped legacy LIVE host can retain an owner thread and adapter
+        # references. Do not query that thread while holding the adapter lock:
+        # its view may itself need the lock. Require the session to be closed.
+        if getattr(self.live_workflow, "session", None) is not None:
+            return self._refuse("live_session_open", "Stop and close the other LIVE session. If it remains open, Disconnect and reconnect the current account before switching.")
+        bridge = getattr(self.live_workflow, "scalper_bridge", None)
+        loader = getattr(bridge, "stack_loader", None) if bridge is not None else None
+        if bridge is not None and (getattr(bridge, "_stack_prepared", False)
+                                   or getattr(loader, "_owner_host", None) is not None):
+            return self._refuse("one_shot_session_open", "An exact-plan one-shot owner is still open. Stop and reconcile it, then close or restart the workstation before switching.")
+        try:
+            with adapter.account_switch_lock:
+                terminal = self.session.source.terminal
+                if terminal is None or not self.session.connected or terminal is not adapter.terminal:
+                    return self._refuse("shared_terminal_unavailable", "Connect the shared MT5 observation and trading adapter first; no login was attempted.")
+                if (self._runtime is not None or self._run_lock is not None
+                        or self._state in {RUNNING, PAUSED, RECOVERY_REQUIRED}
+                        or getattr(self.live_workflow, "session", None) is not None
+                        or (bridge is not None and (getattr(bridge, "_stack_prepared", False)
+                            or getattr(loader, "_owner_host", None) is not None))):
+                    return self._refuse("runner_active", "Stop all live sessions and reconcile their positions and requests before switching.")
+                try:
+                    lock = RunLock(str(self.account_states.legacy) + ".owner.lock")
+                except Exception:
+                    return self._refuse("runner_owned_elsewhere", "Another process owns the live run. Stop it and finish reconciliation before switching.")
+                try:
+                    before = terminal.status()
+                    actual = before
+                    before_identity = self.account_states.identity(before)
+                    self.session.refresh()
+                    adapter.refresh_account()
+                    observed = dict(self.session.account() or {})
+                    if (adapter._status is None or self.account_states.identity(adapter._status) != before_identity
+                            or observed.get("fingerprint") != account_fingerprint(before.account_login)
+                            or observed.get("server") != before.account_server
+                            or observed.get("mode") != before.account_mode
+                            or observed.get("currency") != before.account_currency
+                            or observed.get("mode_confirmed") is not True):
+                        raise ValueError("current_account_disagreement")
+                except Exception:
+                    adapter._switch_identity_verified = False
+                    adapter.disarm(reason="account_identity_unverified")
+                    self.mode.confirmed = False
+                    self.mode.session_account = ""
+                    return self._refuse("current_account_unverified", "The current shared account could not be independently verified. " + self._account_description(actual) + " Verify the terminal before retrying; Arm and Start remain blocked.")
+                try:
+                    self.account_states.assert_all_resolved()
+                except Exception:
+                    return self._refuse("saved_recovery_unresolved", "A saved account run or mutation journal is active, unresolved, missing, or unreadable. Preserve the files and reconcile that exact run before switching.")
+                if adapter.positions():
+                    return self._refuse("broker_positions_open", "Broker positions are open. Manage or close them independently, then reconcile before switching; this action closes nothing.")
+                orders = terminal.module.orders_get()
+                if orders is None:
+                    raise ValueError("broker_orders_unavailable")
+                if orders:
+                    return self._refuse("broker_orders_open", "Broker orders are open. Resolve them in the broker terminal and reconcile before switching; nothing was cancelled.")
+                records = adapter.repository.list_orders()
+                if not isinstance(records, list):
+                    raise ValueError("order_history_unavailable")
+                if any(not isinstance(r, Mapping) or (str(r.get("broker_id") or "").lower() == "mt5_terminal" and str(r.get("state") or "").upper() not in MT5_FINAL_STATES) for r in records):
+                    return self._refuse("orders_unresolved", "Reconcile all unresolved MT5 orders and closes before switching; do not resend them.")
+                if adapter.unresolved_protection_modification_ids():
+                    return self._refuse("protection_unresolved", "Reconcile the unresolved protection changes before switching.")
+                if self.account_states.identity(terminal.status()) != self.account_states.identity(before):
+                    raise ValueError("account_changed_during_checks")
+                # Discard any read-only one-shot planning platform built for
+                # the old account; it must not be reused on the new account.
+                if loader is not None:
+                    try:
+                        loader.release()
+                        if getattr(loader, "_planning_platform", None) is not None or getattr(loader, "_owner_host", None) is not None:
+                            raise ValueError("one_shot_stack_not_released")
+                    except Exception:
+                        return self._refuse("one_shot_stack_unavailable", "The old account's planning stack could not be safely closed. Preserve its state and restart the workstation before switching.")
+                try:
+                    self.account_states.enable(before_identity)
+                    self.account_states.path_for(before_identity)  # verify marker and legacy binding before login
+                except Exception:
+                    return self._refuse("account_scope_unavailable", "The saved run cannot be safely bound to the current account. Preserve the files, connect the account that owns the legacy run, and reconcile it before switching.")
+                # Invalidate authority and approvals *before* any login; failure
+                # cannot leave stale authorization attached to an unknown account.
+                adapter._switch_identity_verified = False
+                adapter.disarm(reason="explicit_account_switch")
+                self._release_arm()
+                self.live_workflow.disarm(reason="explicit_account_switch")
+                # Keep the selected PAPER/LIVE mode, but LIVE authority never
+                # survives a switch. A fresh explicit mode confirmation is required.
+                self.mode.confirmed = False
+                self.mode.confirmed_at = None
+                self.mode.session_account = ""
+                self.mode.session_account_at = None
+                self._invalidate_proposal_approvals()
+                self._candidate_id = self._strategy_id = ""
+                self._admitted = self._expected = self._bound_mode = None
+                self._state, self._reason = STOPPED, "account_switch"
+                adapter._fingerprint_cache = ""
+                adapter._account_identity = None
+                adapter._status = adapter._terms = None
+                adapter._symbol_cache.clear()
+                adapter._account_validated = None
+                adapter._last_recovery = ()
+                adapter._protection_modification_results.clear()
+                self._last_result = {}
+                self._last_tick = {}
+                self.session.snapshot_data = {}
+                attempted = True
+                kwargs = {"server": server, "timeout": int(terminal.settings.timeout_ms)}
+                if password:
+                    kwargs["password"] = password
+                try:
+                    success = terminal.module.login(login, **kwargs) is True
+                except Exception:
+                    success = False
+                finally:
+                    kwargs.pop("password", None)
+                    del password
+                try:
+                    actual = terminal.status()
+                    self.session.refresh()
+                    adapter.refresh_account()
+                    observed = dict(self.session.account() or {})
+                    adapter_status = adapter._status
+                    ident = self.account_states.identity(actual)
+                    if not (success and actual.account_login == login and actual.account_server == server
+                            and adapter_status is not None and self.account_states.identity(adapter_status) == ident
+                            and observed.get("fingerprint") == account_fingerprint(login)
+                            and observed.get("server") == server and observed.get("currency") == actual.account_currency
+                            and observed.get("mode") == actual.account_mode and observed.get("mode_confirmed") is True):
+                        raise ValueError("account_identity_disagreement")
+                    # The target cannot be queried before login. An unexpected
+                    # target exposure means an ambiguous outcome, not a rollback.
+                    target_orders = terminal.module.orders_get()
+                    if target_orders is None:
+                        return {"ok": False, "attempted": True, "reason": "target_orders_unreadable",
+                                "message": self._account_description(actual) + " Target broker orders could not be read. Verify them before retrying; Arm and Start remain blocked."}
+                    if target_orders or adapter.positions():
+                        return {"ok": False, "attempted": True, "reason": "target_exposure_open",
+                                "message": self._account_description(actual) + " The target has broker positions or orders. Resolve them independently and reconcile before retrying; Arm and Start remain blocked. Nothing was closed or cancelled."}
+                    self._bind_account_state()
+                    if self.account_states.identity(terminal.status()) != ident:
+                        raise ValueError("account_changed_during_state_bind")
+                    # In-memory only. The settings file and credentials are untouched.
+                    terminal.settings = replace(terminal.settings, account_login=login, server=server)
+                    self.session.source.settings = replace(self.session.source.settings, account_login=login, server=server)
+                    adapter.settings = replace(adapter.settings, account_login=login, server=server)
+                    adapter._switch_identity_verified = True
+                    return {"ok": True, "attempted": True, "reason": "account_switched",
+                            "message": self._account_description(actual) + " Review the account and explicitly select LIVE, Arm and Start again. No order was sent."}
+                except Exception:
+                    # Report a fresh observation when possible, but never turn it
+                    # into authority after any false/ambiguous login or read.
+                    try:
+                        actual = terminal.status()
+                    except Exception:
+                        actual = None
+                    return {"ok": False, "attempted": True, "reason": "account_switch_unverified",
+                            "message": "The login or account verification failed or was ambiguous. " + self._account_description(actual) + " Arm and Start are blocked; verify the terminal and explicitly retry. No order was sent."}
+        except Exception:
+            return {"ok": False, "attempted": attempted, "reason": "account_switch_blocked",
+                    "message": ("Switch blocked: a broker, ownership, approval or saved recovery check could not be verified. "
+                                "Keep all records, stop runners, and reconcile before retrying. No order was sent. "
+                                + (self._account_description(actual) if attempted or not adapter._switch_identity_verified else ""))}
+        finally:
+            if lock is not None:
+                lock.close()
+
     def stop(self) -> dict[str, Any]:
         return self._call("stop", {})
 
@@ -259,6 +486,8 @@ class ScalperLiveAutonomousHost:
                 operation, payload, reply = task
                 with reply.lock:
                     if reply.cancelled:
+                        if operation == "switch_account":
+                            payload.clear()
                         reply.ready.set()
                         continue
                     reply.started = True
@@ -270,6 +499,8 @@ class ScalperLiveAutonomousHost:
                 except BaseException as exc:
                     reply.error = exc
                 finally:
+                    if operation == "switch_account":
+                        payload.clear()
                     with reply.lock:
                         reply.ready.set()
             else:
@@ -279,6 +510,12 @@ class ScalperLiveAutonomousHost:
                     self._reason = f"runner_cycle_failed:{type(exc).__name__}"
 
     def _do_view(self) -> dict[str, Any]:
+        if self._runtime is None and self.account_states.marker.exists():
+            try:
+                self._bind_account_state()
+            except Exception:
+                return {"ok": False, "reason": "account_run_state_unavailable",
+                        "message": "Account-specific run state is unavailable; preserve files and do not arm."}
         run_view = self._runtime.status() if self._runtime is not None else {}
         preview = self._configuration_review()
         adapter_status = self._adapter_status()
@@ -506,6 +743,10 @@ class ScalperLiveAutonomousHost:
 
     def _do_arm(self, *, candidate_id: str, confirmation: str,
                 account_confirmation: str) -> dict[str, Any]:
+        try:
+            self._bind_account_state()
+        except Exception:
+            return self._refuse("account_run_state_unavailable", "The account-specific run state could not be verified. Preserve all state files and resolve recovery before arming.")
         if confirmation != ARM_PHRASE:
             return self._refuse("arm_confirmation_mismatch", f"Type {ARM_PHRASE!r} exactly. No trading permission was changed.")
         if self._state in {RUNNING, PAUSED, RECOVERY_REQUIRED}:
@@ -740,6 +981,11 @@ class ScalperLiveAutonomousHost:
 
     def _prepare_recovery_runtime(self) -> dict[str, Any]:
         """Build a non-arming run from saved identities; never reconnect or send."""
+        if self._runtime is None:
+            try:
+                self._bind_account_state()
+            except Exception:
+                return self._refuse("account_run_state_unavailable", "The account-specific recovery state could not be verified. Preserve every saved run.")
         if self._runtime is not None:
             run = self._runtime
             if run.state in {RUNNING, ARMED} and not run._reconciliation_only:
@@ -1057,7 +1303,9 @@ class ScalperLiveAutonomousHost:
                        reconciliation_only: bool = False) -> AutonomousScalper:
         if self._run_lock is not None:
             raise ValueError("live_run_owner_already_exists")
-        lock = RunLock(str(self.state_store.path) + ".owner.lock")
+        # A single owner across all account-scoped runs, also compatible with
+        # the original legacy owner lock held by earlier workstation versions.
+        lock = RunLock(str(self.account_states.legacy) + ".owner.lock")
         self._run_lock = lock
         try:
             return self._build_runtime_owned(expected=expected, strategy=strategy,
@@ -1339,7 +1587,10 @@ class ScalperLiveAutonomousHost:
             return False
         try:
             view = dict(session.view() or {})
-            return bool(view.get("running") or view.get("next_signal_sends_real_order"))
+            return bool(view.get("available") is False or view.get("running")
+                        or view.get("next_signal_sends_real_order")
+                        or str(view.get("state") or "").upper() in {
+                            "RUNNING", "STARTING", "PREPARING", "PAUSED", "RECOVERY_REQUIRED", "UNAVAILABLE"})
         except Exception:
             return True
 

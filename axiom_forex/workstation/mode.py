@@ -8,7 +8,7 @@ Two independent ideas are kept apart on purpose:
 
 ``account mode`` (DEMO / REAL)
     *what* the selected account is.  It is read from the terminal, never set
-    here, and AXIOM never switches it.
+    here; Setup offers a separate explicit account-switch action.
 
 The rules this module enforces:
 
